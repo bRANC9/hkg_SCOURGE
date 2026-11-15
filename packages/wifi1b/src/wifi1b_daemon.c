@@ -5700,6 +5700,36 @@ static int shutdown_sequence(void)
     return shutdown_rc;
 }
 
+/* Bring up the USB ECM link to the Pi when it is connected.  The head unit's
+ * MICOM gates usbnet behind a "secure console" flag; clear it and preload the
+ * drivers.  The runtime udev rule only runs when usb0 appears, so this is a
+ * no-op when no Pi is attached. */
+static void usbnet_bootstrap(void)
+{
+#ifndef WIFI_TEST
+    int fd = open("/sys/module/micom/parameters/secure_console", O_WRONLY);
+    if (fd >= 0) {
+        (void)write(fd, "0\n", 2);
+        close(fd);
+    }
+    (void)system("modprobe usbnet 2>/dev/null; modprobe cdc_ether 2>/dev/null");
+
+    const char *rule =
+        "ACTION==\"add\", SUBSYSTEM==\"net\", KERNEL==\"usb0\", "
+        "RUN+=\"/bin/sh -c 'ifconfig usb0 10.55.0.2 netmask 255.255.255.0 up; "
+        "iptables -C INPUT -i usb0 -p tcp --dport 2222 -j ACCEPT 2>/dev/null || "
+        "iptables -I INPUT -i usb0 -p tcp --dport 2222 -j ACCEPT'\"\n";
+    (void)mkdir("/run/udev/rules.d", 0755);
+    int rf = open("/run/udev/rules.d/99-opi-usb0.rules",
+                  O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (rf >= 0) {
+        (void)write(rf, rule, strlen(rule));
+        close(rf);
+    }
+    (void)system("udevadm control --reload-rules 2>/dev/null");
+#endif
+}
+
 int main(int argc, char **argv)
 {
 #ifdef WIFI_TEST
@@ -5742,6 +5772,7 @@ int main(int argc, char **argv)
         mkdir(APP_DIR, 0755);
         return w2_dhcpd_run() ? 0 : 1;
     }
+    if (!one_shot) usbnet_bootstrap();
 
     /* One-shot CLI mode: no side effects, no daemon state, stderr logging.
      * Pure queries (--status, --choose-port) must not create directories,

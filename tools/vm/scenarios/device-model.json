@@ -1,0 +1,1 @@
+{"name":"device-model","description":"Vendor-kernel device-model regression: QEMU Q35 host bridge, ICH9 LPC/SATA, SDHCI root block and no virtio devices. Substrate only, not the captured BXT hardware.","requires":[],"checks":["device-host","device-sdhci","device-lpc-sata","device-rootfs","device-no-virtio","device-model"],"blockers":{},"requires_mode":"vendor"}

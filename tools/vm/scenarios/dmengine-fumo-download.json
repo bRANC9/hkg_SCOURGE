@@ -1,0 +1,26 @@
+{
+  "name": "dmengine-fumo-download",
+  "description": "Mode C FUMO download: after the authenticated SyncML handshake the mock serves an OMA Download Descriptor; the OEM confirmation command code 10 (DMC_REQ_DL_OK) lets the real dmengine fetch the described DP object (184-byte object: 132-byte DP body with component/update tables and payload, plus a 52-byte lab HMAC trailer). The engine posts 900 Success to the descriptor installNotifyURI and logs DL session complete and advances FUMO state 30 -> 40 (and to 50 in this run). The DP is a structural lab fixture and no install or update-success claim is made.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-ready",
+    "fumo-http-post",
+    "fumo-response",
+    "fumo-syncml",
+    "fumo-trigger",
+    "fumo-command",
+    "fumo-server-auth",
+    "fumo-dd",
+    "fumo-confirm",
+    "fumo-download",
+    "fumo-notify",
+    "fumo-dl-complete",
+    "fumo-state",
+    "fumo-no-production",
+    "dmengine-fumo-download"
+  ],
+  "blockers": {}
+}

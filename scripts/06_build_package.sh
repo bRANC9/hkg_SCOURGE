@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # 06_build_package.sh — build the post-root normal-USB update packages.
 #
-#   package_second  — stock USB wrapper; the six stubs live in the rootfs
+#   package_second  — stock USB wrapper; the eleven stubs + SMACK flag live in the rootfs
 #   package_wrapper — patched USB wrapper + the same rootfs
 #
-# WIP: this whole flow (custom firmware via the patched updater) is under
-# active car validation — see docs/08-postroot-updates.md.
+# Car-confirmed 2026-11-15 (unsigned normal-USB update); see
+# docs/08-postroot-updates.md and docs/17-usb-update-confirmed.md.
 #
 # The .lge.upgrade.xml stays stock. The .ver rootfs row 341174 is patched;
 # the wrapper variant also patches row 341142. The .ver is padded to the
@@ -77,7 +77,7 @@ wrapper_sha256=$(sha256sum "$out/AppUpgrade" | cut -d' ' -f1)
 ver_size=$(stat -c%s "$out/$VER_FILE")
 ver_sha256=$(sha256sum "$out/$VER_FILE" | cut -d' ' -f1)
 message_sha256=$(sha256sum "$SCOURGE_ROOT/config/message.txt" | cut -d' ' -f1)
-note=normal USB install; six stubs baked into the rootfs; .lge.upgrade.xml is stock
+note=normal USB install; eleven stubs + SMACK permissive flag baked into the rootfs; .lge.upgrade.xml is stock
 EOF
 
     echo "== MANIFEST.sha256"

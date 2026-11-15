@@ -1,0 +1,33 @@
+{
+  "name": "dmengine-fumo-update-invalid-result",
+  "description": "Mode C combined FUMO invalid result: after DownloadAndUpdate and the update handoff, the lab OEM handler reports result 0. The engine remaps it to UNDEFINED(409), reports the failure through a DM session and returns to idle without success state 90. The result is lab-supplied; no physical install is claimed.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-ready",
+    "fumo-http-post",
+    "fumo-response",
+    "fumo-syncml",
+    "fumo-trigger",
+    "fumo-command",
+    "fumo-server-auth",
+    "fumo-dd",
+    "fumo-confirm",
+    "fumo-download",
+    "fumo-dl-complete",
+    "fumo-state",
+    "fumo-combined-command",
+    "fumo-update-progressing",
+    "fumo-update-handoff",
+    "fumo-update-result-sent",
+    "fumo-update-result-accepted",
+    "fumo-update-invalid-remap",
+    "fumo-update-failure",
+    "fumo-update-result-reported",
+    "fumo-no-production",
+    "dmengine-fumo-update-invalid-result"
+  ],
+  "blockers": {}
+}

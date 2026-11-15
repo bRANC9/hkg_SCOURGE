@@ -1,0 +1,23 @@
+{
+  "name": "dmclient-fota-events",
+  "description": "Research AppDMClient fota callback: run the updater-launch path, call sendEventToDMClientFromAppUpgrade on /fotaInterface and require the real SysV queue commands 0x28/0x29/0x2a from the running dmengine. Not an HTTP update, credential path or stock-manager test.",
+  "requires": [
+    "usb",
+    "tools"
+  ],
+  "checks": [
+    "dmclient-usb",
+    "dmclient-standby",
+    "updater-exec",
+    "updater-alive",
+    "fota-command-28",
+    "fota-command-29",
+    "fota-command-2a",
+    "fota-callback"
+  ],
+  "blockers": {
+    "conformance": [
+      "Unmodified AppDMClient graphics/manager and genuine credentials are unresolved."
+    ]
+  }
+}

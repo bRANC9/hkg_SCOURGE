@@ -4,8 +4,9 @@
 # build_all.sh — full stage-1 build: patched rootfs -> verify -> packages ->
 # vanilla TOCTOU image -> preflight.
 #
-# Requires: 00_fetch_third_party.sh, 00_env.sh and 01_stage_inputs.sh done
-# (nudl download or user-provided package staged + gated).
+# Requires: 00_fetch_third_party.sh, 00_env.sh, 01_stage_inputs.sh and
+# 02_decrypt_rootfs.sh done (nudl download or user-provided package staged,
+# gated and decrypted).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 source "$HERE/lib.sh"

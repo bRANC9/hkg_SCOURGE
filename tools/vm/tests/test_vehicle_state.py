@@ -17,7 +17,9 @@ class VehicleStateTests(unittest.TestCase):
                          {'vehicle-ready', 'vehicle-decode', 'vehicle-clamp',
                           'vehicle-range-guard', 'vehicle-frame-limit',
                           'vehicle-unknown-method', 'vehicle-bulk',
-                          'vehicle-reset', 'vehicle-state-smoke'})
+                          'vehicle-vendor-decode', 'vehicle-vendor-range',
+                          'vehicle-vendor-gen2', 'vehicle-reset',
+                          'vehicle-state-smoke'})
         self.assertNotIn('requires_mode', scenario)
 
     def test_command_asserts_state_and_lab_interface(self) -> None:
@@ -32,7 +34,14 @@ class VehicleStateTests(unittest.TestCase):
                      'org.scourge.vehicle.State.Bogus',
                      'UnknownMethod', 'reason=frame-limit',
                      'speed=42 gear=3 ignition=2',
-                     'climate=22.0 outside=-3'):
+                     'climate=22.0 outside=-3',
+                     'array:byte:0x01,0xab', 'array:byte:0x02,0xfc',
+                     'array:byte:0x02,0xb0', 'array:byte:0x05,0x6e',
+                     'array:byte:0x05,0x5a',
+                     'TWEAKS_VEHICLE_VENDOR',
+                     'vendor_speed=30.0 vendor_gear=3',
+                     'vendor_speed=100.0 vendor_gear=1',
+                     'raw=1023 reason=range'):
             self.assertIn(text, command)
 
     def test_checks(self) -> None:

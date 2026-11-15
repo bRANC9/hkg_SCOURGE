@@ -6,7 +6,7 @@
 #
 # Order matters:
 #   1. launcher  /app/bin/AppLauncher  — .sign gate (prerequisite)
-#   2. installed /app/bin/AppUpgrade   — four engine stubs
+#   2. installed /app/bin/AppUpgrade   — five engine stubs (SCOMO four + FUMO)
 #   3. button    /app/bin/AppScomoDM   — two UsbUpdateManager stubs
 #   4. dmclient  /app/bin/AppDMClient  — two checkUSBUpdate stubs (only if
 #                                        the launcher stage succeeded)
@@ -42,7 +42,7 @@ DMCLIENT="${DMCLIENT_OVERRIDE:-/app/bin/AppDMClient}"
 LAUNCHER="${LAUNCHER_OVERRIDE:-/app/bin/AppLauncher}"
 
 F_SIZE=10787256
-F_PATCHED_MD5=c17c2655aecef461d2d9ddae15af775b
+F_PATCHED_MD5=55e522e37e85b9a7c599f9f17fc1a580
 SCDM_SIZE=1934752
 SCDM_PATCHED_MD5=45f881b3b08f40e6e07c03988e441341
 DM_SIZE=2226072
@@ -53,11 +53,11 @@ L_STOCK_MD5=04156392f77a5c2948772dbd31690d41
 L_PATCHED_MD5=6eeb054566e3bc9a0203ecc01bde04b8
 
 PATCHED_WRAPPER="$USB_DIR/AppUpgrade.patched.te2"
-PATCHED_WRAPPER_MD5=67a9fa486dbcae63e1a20ceee6eb2d5d
+PATCHED_WRAPPER_MD5=f730490b9a9f6d3499b9ba59070d63e8
 STOCK_WRAPPER_MD5=15a33d05b52ffa3d2ada5d44b4f37253
 WRAPPER_SIZE=10803676
 ROW_STOCK="IONIQ5_EU|AppUpgrade|341142|609028602|10803676|1"
-ROW_PATCHED="IONIQ5_EU|AppUpgrade|341142|-990581836|10803676|1"
+ROW_PATCHED="IONIQ5_EU|AppUpgrade|341142|414600538|10803676|1"
 ROW_KEY='IONIQ5_EU|AppUpgrade|341142|'
 
 mkdir -p "$RW" 2>/dev/null || true
@@ -170,7 +170,7 @@ stage_launcher(){
 }
 
 # ============================================================
-# Stage 2: AppUpgrade — four engine stubs
+# Stage 2: AppUpgrade — five engine stubs (SCOMO four + FUMO)
 # ============================================================
 stage_installed(){
     [ -f "$APPUPGRADE" ] || { log "installed: missing $APPUPGRADE"; return 1; }
@@ -178,7 +178,7 @@ stage_installed(){
     [ "$SZ" = "$F_SIZE" ] || { log "installed: unexpected size $SZ"; return 1; }
     M=$(md5_of "$APPUPGRADE")
     log "installed: md5=$M"
-    [ "$M" = "$F_PATCHED_MD5" ] && { log "installed: already four-stub"; return 0; }
+    [ "$M" = "$F_PATCHED_MD5" ] && { log "installed: already five-engine-stub"; return 0; }
 
     mkdir -p "$RW" 2>/dev/null
     cp -f "$APPUPGRADE" "$RW/AppUpgrade.before.$STAMP" 2>/dev/null
@@ -193,12 +193,13 @@ stage_installed(){
     patch_inplace "$APPUPGRADE" 2086852 FUN_002f5b60 4883ec1864488b04 31c0c3 '\061\300\303' || rc=1
     patch_inplace "$APPUPGRADE" 2086916 FUN_002f5ba0 554889f531f65348 31c0c3 '\061\300\303' || rc=1
     patch_inplace "$APPUPGRADE" 2087076 FUN_002f5c40 554889f5534883ec 31c0c3 '\061\300\303' || rc=1
+    patch_inplace "$APPUPGRADE" 7346024 FUN_0028f5a0 415455534883ec50 31c0c3 '\061\300\303' || rc=1
     sync
     [ "$was_ro" = 1 ] && mount -o remount,ro / 2>/dev/null
     [ "$rc" = 0 ] || { log "installed: patch failed"; return 1; }
     [ "$(md5_of "$APPUPGRADE")" = "$F_PATCHED_MD5" ] \
         || { log "installed: md5 mismatch after patch"; return 1; }
-    log "installed: patched to four-stub"
+    log "installed: patched to five-engine-stub"
     return 0
 }
 
@@ -478,7 +479,8 @@ stage_diag(){
         ls -l "$APPUPGRADE" 2>/dev/null
         md5sum "$APPUPGRADE" 2>/dev/null
         for pair in 2086500:FUN_002f5a00 2086852:FUN_002f5b60 \
-                    2086916:FUN_002f5ba0 2087076:FUN_002f5c40; do
+                    2086916:FUN_002f5ba0 2087076:FUN_002f5c40 \
+                    7346024:FUN_0028f5a0; do
             off=${pair%%:*}; name=${pair##*:}
             printf '%s bytes at %s: ' "$name" "$off"
             dd if="$APPUPGRADE" bs=1 skip="$off" count=3 2>/dev/null \

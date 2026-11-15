@@ -1,0 +1,26 @@
+{
+  "name": "dmengine-fumo-notify-failure",
+  "description": "Mode C FUMO install-notification failure: the DD/DP download succeeds, but the mock returns HTTP 500 for the installNotifyURI. The engine aborts the DL session with 0x6308, FUMO result 503 / last error 25352, and never reaches downloaded/update states. No install or update-success claim is made.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-ready",
+    "fumo-http-post",
+    "fumo-response",
+    "fumo-syncml",
+    "fumo-trigger",
+    "fumo-command",
+    "fumo-server-auth",
+    "fumo-dd",
+    "fumo-confirm",
+    "fumo-download",
+    "fumo-notify-fail",
+    "fumo-notify-failure-error",
+    "fumo-notify-no-completion",
+    "fumo-no-production",
+    "dmengine-fumo-notify-failure"
+  ],
+  "blockers": {}
+}

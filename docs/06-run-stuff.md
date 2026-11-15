@@ -18,18 +18,24 @@ SCOURGE packages (docs/07) deploy through it.
 - Output convention: write `run_stuff_result.txt` (or
   `<pkg>_result.txt`) back to the stick; also copy to
   `/rw_data/<pkg>/result.txt` for post-hoc reading.
-- The loader re-applies the updater stubs at startup
+- The loader re-applies all eleven updater/launcher stubs at startup
   (`/etc/initial_root/updater_guard.sh`), so a package that restores a
-  stock updater does not silently un-root the box.
+  stock updater does not silently un-root the box. (`run_stuff_loader.sh`'s
+  own comments say "ten"; both are byte-frozen as part of the
+  car-validated tar — editing either changes the pinned TE2 hash
+  `d1eec7cb…`. docs/03 records the build constraint.)
 
 ## The loader (payload/rootfs/etc/initial_root/run_stuff_loader.sh)
 
 Scans, in order: `/media/usb/*/*/run_stuff.sh`, `/media/usb/*/run_stuff.sh`,
 `/media/usb/run_stuff.sh`, `/media/*/run_stuff.sh`,
 `/run/media/*/run_stuff.sh`, `/run/media/*/*/run_stuff.sh`,
-`/mnt/*/run_stuff.sh` — then raw-mounts unmounted `/dev/sd?1` devices
-read-only and checks them too. First new script wins; runs with `USB_DIR`
-set; logs to `/rw_data/initial_root.log`.
+`/mnt/*/run_stuff.sh` — then raw-mounts unmounted `/dev/sd?1` (and
+whole-disk `/dev/sd?`) devices **read-write first**, falling back to
+read-only when the filesystem refuses, and checks them too. First new
+script wins; runs with `USB_DIR` set; logs to
+`/rw_data/initial_root.log`, falling back to `/tmp/initial_root.log` when
+the `/rw_data` directory is absent (the loader tests `[ -d /rw_data ]`).
 
 ## Writing a package (the house rules)
 

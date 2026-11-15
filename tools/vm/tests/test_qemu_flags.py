@@ -62,6 +62,13 @@ class DeterministicQemuTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             launch.run("true", False, 5, memory_mb=512)
 
+    def test_rootfs_override_is_resolved_and_missing_is_rejected(self) -> None:
+        image = self.root / "local-rootfs.img"
+        image.write_bytes(b"not-a-filesystem")
+        self.assertEqual(launch.resolve_rootfs(image), image.resolve())
+        with self.assertRaises(ValueError):
+            launch.resolve_rootfs(self.root / "missing.img")
+
 
 if __name__ == "__main__":
     unittest.main()

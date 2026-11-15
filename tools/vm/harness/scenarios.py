@@ -68,6 +68,23 @@ def validate_scenario(name: str, data: dict, vm_dir: Path) -> list[str]:
     if boot_marker is not None and (not isinstance(boot_marker, str)
                                     or not boot_marker.strip()):
         problems.append('boot_marker must be a non-empty string')
+    boot_markers = data.get('boot_markers')
+    if boot_markers is not None:
+        if not isinstance(boot_markers, dict) or not boot_markers:
+            problems.append('boot_markers must be a non-empty object')
+        elif any(not isinstance(key, str) or not key.strip()
+                 or not isinstance(value, str) or not value.strip()
+                 for key, value in boot_markers.items()):
+            problems.append('boot_markers must map non-empty strings to '
+                            'non-empty strings')
+        else:
+            known_checks = set(checks) if isinstance(checks, list) else set()
+            unknown = sorted(set(boot_markers.values()) - known_checks)
+            if unknown:
+                problems.append('boot_markers maps unknown checks: '
+                                + ', '.join(unknown))
+            if not data.get('init_override'):
+                problems.append('boot_markers requires init_override')
     for flag in ('expect_qemu_exit', 'requires_visible_frame', 'requires_share'):
         if flag in data and not isinstance(data[flag], bool):
             problems.append(f'{flag} must be boolean')

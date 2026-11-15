@@ -1,0 +1,18 @@
+{
+  "name": "dmengine-fumo-resume",
+  "description": "Mode C FUMO resume: the server serves only 64 of 184 object bytes with Accept-Ranges and an ETag. The engine retries with Range: bytes=64- and If-Range, the mock returns the remaining 120 bytes with 206, and the download completes with FUMO state 30 -> 40. No install or update-success claim is made.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-resume-ready",
+    "fumo-resume-partial",
+    "fumo-resume-request",
+    "fumo-resume-complete",
+    "fumo-resume-notify",
+    "fumo-no-production",
+    "dmengine-fumo-resume"
+  ],
+  "blockers": {}
+}

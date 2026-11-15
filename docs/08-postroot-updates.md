@@ -1,115 +1,157 @@
-# 08 — Custom firmware updates after root (WORK IN PROGRESS)
+# 08 — Custom firmware updates after root (CONFIRMED)
 
-STATUS: **work in progress.** The goal: after the stage-1 flash, install
-custom firmware as an *ordinary USB update package* — no rig, no race —
-because the modified rootfs bakes in updater stubs and the remaining gates
-are stubbed by stick-based deployers. Offline gates are green and the
-button-gate chain is **VM-validated**; **car validation of the full update
-is still pending.** Treat this document as a runbook plus an honest status
-record.
+STATUS: **car-confirmed 2026-11-15.** A custom 260128 rootfs was installed
+through the ordinary USB updater from an exFAT stick — no rig, no race, no
+userspace partition write. This document is the gate history and runbook;
+`docs/17-usb-update-confirmed.md` is the one-page confirmed procedure.
 
-TARGET: Ioniq 5 Gen5W_L (Linux), firmware 260128 (EU).
+TARGET: Ioniq 5 Gen5W_L (Linux), firmware `NE_E.EUR.S5W_L.001.001.260128` (EU).
 
 ## The gate inventory
 
-A custom update must pass several signature gates on 260128. The map has
-been revised twice from on-car and VM evidence; as of **build 4, all four
-patch sets are baked into the stage-1 rootfs** (ten stubs), re-applied at
-boot by the guard, and the deployers remain for cars already rooted with
-an earlier build:
+The map has been revised from on-car and VM evidence. As of **build 5, all
+eleven stubs are baked into the stage-1 rootfs**, re-applied at boot by the
+guard. A fresh TOCTOU flash therefore has the USB path ready; the
+`tools/update-debug/` deployers remain for cars rooted with an earlier
+build.
 
 | # | Gate | Where | SCOURGE's answer | State |
 |---|---|---|---|---|
-| 1 | Engine validators (TE2 metadata parse + final hash/RSA verify) | `/app/bin/AppUpgrade` — four entry points | four `31 C0 C3` stubs **baked into the stage-1 rootfs** (re-applied at boot by the guard) | Car-validated |
-| 2 | First button-gate discovery | `/app/bin/AppScomoDM` — two verifier entries (`FUN_001e3430` @ 930,864, `FUN_001e3470` @ 930,928) | two `31 C0 C3` stubs **baked into the stage-1 rootfs** | Baked + offline-verified; car validation pending |
-| 3 | **The real update-button gate: AppDMClient's `checkUSBUpdate()`** — verifies the drive's `AppUpgrade` wrapper AND `.lge.upgrade.xml` against `/app/share/AppUpgrade/teruten5_pub.key` and controls the Update-button enable/disable; a re-encrypted wrapper fails it, so the button stays grayed | `/app/bin/AppDMClient` — `FUN_00221000` @ 1,183,744 + `FUN_00221040` @ 1,183,808 | two `31 C0 C3` stubs **baked into the stage-1 rootfs** (build 4); `dmclient_gate` deployer for already-rooted cars; **reboot required** | **VM-validated** (A0/A1/A2); car pending |
-| 4 | **Launcher prerequisite for gate 3:** the stock AppLauncher `.sign`-verifies every startup-group/preload spawn against `/tmp/app_normal.key` and **refuses to spawn a modified AppDMClient at boot** | `/app/bin/AppLauncher` — `FUN_00115b50` @ 88,912 (readSection gate) + `FUN_00112100` @ 73,984 (navi CheckSign) | two `B8 01 00 00 00 C3` stubs (true-on-success) **baked into the stage-1 rootfs** (build 4); deployer stage ordering guarantees the launcher is patched before the dmclient stage | **VM-validated**; car pending |
-| 5 | Wrapper container class `0xf5` | the drive's `AppUpgrade` | re-encrypted patched wrapper + `.ver` row 341142 (the OEM signature on the wrapper is necessarily invalid; gates 1–4 exist to compensate) | Built + verified offline |
+| 1 | Engine validators (TE2 metadata parse + final hash/RSA verify) | `/app/bin/AppUpgrade` — **five** entry points: SCOMO `FUN_002f5a00` @ 2,086,500, `FUN_002f5b60` @ 2,086,852, `FUN_002f5ba0` @ 2,086,916, `FUN_002f5c40` @ 2,087,076; **FUMO `FUN_0028f5a0` @ 7,346,024** | five `31 C0 C3` stubs baked into the stage-1 rootfs | Car-validated |
+| 2 | UsbUpdateManager verifiers | `/app/bin/AppScomoDM` — `FUN_001e3430` @ 930,864, `FUN_001e3470` @ 930,928 | two `31 C0 C3` stubs baked into the stage-1 rootfs | Baked + offline-verified |
+| 3 | **The real update-button gate: AppDMClient's `checkUSBUpdate()`** — verifies the drive's `AppUpgrade` wrapper AND `.lge.upgrade.xml` against `/app/share/AppUpgrade/teruten5_pub.key` and controls the Update-button enable/disable | `/app/bin/AppDMClient` — `FUN_00221000` @ 1,183,744 + `FUN_00221040` @ 1,183,808 | two `31 C0 C3` stubs baked into the stage-1 rootfs | **Car-validated** (button active; `errAppUpgrade=0`) |
+| 4 | **Launcher prerequisite for gate 3:** the stock AppLauncher `.sign`-verifies every startup-group/preload spawn and refuses to spawn a modified AppDMClient at boot | `/app/bin/AppLauncher` — `FUN_00115b50` @ 88,912 + `FUN_00112100` @ 73,984 | two `B8 01 00 00 00 C3` stubs (true-on-success) baked into the stage-1 rootfs | **Car-validated** (patched client starts) |
+| 5 | Wrapper container class `0xf5` | the drive's `AppUpgrade` | re-encrypted patched wrapper + `.ver` row 341142; the OEM signature is necessarily invalid, gates 1–4 compensate | Car-validated |
+| 6 | SMACK label-write restriction (not a signature gate) | `/sys/fs/smackfs/onlycap` | `/etc/smack_permissive` + patched `/etc/smack_setup.sh`: `bringup-switch=1`, `onlycap` left empty | Baked into the car image; post-boot values not yet measured |
 
 Gate-4 note: on-demand `request.launch` spawns already skip the `.sign`
 check on the stock binary; only startup-group/preload spawns verify —
 which is exactly the path a patched AppDMClient needs at boot.
 
-## VM test evidence (2026-11-06, gate 3 + 4)
+## The FUMO fifth gate
 
-- **A0** — stock AppDMClient + patched wrapper: `errAppUpgrade = -403`,
-  `errXML = 0`, no launch — the grayed-button reproduction.
-- **A1** — stock AppDMClient + stock wrapper: `errAppUpgrade = 0`,
-  launch — the baseline.
-- **A2** — patched AppDMClient + patched wrapper: `errAppUpgrade = 0`,
-  `errXML = 0`, `No Hash error …`, `APPLAUNCHER_STUB_EXEC_OK`,
-  `PHASE4_OK` — **the button gate is fixed.**
-- Engine validation (Test B) is blocked in the VM by the AppUpgrade Qt
-  GUI not reaching the engine; the car/bench is the real test.
+The normal-USB flow does not run the SCOMO engine. DMClient launches the
+wrapper; the wrapper extracts the embedded **FUMO** engine
+(`AppFumoUpgrade`, embedded at 5,710,280); the FUMO `checkHash` dispatcher
+is `FUN_0028f5a0` at outer offset **7,346,024** (`0x701768`). It is the
+structural twin of the SCOMO `FUN_002f5a00`, and it is what returned
+`checkHash … (-403)` for a re-encrypted container before build 5. Stubbing
+it with `31 C0 C3` makes `checkHash` return 0.
+
+`DecryptToPIPE` enforces no container signature: its AES key is derived
+from the container's own metadata (SHA-256 over IV ‖ metadata regions ‖
+key store), which the repack reuses verbatim. The only RSA in DTP decrypts
+the `-d` device-key file. The fifth gate is the FUMO `checkHash`, not the
+wrapper copy path.
+
+## The SMACK permissive flag
+
+The vendor script already sets `bringup-switch=1` on non-UNECE cars, but it
+also writes `onlycap=Privileged`. That removes `CAP_MAC_ADMIN` from the `_`
+label, which is why payloads could not write SMACK labels with
+`setfattr`/`chsmack`. Build 5 adds `/etc/smack_permissive` and patches
+`/etc/smack_setup.sh` at the vendor write site: when the flag is present,
+`bringup-switch` is forced to 1 and `onlycap` is left empty. This is the
+persistent form of the DeSmack runtime state.
+
+The vendor `Privileged` fallback is retained when the flag is absent. The
+flag must be handled at the write site while `onlycap` is still empty; a
+late boot script cannot clear `onlycap` after the vendor sets it.
+
+Post-boot check (run as root):
+
+```sh
+touch /tmp/probe
+test -f /etc/smack_permissive && echo "flag=present"
+chsmack -a Stage4Probe /tmp/probe && chsmack /tmp/probe   # Stage4Probe
+cat /sys/fs/smackfs/bringup-switch                        # 1
+cat /sys/fs/smackfs/onlycap                               # empty
+```
+
+Post-boot values are **not yet measured** — the car was offline when
+this document was written. The commands above are the check; record the
+actual output before calling gate 6 car-validated.
 
 ## The packages
 
 `scripts/06_build_package.sh` builds two variants from `out/stage1.te2`:
 
-- `package_second` — stock USB wrapper; the six stubs live in the rootfs.
-  **Primary path** once the gates are car-validated.
+- `package_second` — stock USB wrapper; the eleven stubs + SMACK flag live
+  in the rootfs. Wrapper row 341142 stays stock (`609028602`).
 - `package_wrapper` — patched `0xf5` wrapper + patched `.ver` rows
-  341174/341142. Fallback for the case where the head unit runs the
-  drive's wrapper.
+  341174/341142. **Car-validated path.**
 
 Both keep `.lge.upgrade.xml` byte-identical to stock and pad the `.ver` to
-2,467 B. `09_preflight.sh` verifies both offline.
+2,467 B. `scripts/09_preflight.sh` verifies both through
+`verify/verify_package.py`.
+
+Build-5 hashes:
+
+```
+rootfs        d1eec7cb8861c25facb77a558348bfb648bbd7b72d30f16ad082145d19b21dde
+plaintext     f66f1a9b91e7bef630b1ef0b0bbe74c740ccb25acdf93101ada96aa911ae275b
+wrapper       9a0df0809a3f15c2d5f1d3e83c19ec0a27f336727e57e01bb2c5ae2e82783876
+wrapper md5   f730490b9a9f6d3499b9ba59070d63e8
+.ver wrapper  6611fb1f30077adc3305a278078e795f438a0bb4ba3934f8043b9526dcd54657
+.ver stock    0850314af773103a8d47eceac2aebcdad1a0d44eca70132639cb935c2b2c8429
+rootfs row    311417491
+wrapper row   414600538
+```
 
 ## The deployers (tools/update-debug/)
 
-For cars already rooted with an earlier build (or to patch in place
-without a reflash): all stick-based, idempotent, abort on any unknown
-size/md5/bytes, and back up before patching.
+For cars already rooted with an earlier build (or to patch in place without
+a reflash): all stick-based, idempotent, abort on any unknown size/md5/
+bytes, and back up before patching. They now include the FUMO row;
+each audits the stubs it manages (`dmclient_gate.sh` covers all eleven;
+`button_gate.sh` covers the five AppUpgrade engine stubs and the two
+AppScomoDM stubs; the legacy `both_copies.sh` covers only the five engine
+stubs).
 
 - **`dmclient_gate.sh`** — the full chain for an already-rooted car:
-  launcher prerequisite → dmclient stubs → re-verify installed
-  AppUpgrade/AppScomoDM stubs → verify/swap the drive wrapper + `.ver` row
-  341142 (stock backup + REVERT marker) → start the 45-minute watcher →
-  collect `dmclient_gate_diag.tar.gz`. Both running binaries are patched
-  atomically (copy + `mv` to a new inode); the running process keeps the
-  old inode until reboot.
-- **`button_gate.sh`** — the v4 combo stage (gates 1–2 + drive + watcher +
-  diag); supersedes `both_copies.sh`.
+  launcher prerequisite → installed AppUpgrade engine stubs (five) →
+  AppScomoDM stubs (two) → AppDMClient stubs (two) → verify/swap the drive
+  wrapper + `.ver` row 341142 (stock backup + REVERT marker) → start the
+  45-minute watcher → collect `dmclient_gate_diag.tar.gz`. Both running
+  binaries are patched atomically (copy + `mv` to a new inode); the
+  running process keeps the old inode until reboot.
+- **`button_gate.sh`** — the v4 combo stage (gates 1–2 + FUMO + drive +
+  watcher + diag); supersedes `both_copies.sh`.
 - **`applauncher_sigstub.sh`** — gate 4 alone, with in-session AppLauncher
   respawn + bus-name verification.
 
-## The current test sequence
+## The confirmed test sequence
 
-1. **Stage-1 build 4 flash (fresh root):** the ten stubs are baked in —
-   after the TOCTOU flash, reboot, and the gates are in place with no
-   deployer run needed.
-2. **Already-rooted car:** payload stick with MODE=all (apps →
-   button-gate → applauncher), or run `dmclient_gate.sh` directly with the
-   update drive inserted. Expected: every stage `status=OK`,
-   `reboot_required=1`.
-3. **REBOOT the head unit** (AppScomoDM + AppDMClient must reload; the
-   launcher needs a clean state). Do not insert the update drive before
-   this reboot.
-4. **Watcher:** insert the prepared update drive (its own run_stuff.sh
-   wrapper starts the 45-minute watcher), then start
-   `Settings > General > Software Update > Update via USB` within 45
-   minutes. The Update button should now be **active**.
-5. If it passes 0%, the normal-USB path works end to end.
-6. If the button is still grayed: re-run the deployer (bump its md5) and
-   collect `dmclient_gate_diag.tar.gz` — the next target is whatever
-   AppDMClient loads or checks beyond the two stubbed entries.
-
-The watcher is a `nohup` process and **does not survive a reboot** — never
-reboot between starting it and the update attempt.
+1. **Fresh stage-1 build-5 flash** (TOCTOU or already-rooted car with the
+   eleven stubs): no deployer run is needed.
+2. Prepare `out/package_wrapper` on an exFAT stick. Copy the hidden
+   `.lge.upgrade.xml` and `.whatsnew.tar.gz` as well.
+3. Insert the drive; open `Settings > General > Software Update >
+   Update via USB`. The Update button is active (`errAppUpgrade=0`).
+4. Confirm the same-version 260128 reinstall. Do not pull the stick or
+   power off while the updater is working.
+5. The updater reaches the FUMO engine; the `checkHash` stub returns 0;
+   the rootfs is decrypted and written to the inactive slot.
+6. After the reboot, run the inline SMACK check above and confirm the
+   boot message.
+7. If the button is still grayed on an older car, run `dmclient_gate.sh`
+   and collect `dmclient_gate_diag.tar.gz`. If the Update screen stalls
+   before the engine, the issue is UI/foreground, not a signature gate;
+   capture the screen/DLT.
 
 ## Current status table
 
 | Gate | Result |
 |---|---|
-| Stage-1 rootfs envelope (ten stubs, build 4) | `VERIFY: OK` |
+| Stage-1 rootfs envelope (eleven stubs + SMACK, build 5) | `VERIFY: OK` |
 | `package_second` / `package_wrapper` | `PACKAGE VERIFY: OK` |
-| Patched wrapper container | built, sha256 `176d4a8c…` (md5 `67a9fa48…`) |
+| Patched wrapper container | built, sha256 `9a0df080…` (md5 `f730490b…`) |
 | `dmclient_gate` deployer | host-tested (patch, idempotent, revert, launcher-fail skip) |
 | VM Test A — A0 grayed reproduction | PASS (`errAppUpgrade=-403`, no launch) |
 | VM Test A — A1 stock baseline | PASS (`errAppUpgrade=0`, launch) |
 | VM Test A — A2 stubbed fix | PASS (`errAppUpgrade=0`, launch, `PHASE4_OK`) |
-| VM Test B — engine validation | blocked by the VM AppUpgrade GUI; car/bench |
-| **Car: full custom update** | **pending** |
+| VM Test B — engine validation | VM GUI blocker; car is the real test |
+| **Car: full custom update via normal USB** | **PASS (2026-11-15)** |
 
 ## Recovery, always
 
@@ -117,8 +159,11 @@ reboot between starting it and the update attempt.
   falls back on reboot.
 - The rig (docs/04) + a stock 260128 package remain the full recovery
   path.
-- `REVERT` markers restore AppLauncher + AppDMClient (dmclient_gate), the
-  AppScomoDM stubs (button_gate), and the drive wrapper + `.ver` row.
+- `REVERT` markers restore AppLauncher + AppDMClient (dmclient_gate),
+  AppScomoDM (button_gate), and the drive wrapper + `.ver` row. The
+  AppUpgrade engine stubs (including FUMO) are not auto-reverted; the
+  `AppUpgrade.before-*` backups on the stick are there for a manual
+  restore.
 - Never interrupt an update or power off mid-install.
 - The OTA blocker in the Tweaks package is **off by default** precisely so
   this USB path stays available.

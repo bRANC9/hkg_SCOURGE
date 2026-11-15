@@ -183,7 +183,7 @@ done
 grep -q 'APPLAUNCHER_STUB_READY' /tmp/applauncher-stub.log || exit 1
 
 cd /app/bin
-strace -f -e trace=execve -s 300 -o /tmp/dm.strace ./AppDMClient $DMARGS >/tmp/dm.stdout 2>&1 &
+strace -f -e trace=execve,msgget,msgsnd,msgrcv,msgctl -s 300 -xx -o /tmp/dm.strace ./AppDMClient $DMARGS >/tmp/dm.stdout 2>&1 &
 DMPID=$!
 echo "DMCLIENT_PID $DMPID"
 
@@ -237,6 +237,33 @@ if [ "$LAUNCHED" = 1 ]; then
     wait_for_upgrade_log 'Check Signature|Decrypting|startPartitionUpdate|FAIL|Error' 240 || true
 fi
 
+if [ "${HARNESS_FOTA_EVENTS:-0}" = "1" ]; then
+    echo '=== FOTA EVENTS ==='
+    for ev in 0 1 2; do
+        dbus-send --session --print-reply --reply-timeout=3000 \
+            --dest=com.lge.hkmc.avn.upgrade.fota /fotaInterface \
+            com.lge.hkmc.avn.upgrade.fota.fotaInterface.sendEventToDMClientFromAppUpgrade \
+            int32:$ev >/tmp/fota-event-$ev.out 2>&1
+        echo "FOTA_EVENT $ev rc=$?"
+    done
+    sleep 3
+    echo '=== QUEUE TRACE ==='
+    grep -aE 'msgsnd|msgrcv|msgget' /tmp/dm.strace 2>&1 | tail -120
+    FOTA_OK=1
+    for code in 28 29 2a; do
+        if grep -aqE "msgsnd\\([0-9]+, \\{54, \"\\\\x$code" /tmp/dm.strace; then
+            echo "HARNESS_CHECK fota-command-$code PASS"
+        else
+            echo "HARNESS_FAIL fota-command-$code"
+            FOTA_OK=0
+        fi
+    done
+    if [ "$FOTA_OK" = 1 ]; then
+        echo 'HARNESS_CHECK fota-callback PASS'
+    else
+        echo 'HARNESS_FAIL fota-callback'
+    fi
+fi
 echo "=== PROCESSES ==="
 ps -ef | grep -E 'AppDMClient|AppUpgrade|appmanager-stub|ApplicationManager|DecryptToPIPE|tar' | grep -v grep
 echo "=== UPDATER TREE ==="

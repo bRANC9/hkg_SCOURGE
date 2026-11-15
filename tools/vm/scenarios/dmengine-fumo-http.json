@@ -1,0 +1,19 @@
+{
+  "name": "dmengine-fumo-http",
+  "description": "Mode C lab FUMO HTTP exchange: real dmengine with a lab DMCDEVINFO segment and loopback tree, triggered by OEM command code 0/field1=1, POSTs WBXML SyncML to a loopback mock endpoint. The mock returns a minimal WBXML SyncML response (Status 200 for the Alert/Replace commands and Final); the engine reports the SCOMO session state 1 with lastError 0 and does not abort. It performs no management operations and makes no update-success claim.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-ready",
+    "fumo-http-post",
+    "fumo-syncml",
+    "fumo-response",
+    "fumo-trigger",
+    "fumo-session-complete",
+    "fumo-no-production",
+    "dmengine-fumo-http"
+  ],
+  "blockers": {}
+}

@@ -43,11 +43,14 @@ repo.
    documentation, not weaponized. Do not write TOCTOU mitigation content
    into our docs — the upstream's is linked via docs/13.
 7. **No unvalidated patches shipped as finished.** Car-unvalidated patch
-   sets are clearly marked: the AppDMClient button gate and its AppLauncher
-   prerequisite are VM-validated and baked into the stage-1 build-4 rootfs,
-   but remain WIP until car validation completes (docs/08); the
-   `tools/update-debug/` deployers exist for cars rooted with earlier
-   builds. Never present a car-unvalidated patch set as finished.
+   sets are clearly marked WIP everywhere they appear. The unsigned
+   normal-USB update path (eleven stubs + SMACK flag, stage-1 build 5) is
+   car-validated as of 2026-11-15 (docs/17); the SMACK flag is baked in
+   but its post-boot effect is still pending measurement (docs/08 gate 6).
+   Newer patch sets carry their own evidence and stay WIP until the car
+   validates them. The `tools/update-debug/` deployers remain for cars
+   rooted with earlier builds. Never present a car-unvalidated patch set
+   as finished.
 8. **Destructive steps ask first.** Formatting USB drives, deploying to
    the Pi, and anything touching the car get an explicit confirmation
    from the user.
@@ -61,15 +64,19 @@ repo.
     committing, merging, rebasing, or force-pushing on the owner's behalf.
     The committer must self-review the full diff against these rules and
     the task's requirements, then **one independent reviewer session** using
-    `opencode-go/deepseek-v4.1-flash#max` must double-check the same diff.
-    This single review is required for every agent-made commit, including WIP
-    checkpoints; no additional reviewer model or second review agent is required.
-    Do not use Sol as the independent reviewer. Record the verdict as
-    `Second-Opinion: opencode-go/deepseek-v4.1-flash#max — PASS` in the commit
-    message. A FAIL is a stop: fix it and re-review; never land a FAIL-reviewed
-    change. If the selected reviewer is unavailable, ask the human rather than
-    silently substituting a model. Keep the selection in gitignored
-    `config/reviewer.local`, copied from `config/reviewer.local.example`.
+    the DeepSeek V4.1 Flash-Max reviewer must double-check the same diff.
+    The reviewer identity is the **model, not the provider**: either
+    `deepseek-v4.1-flash#max` or `deepseek v4.1-flash-1017#max` is acceptable,
+    with or without a provider prefix, and a review must never be rejected for
+    the provider it arrived from. This single review is required for every
+    agent-made commit, including WIP checkpoints; no additional reviewer model
+    or second review agent is required. Do not use Sol as the independent
+    reviewer. Record the verdict as `Second-Opinion: <reviewer model> — PASS`
+    in the commit message. A FAIL is a stop: fix it and re-review; never land
+    a FAIL-reviewed change. If the reviewer is unavailable, ask the human
+    rather than silently substituting a model. Keep the local pick in
+    gitignored `config/reviewer.local`, copied from
+    `config/reviewer.local.example`.
     The pre-push hook
     warns, but cannot verify, that the trailer exists — the real check is
     the recorded review.
@@ -80,7 +87,7 @@ repo.
 |---|---|
 | To root the car (first time) | docs/03 → docs/04 → docs/05 |
 | To install the apps | docs/06 → docs/07 → `packages/compose.sh` |
-| A custom firmware update on a rooted car | docs/08 (WIP — read the status table first) |
+| A custom firmware update on a rooted car | docs/08 (confirmed; docs/17 is the one-pager) |
 | To port to another firmware/region/car | docs/09 gates first; docs/10 only if hashes differ |
 | To build/fix a package's UI | `docs/ui/styleguide.md` → `deployment-modes.md` → `ux-patterns.md` → the overlay checklist, before writing any QML |
 | To debug a failure | docs/11; rig issues also docs/04 + the upstream field journal (docs/13) |
@@ -137,7 +144,7 @@ repo.
     header.
 - Package installers follow the docs/06 house rules (manifest, stock-hash
   guards, backups, idempotency, explicit status lines).
-- Docs are numbered `docs/01–14`; UI research lives in `docs/ui/`.
+- Docs are numbered `docs/01–17`; UI research lives in `docs/ui/`.
 - Scripts are run with `sh`/`bash`/`python3` (do not rely on +x bits) —
   except the hooks under `scripts/githooks/`, which git itself executes
   and therefore must stay executable (`scripts/install_hooks.sh` restores

@@ -133,5 +133,53 @@ class VendorSystemdDbusTests(unittest.TestCase):
         self.assertEqual(events['failed_unit_descriptions'], ['CredMan service'])
 
 
+class VendorEsinitFixtureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.scenario = load_scenario('vendor-esinit-fixture')
+
+    def test_scenario_contract(self) -> None:
+        transition = self.scenario['systemd_transition']
+        self.assertEqual(self.scenario['requires_mode'], 'vendor')
+        self.assertEqual(transition['exec'], '/lib/systemd/esinit')
+        self.assertEqual(transition['final_marker'],
+                         'Reached target Multi-User System')
+        self.assertEqual(transition['ordering']['check'],
+                         'esinit-before-systemd')
+        self.assertIn('OEM Type:', transition['required_markers'])
+        covered = {'systemd-prep', 'research-shell-pid1'}
+        covered.update(transition['required_markers'].values())
+        covered.add(transition['ordering']['check'])
+        self.assertEqual(set(self.scenario['checks']), covered)
+        command = scenario_command(self.scenario, {'name': 'research'})
+        self.assertIn('/sbin/modprobe.real', command)
+        self.assertIn('/etc/fstab', command)
+        self.assertIn('P28_PREP_OK', command)
+
+    def test_esinit_to_multi_user_passes(self) -> None:
+        text = (
+            'P28_SHELL pid=1 ppid=0\r\n'
+            'OEM Type: 1, KMC\r\n'
+            'systemd[1]: systemd 225 running in system mode.\r\n'
+            '[  OK  ] Reached target Multi-User System.\r\n'
+        )
+        result = evaluate_systemd_transition(
+            self.scenario, 0, 'P28_PREP_OK\n', text)
+        self.assertEqual(result['verdict'], 'PASS')
+        self.assertTrue(all(status == 'PASS'
+                            for status in result['checks'].values()))
+        self.assertTrue(result['ordering'])
+
+    def test_missing_esinit_marker_fails_closed(self) -> None:
+        text = (
+            'P28_SHELL pid=1 ppid=0\r\n'
+            'systemd[1]: systemd 225 running in system mode.\r\n'
+            '[  OK  ] Reached target Multi-User System.\r\n'
+        )
+        result = evaluate_systemd_transition(
+            self.scenario, 0, 'P28_PREP_OK\n', text)
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertEqual(result['checks']['esinit-oem'], 'FAIL')
+        self.assertFalse(result['ordering'])
+
 if __name__ == '__main__':
     unittest.main()

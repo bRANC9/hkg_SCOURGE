@@ -4,8 +4,8 @@
 # 07_build_patched_usb_appupgrade.sh — build the patched USB AppUpgrade wrapper.
 #
 # The wrapper is the TE2 0xf5 container at the package root. The rootfs copy
-# and the wrapper plaintext are byte-identical on 260128, so the same six-stub
-# patch set applies. Re-encrypted at the same size/IV.
+# and the wrapper plaintext are byte-identical on 260128, so the same five engine
+# stubs apply. Re-encrypted at the same size/IV.
 #
 # CAVEAT: class 0xf5 is RSA-signed over IV||ciphertext. Re-encrypting changes
 # the ciphertext, so the OEM signature will not validate — this is why the
@@ -35,8 +35,8 @@ if [ ! -f "$PLAIN" ]; then
         "$WORK_DIR/verify_appupgrade/AppUpgrade" "$PLAIN" --force
 fi
 
-echo "== apply the four engine stubs to the wrapper plaintext"
-"$PYTHON" "$SCOURGE_ROOT/payload/patch_validators.py" appupgrade "$PLAIN" "$PATCHED"
+echo "== apply the five engine stubs to the wrapper plaintext"
+"$PYTHON" "$SCOURGE_ROOT/payload/patch_validators.py" --kind appupgrade "$PLAIN" "$PATCHED"
 
 echo "== TE2 encrypt (basename AppUpgrade)"
 rm -f "$OUT"

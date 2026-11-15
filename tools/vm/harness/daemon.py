@@ -367,7 +367,8 @@ def _serve(config: dict) -> int:
             tools_status = launch.check_tools(tools)
             if not tools_status["ok"]:
                 raise RuntimeError(f"tools image stale: {tools_status['detail']}")
-        inputs = {"rootfs": launch.ROOTFS}
+        inputs = {"rootfs": launch.resolve_rootfs(
+            Path(config["rootfs"]) if config.get("rootfs") else None)}
         if tools is not None:
             inputs["tools"] = tools.resolve(strict=True)
         if usb is not None:

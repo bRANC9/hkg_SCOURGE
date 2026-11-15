@@ -5,8 +5,8 @@
 # install the update watcher, and collect diagnostics.
 #
 # Stages:
-#   1. installed  /app/bin/AppUpgrade: verify/apply the four validator stubs
-#                 (no-op if already md5 c17c2655...)
+#   1. installed  /app/bin/AppUpgrade: verify/apply the five engine stubs
+#                 (no-op if already md5 55e522e3...)
 #   2. button     /app/bin/AppScomoDM (UsbUpdateManager): stub the two
 #                 verifier entries (FUN_001e3430 @ 930864, FUN_001e3470 @
 #                 930928). This is the gate that grays the Update button.
@@ -37,15 +37,15 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo unknown)
 APPUPGRADE="${APPUPGRADE_OVERRIDE:-/app/bin/AppUpgrade}"
 APPSCDM="${APPSCDM_OVERRIDE:-/app/bin/AppScomoDM}"
 F_SIZE=10787256
-F_PATCHED_MD5=c17c2655aecef461d2d9ddae15af775b
+F_PATCHED_MD5=55e522e37e85b9a7c599f9f17fc1a580
 SCDM_SIZE=1934752
 
 PATCHED_WRAPPER="$USB_DIR/AppUpgrade.patched.te2"
-PATCHED_WRAPPER_MD5=67a9fa486dbcae63e1a20ceee6eb2d5d
+PATCHED_WRAPPER_MD5=f730490b9a9f6d3499b9ba59070d63e8
 STOCK_WRAPPER_MD5=15a33d05b52ffa3d2ada5d44b4f37253
 WRAPPER_SIZE=10803676
 ROW_STOCK="IONIQ5_EU|AppUpgrade|341142|609028602|10803676|1"
-ROW_PATCHED="IONIQ5_EU|AppUpgrade|341142|-990581836|10803676|1"
+ROW_PATCHED="IONIQ5_EU|AppUpgrade|341142|414600538|10803676|1"
 ROW_KEY='IONIQ5_EU|AppUpgrade|341142|'
 
 mkdir -p "$RW" 2>/dev/null || true
@@ -90,7 +90,7 @@ patch_one_file(){
 }
 
 # ============================================================
-# Stage 1: installed /app/bin/AppUpgrade — four validator stubs
+# Stage 1: installed /app/bin/AppUpgrade — five engine stubs (SCOMO four + FUMO)
 # ============================================================
 stage_installed(){
     [ -f "$APPUPGRADE" ] || { log "installed: missing $APPUPGRADE"; return 1; }
@@ -99,7 +99,7 @@ stage_installed(){
     M=$(md5_of "$APPUPGRADE")
     log "installed: md5=$M"
     if [ "$M" = "$F_PATCHED_MD5" ]; then
-        log "installed: already four-stub"
+        log "installed: already five-engine-stub"
         return 0
     fi
     mkdir -p "$RW" 2>/dev/null
@@ -115,13 +115,14 @@ stage_installed(){
     patch_one_file "$APPUPGRADE" 2086852 FUN_002f5b60 4883ec1864488b04 || rc=1
     patch_one_file "$APPUPGRADE" 2086916 FUN_002f5ba0 554889f531f65348 || rc=1
     patch_one_file "$APPUPGRADE" 2087076 FUN_002f5c40 554889f5534883ec || rc=1
+    patch_one_file "$APPUPGRADE" 7346024 FUN_0028f5a0 415455534883ec50 || rc=1
     sync
     [ "$was_ro" = 1 ] && mount -o remount,ro / 2>/dev/null
     [ "$rc" = 0 ] || { log "installed: patch failed"; return 1; }
 
     M=$(md5_of "$APPUPGRADE")
     if [ "$M" = "$F_PATCHED_MD5" ]; then
-        log "installed: patched to four-stub (md5=$M)"
+        log "installed: patched to five-engine-stub (md5=$M)"
         return 0
     fi
     log "installed: md5 mismatch after patch: $M"
@@ -382,7 +383,8 @@ stage_diag(){
         ls -l "$APPUPGRADE" 2>/dev/null
         md5sum "$APPUPGRADE" 2>/dev/null
         for pair in 2086500:FUN_002f5a00 2086852:FUN_002f5b60 \
-                    2086916:FUN_002f5ba0 2087076:FUN_002f5c40; do
+                    2086916:FUN_002f5ba0 2087076:FUN_002f5c40 \
+                    7346024:FUN_0028f5a0; do
             off=${pair%%:*}; name=${pair##*:}
             printf '%s bytes at %s: ' "$name" "$off"
             dd if="$APPUPGRADE" bs=1 skip="$off" count=3 2>/dev/null \

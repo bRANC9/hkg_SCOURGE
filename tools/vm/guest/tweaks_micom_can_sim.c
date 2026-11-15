@@ -24,9 +24,10 @@
  * state interface below.
  *
  * Lab vehicle-state model (NOT a vendor DBC and not stock fidelity):
- *   Fixed-frame writes are packed little-endian into a per-canid 64-bit
+ *   Fixed-frame writes are packed little-endian into a per-canid 128-bit
  *   frame (startbit 0 = LSB of byte 0). Two lab-defined canids decode into a
- *   deterministic state:
+ *   deterministic state, and the captured vendor Gen3High/Gen2 frames decode
+ *   into separate vendor fields:
  *
  *     0x0100  bytes 0..1  speed_kph (0..300, clamped)
  *             byte 2 bits 0..1  gear (0=P, 1=R, 2=N, 3=D)
@@ -36,6 +37,19 @@
  *             byte 2  climate setpoint in half-degrees C (32..60 = 16..30,
  *                     clamped)
  *             byte 3  outside temperature as int8 C (-40..85, clamped)
+ *
+ *   Captured CANService layouts (see can-analysis/ in the car capture; these
+ *   are real filter IDs and bit positions, not a DBC):
+ *     0x1ab  Gen3High speed: bytes 11 + (byte 12 & 3) << 8, (raw + 1) * 0.5
+ *            km/h, gear from byte 8 bits 6..7; raw + 1 > 0x3fe is ignored
+ *     0x2fc  Gen3High battery temperature: byte 7
+ *     0x2b0  steering: bytes 5..6 big-endian, 0.1 degree units, byte 7 << 2
+ *     0x56e  Gen2 speed: bytes 11 + (byte 10 & 1) << 8, 0x1ff sentinel,
+ *            gear from byte 10 bits 5..6
+ *     0x55a  Gen2 battery temperature: byte 9
+ *
+ *   Vendor decodes are logged as TWEAKS_VEHICLE_VENDOR and rejected frames
+ *   as TWEAKS_VEHICLE_VENDOR_IGNORED.
  *
  *   Out-of-range values are clamped and logged:
  *     TWEAKS_VEHICLE_CLAMP field=speed requested=1000 applied=300
@@ -48,7 +62,7 @@
  *     Reset() -> ()
  *
  *   GetState also logs the full state to the simulator log:
- *     TWEAKS_VEHICLE_STATE speed=42 gear=3 ... frames=0100,0101 bulk=063f
+ *     TWEAKS_VEHICLE_STATE speed=42 gear=3 ... vendor_speed=30.0 ... frames=...
  */
 #include <dbus/dbus.h>
 #include <signal.h>
@@ -69,7 +83,7 @@
 typedef struct {
     uint8_t id[4];
     int id_len;
-    uint8_t bytes[8];
+    uint8_t bytes[16];
 } can_frame_t;
 
 typedef struct {
@@ -80,12 +94,24 @@ typedef struct {
     int doors;
     int climate_raw;
     int outside_c;
+    /* Vendor Gen3High/Gen2 decoders derived from the captured CANService.
+     * speed_half_kph is (raw+1) on Gen3High, so 2 units = 1 km/h. */
+    int vendor_speed_half_kph;
+    int vendor_speed_raw;
+    int vendor_gear;
+    int vendor_battery_temp;
+    int vendor_steering_raw;
+    int vendor_steering_status;
+    int vendor_speed_valid;
+    int vendor_battery_valid;
+    int vendor_steering_valid;
 } vehicle_state_t;
 
 static volatile sig_atomic_t keep_running = 1;
 static can_frame_t frames[MAX_FRAMES];
 static int frame_count;
-static vehicle_state_t vehicle = {0, 0, 0, 0, 0, 44, 20};
+static vehicle_state_t vehicle = {0, 0, 0, 0, 0, 44, 20,
+                                 0, 0, 0, 0, 0, 0, 0, 0, 0};
 static uint8_t bulk[MAX_BULK];
 static int bulk_len;
 
@@ -97,7 +123,8 @@ static void stop_handler(int signo)
 
 static void reset_state(void)
 {
-    vehicle_state_t fresh = {0, 0, 0, 0, 0, 44, 20};
+    vehicle_state_t fresh = {0, 0, 0, 0, 0, 44, 20,
+                             0, 0, 0, 0, 0, 0, 0, 0, 0};
     vehicle = fresh;
     frame_count = 0;
     bulk_len = 0;
@@ -142,10 +169,72 @@ static can_frame_t *frame_for(const uint8_t *id, int id_len)
     return &frames[frame_count++];
 }
 
+static void decode_vendor_frame(can_frame_t *frame)
+{
+    if (frame->id_len != 2)
+        return;
+    if (frame->id[0] == 0x01 && frame->id[1] == 0xab) {
+        /* CANService ReceiveClusterCarSpeedForGen3High: 10-bit raw from
+         * bytes 11 and (byte 12 & 3) << 8; (raw + 1) * 0.5 km/h. */
+        int raw = frame->bytes[11] | ((frame->bytes[12] & 0x03) << 8);
+        int scaled = raw + 1;
+        if (scaled > 0x3fe) {
+            printf("TWEAKS_VEHICLE_VENDOR_IGNORED field=speed id=1ab "
+                   "raw=%d reason=range\n", raw);
+            return;
+        }
+        vehicle.vendor_speed_raw = raw;
+        vehicle.vendor_speed_half_kph = scaled;
+        vehicle.vendor_gear = (frame->bytes[8] & 0xc0) >> 6;
+        vehicle.vendor_speed_valid = 1;
+        printf("TWEAKS_VEHICLE_VENDOR field=speed id=1ab raw=%d kmh=%d.%d "
+               "gear=%d\n", raw, scaled / 2, (scaled % 2) * 5,
+               vehicle.vendor_gear);
+    } else if (frame->id[0] == 0x02 && frame->id[1] == 0xfc) {
+        /* CANService ReceiveBatteryChargeForGen3High: byte 7. */
+        vehicle.vendor_battery_temp = frame->bytes[7];
+        vehicle.vendor_battery_valid = 1;
+        printf("TWEAKS_VEHICLE_VENDOR field=battery id=2fc temp=%d\n",
+               vehicle.vendor_battery_temp);
+    } else if (frame->id[0] == 0x02 && frame->id[1] == 0xb0) {
+        /* CANService ReceiveSteeringStatus: bytes 5-6 big-endian, 0.1 deg;
+         * byte 7 << 2 status. */
+        vehicle.vendor_steering_raw =
+            (frame->bytes[5] << 8) | frame->bytes[6];
+        vehicle.vendor_steering_status = frame->bytes[7] << 2;
+        vehicle.vendor_steering_valid = 1;
+        printf("TWEAKS_VEHICLE_VENDOR field=steering id=2b0 raw=%d "
+               "tenths=%d status=%d\n", vehicle.vendor_steering_raw,
+               vehicle.vendor_steering_raw, vehicle.vendor_steering_status);
+    } else if (frame->id[0] == 0x05 && frame->id[1] == 0x6e) {
+        /* CANService ReceiveClusterCarSpeed (Gen2): 9-bit raw from byte 11
+         * and (byte 10 & 1) << 8; 0x1ff is the invalid sentinel. */
+        int raw = frame->bytes[11] | ((frame->bytes[10] & 0x01) << 8);
+        if (raw == 0x1ff) {
+            printf("TWEAKS_VEHICLE_VENDOR_IGNORED field=speed id=56e "
+                   "raw=%d reason=sentinel\n", raw);
+            return;
+        }
+        vehicle.vendor_speed_raw = raw;
+        vehicle.vendor_speed_half_kph = raw * 2;
+        vehicle.vendor_gear = (frame->bytes[10] & 0x60) >> 5;
+        vehicle.vendor_speed_valid = 1;
+        printf("TWEAKS_VEHICLE_VENDOR field=speed id=56e raw=%d kmh=%d "
+               "gear=%d generation=2\n", raw, raw, vehicle.vendor_gear);
+    } else if (frame->id[0] == 0x05 && frame->id[1] == 0x5a) {
+        /* CANService ReceiveBatteryChargeForGen2: byte 9. */
+        vehicle.vendor_battery_temp = frame->bytes[9];
+        vehicle.vendor_battery_valid = 1;
+        printf("TWEAKS_VEHICLE_VENDOR field=battery id=55a temp=%d "
+               "generation=2\n", vehicle.vendor_battery_temp);
+    }
+}
+
 static void decode_frame(can_frame_t *frame)
 {
     if (frame->id_len != 2)
         return;
+    decode_vendor_frame(frame);
     if (frame->id[0] == 0x01 && frame->id[1] == 0x00) {
         int speed = frame->bytes[0] | (frame->bytes[1] << 8);
         vehicle.speed_kph = clamp_value("speed", speed, 0, 300);
@@ -177,9 +266,10 @@ static void apply_fixed(const uint8_t *id, int id_len, int startbit,
         return;
     }
     /* Check startbit before arithmetic: an untrusted int32 near INT_MAX
-     * would overflow startbit + size and bypass an overflow-prone check. */
-    if (startbit < 0 || startbit > 63 || size <= 0 || size > 32 ||
-        startbit > 64 - size) {
+     * would overflow startbit + size and bypass an overflow-prone check.
+     * 128 bits cover the captured Gen3High frames (bytes 11-12). */
+    if (startbit < 0 || startbit > 127 || size <= 0 || size > 32 ||
+        startbit > 128 - size) {
         printf("TWEAKS_VEHICLE_WRITE_IGNORED reason=range startbit=%d size=%d\n",
                startbit, size);
         return;
@@ -205,11 +295,19 @@ static void format_state(char *out, size_t cap)
 
     used = (size_t)snprintf(out, cap,
                             "speed=%d gear=%d ignition=%d battery=%d doors=%d "
-                            "climate=%d.%d outside=%d frames=",
+                            "climate=%d.%d outside=%d vendor_speed=%d.%d "
+                            "vendor_gear=%d vendor_batt=%d vendor_steer=%d.%d "
+                            "vendor_steer_status=%d frames=",
                             vehicle.speed_kph, vehicle.gear, vehicle.ignition,
                             vehicle.battery_soc, vehicle.doors,
                             vehicle.climate_raw / 2,
-                            (vehicle.climate_raw % 2) * 5, vehicle.outside_c);
+                            (vehicle.climate_raw % 2) * 5, vehicle.outside_c,
+                            vehicle.vendor_speed_half_kph / 2,
+                            (vehicle.vendor_speed_half_kph % 2) * 5,
+                            vehicle.vendor_gear, vehicle.vendor_battery_temp,
+                            vehicle.vendor_steering_raw / 10,
+                            vehicle.vendor_steering_raw % 10,
+                            vehicle.vendor_steering_status);
     for (i = 0; i < frame_count && used < cap; ++i) {
         if (i > 0 && used < cap)
             used += (size_t)snprintf(out + used, cap - used, ",");

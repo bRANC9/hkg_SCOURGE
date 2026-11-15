@@ -3,22 +3,33 @@
 TARGET: Ioniq 5 Gen5W_L (Linux), firmware `NE_E.EUR.S5W_L.001.001.260128` (EU).
 
 The stage-1 firmware is the modified rootfs delivered by the TOCTOU rig
-(docs/01, docs/04, docs/05). It carries:
+(docs/01, docs/04, docs/05). Build 5 carries:
 
-1. The **boot message** (config/message.txt) patched into the
+1. The **boot message** (`config/message.txt`) patched into the
    AppStandbyClock safety-disclaimer translations (length-preserving).
-2. The **run_stuff failsafe**: `/etc/initial_root/{run_stuff_loader.sh,
-   updater_guard.sh}` + `initial-root-failsafe.service` (docs/06).
-3. The **ten updater/launcher stubs baked in** (build 4, four binaries —
+2. The **hardened run_stuff failsafe**:
+   `/etc/initial_root/{run_stuff_loader.sh, updater_guard.sh}` +
+   `initial-root-failsafe.service` (docs/06). The service is ordered
+   `After=local-fs.target` and `Before=multi-user.target
+   ApplicationLauncher.service`; the loader modprobes the USB stack,
+   raw-mounts sticks, writes the boot marker and runs `/bin/sh` payloads.
+3. The **eleven updater/launcher stubs baked in** (build 5, four binaries —
    docs/08):
-   - four validator entry points in `/app/bin/AppUpgrade` (`31 C0 C3`)
-   - two UsbUpdateManager entries in `/app/bin/AppScomoDM` (`31 C0 C3`)
-   - two button-gate entries in `/app/bin/AppDMClient` (`31 C0 C3`)
+   - **five** validator entry points in `/app/bin/AppUpgrade`
+     (`31 C0 C3`): the four SCOMO entries plus the FUMO
+     `FUN_0028f5a0` @ 7,346,024 — the engine the normal-USB flow runs;
+   - two UsbUpdateManager entries in `/app/bin/AppScomoDM` (`31 C0 C3`);
+   - two button-gate entries in `/app/bin/AppDMClient` (`31 C0 C3`);
    - two `.sign`-gate entries in `/app/bin/AppLauncher`
      (`B8 01 00 00 00 C3` — true-on-success; prerequisite for a modified
-     AppDMClient to survive a boot)
-   The boot-time guard re-applies all ten (idempotent, size-gated; the
+     AppDMClient to survive a boot).
+
+   The boot-time guard re-applies all eleven (idempotent, size-gated; the
    boot-running binaries are patched with an atomic rename).
+4. The **SMACK permissive flag**: `/etc/smack_permissive` plus the patched
+   `/etc/smack_setup.sh`. When the flag is present, the script forces
+   `bringup-switch=1` and leaves `onlycap` empty at the vendor write site,
+   so `CAP_MAC_ADMIN` is not restricted to the `Privileged` label.
 
 ## Prerequisites
 
@@ -35,8 +46,10 @@ A mismatch aborts — never proceed with different firmware (docs/09).
 
 ```sh
 scripts/02_decrypt_rootfs.sh          # -> work/stock-plain.tar.gz (879,109,759 B)
+source scripts/lib.sh                 # selects $PYTHON and the local paths
 "$PYTHON" scripts/03_patch_payload.py # -> work/payload/{AppUpgrade,AppScomoDM,AppDMClient,AppLauncher}.patched + .qm
-scripts/04_repack_rootfs.sh           # -> out/stage1.te2
+scripts/04_repack_rootfs.sh           # -> 03b SMACK patch + surgery + failsafe + flag -> out/stage1.te2
+load_te2_key
 "$PYTHON" scripts/05_verify_rootfs.py
 ```
 
@@ -47,30 +60,36 @@ scripts/build_all.sh                  # payload -> repack -> verify -> wrapper
                                      # -> packages -> 27 GB usb.img -> preflight
 ```
 
+`04_repack_rootfs.sh` calls `scripts/03b_patch_smack.py` to regenerate the
+patched `/etc/smack_setup.sh` and `/etc/smack_permissive` from the stock
+tar. It replaces `/etc/smack_setup.sh` via `surgery.py`, appends the four
+failsafe entries plus the flag, and fixes the appended entries' mtimes so
+the TE2 hash is deterministic.
+
 ## The build is deterministic — your output MUST match
 
-The chain (in-place tar surgery → fixed-order append → libdeflate L10 →
-exact-size padding → TE2-encrypt with the stock envelope as metadata
-template) reproduces byte-identical artifacts. **Compare every artifact
-against this table; any mismatch means stop and investigate.**
+The chain (in-place tar surgery → fixed-order append with fixed mtimes →
+libdeflate L10 → exact-size padding → TE2-encrypt with the stock envelope
+as metadata template) reproduces byte-identical artifacts. **Compare every
+artifact against this table; any mismatch means stop and investigate.**
 
-| Artifact | Property | Known-good value (build 4) |
+| Artifact | Property | Known-good value (build 5) |
 |---|---|---|
-| `out/stage1.te2` | size / sha256 | 879,126,179 / `9f4e495ddfb9dfc85917517ba001f9059aa4cf135c6e87cca45d3a5248de8b09` |
-| `work/stage1.padded.tar.gz` | sha256 | `97486ddf29cb499585ac2012f4185c44f4c94e9658a755773a0d8b5449223f14` |
-| `work/payload/AppUpgrade.patched` | sha256 | `5d8422126e5df937dbd7e69aab4652ff8188640a229a6c6f9b674a9da008dc01` |
+| `out/stage1.te2` | size / sha256 | 879,126,179 / `d1eec7cb8861c25facb77a558348bfb648bbd7b72d30f16ad082145d19b21dde` |
+| `work/stage1.padded.tar.gz` | sha256 | `f66f1a9b91e7bef630b1ef0b0bbe74c740ccb25acdf93101ada96aa911ae275b` |
+| `work/payload/AppUpgrade.patched` | sha256 | `9dda8c03077ff59043d412dd4c351b197247788b97c9a66056792d9c0d3eebf0` |
 | `work/payload/AppScomoDM.patched` | sha256 | `b2467b2b7cdf18b4e470b36083867411cae3b9d047739959141b333e5fa1e596` |
 | `work/payload/AppDMClient.patched` | sha256 | `e59259a16d3025d07a9f790a07e5eb4837df5cf69b05fcb2b3a64b281221fba5` |
 | `work/payload/AppLauncher.patched` | sha256 | `d00efd1363dcaef2c3c5b3c5aefc01d0eea99dce84d60647ab036ce65113e2e0` |
-| `out/AppUpgrade.patched.te2` | sha256 | `176d4a8c9dfb409f50231f90374b302773ed181fb01a3d2ded71b13e9363a3d0` |
-| `out/package_second/IONIQ5_EU.ver` | sha256 | `2e2d305cb567364dc6364e02ce0265d22a2f6d1c022d6e39dd074f84d149371b` |
-| `out/package_wrapper/IONIQ5_EU.ver` | sha256 | `1c7cb4b66489cdadd0d5216e95d5fa569d5ac6b8665ffe83e5a07cee1a32db97` |
+| `out/AppUpgrade.patched.te2` | sha256 | `9a0df0809a3f15c2d5f1d3e83c19ec0a27f336727e57e01bb2c5ae2e82783876` |
+| `out/package_second/IONIQ5_EU.ver` | sha256 | `0850314af773103a8d47eceac2aebcdad1a0d44eca70132639cb935c2b2c8429` |
+| `out/package_wrapper/IONIQ5_EU.ver` | sha256 | `6611fb1f30077adc3305a278078e795f438a0bb4ba3934f8043b9526dcd54657` |
 | `config/message.txt` | sha256 | `a00dd663d6f3cb791dac9b7d3d674df59f97c0f42b615a981d20c256114abb33` |
-| `out/usb.img` | size / sha256 | 28,894,603,490 / `1e0e13fd406e41c5b635230d80c22d86691ce8e787786f6fdea4920d69be0a0f` |
+| `out/usb.img` | size / sha256 | 28,894,603,490 / `9b55dafbdfe6b2837e2e77b3e539345aff286b5ad919d11f9ef57a190db558c3` |
 
 Envelope shape: class `0xe0`, IV `5412d68d2f22bf3d30f3c1ff1e715326`, body
-879,109,759 B, tar entries 66,840 (genuine 66,836 + the four failsafe
-entries).
+879,109,759 B, tar entries 66,841 (genuine 66,836 + four failsafe entries +
+the SMACK flag).
 
 ## Verification gates
 
@@ -79,10 +98,13 @@ entries).
 - envelope size == 879,126,179; TE2 metadata integrity valid under the
   basename `mango-rootfs.tar.gz`
 - decrypt → exact 879,109,759 B plaintext; `gzip -t`; ≥ 66,836 tar entries
-- all four failsafe entries present
-- four `31 c0 c3` stubs in `app/bin/AppUpgrade`; two each in
-  `app/bin/AppScomoDM` and `app/bin/AppDMClient`; two `b8 01 00 00 00 c3`
-  stubs in `app/bin/AppLauncher` (ten total)
+- all four failsafe entries plus `/etc/smack_permissive` present
+- the hardened service and loader markers (`After=local-fs.target`,
+  `Before=…ApplicationLauncher.service`, USB modprobes, raw scan)
+- five `31 c0 c3` stubs in `app/bin/AppUpgrade` (SCOMO four + FUMO); two
+  each in `app/bin/AppScomoDM` and `app/bin/AppDMClient`; two
+  `b8 01 00 00 00 c3` stubs in `app/bin/AppLauncher` (eleven total)
+- the patched `smack_setup.sh` carries the flag logic in both write sites
 - both patched `.qm` files carry the boot message
 
 `09_preflight.sh` additionally runs `verify/verify_package.py` over both
@@ -98,15 +120,21 @@ package variants (stock diff, `.ver` rows 341174/341142, signed XML, class
   879,109,759 B; the ceiling check aborts with the overrun amount.
 - **Trailing gzip bytes:** the genuine stream has 8 trailing bytes; keep
   them.
-- **Append order:** only the four failsafe entries are appended, in the
-  order the script lists them (determinism).
+- **Append order and mtimes:** the four failsafe entries and the SMACK flag
+  are appended in the script's order; `04_repack_rootfs.sh` fixes their
+  mtimes to absolute epochs so the TE2 hash does not depend on the host
+  timezone or checkout time.
+- **Do not "fix" the loader's "ten" comments:** `run_stuff_loader.sh` is
+  byte-frozen as part of the car-validated tar; editing either comment
+  changes `out/stage1.te2` from `d1eec7cb…`. The guard actually re-applies
+  eleven stubs; docs/06 records the discrepancy.
 - **PyQt5 absent:** the `.qm` runtime check is skipped, not failed — the
   byte-level check still runs.
 
 ## What is NOT in this build
 
-- No changes beyond the ten stubs, the boot message, and the failsafe:
-  the boot images stay genuine (bootloader RSA valid) and the signed
-  `.lge.upgrade.xml` stays stock.
-- The AppDMClient/AppLauncher stubs ARE part of this build (build 4) —
-  VM-validated, car validation still pending (docs/08).
+- No changes beyond the eleven stubs, the SMACK flag, the boot message, and
+  the hardened failsafe: the boot images stay genuine (bootloader RSA
+  valid) and the signed `.lge.upgrade.xml` stays stock.
+- The AppDMClient/AppLauncher/FUMO stubs and the normal-USB path are
+  car-validated (2026-11-15); see docs/08 and docs/17.

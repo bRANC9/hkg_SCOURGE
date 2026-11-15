@@ -1,0 +1,25 @@
+{
+  "name": "dmengine-fumo-download-missing",
+  "description": "Mode C FUMO missing-object download: the DD parses and the OEM confirmation is sent, but the mock returns 404 for /object.bin. The real engine logs DL session aborted 0x6306 with FUMO result 407 / last error 25350 and performs no successful object download. No install or update-success claim is made.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-ready",
+    "fumo-http-post",
+    "fumo-response",
+    "fumo-syncml",
+    "fumo-trigger",
+    "fumo-command",
+    "fumo-server-auth",
+    "fumo-dd",
+    "fumo-confirm",
+    "fumo-missing-request",
+    "fumo-missing-error",
+    "fumo-missing-no-download",
+    "fumo-no-production",
+    "dmengine-fumo-download-missing"
+  ],
+  "blockers": {}
+}

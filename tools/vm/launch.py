@@ -62,11 +62,23 @@ from harness.state import StateBusy, create_state_overlays
 from harness.visual import baseline as visual_baseline
 from harness.visual import compare as visual_compare
 from harness.visual import list_baselines
+from harness.capture import check_capture
+from harness.dm_queue import (OEM_COMMAND_TYPE, OEM_EVENT_TYPE, QueueError,
+                              decode_message, encode_event, encode_command,
+                              parse_strace)
+from harness.dm_tree import check_dm_tree, diff_trees
+from harness.dp import check_dp
+from harness.fumo import run_exchange, run_script
+from harness.mof import MofError, build_notification, decode_notification
+from harness.update_state import check_update_state
+from harness.update_media import check_update_media
+from harness.update_media_image import build_update_image
 from harness.result_schema import (check_all_bench, check_all_bench_dir,
                                    check_all_results, schema_state,
                                    validate_bench, validate_file,
                                    validate_result)
-from harness.results import evaluate, evaluate_systemd_transition, phase_summary
+from harness.results import (evaluate, evaluate_boot_only,
+                             evaluate_systemd_transition, phase_summary)
 from harness.scenarios import (PROFILE_NAMES, profile_state,
                                scenario_state, validate_profile,
                                validate_scenario)
@@ -169,6 +181,7 @@ def daemon_restart_argv(config: dict, daemon_dir: Path,
     mapping = (
         ('state', '--state'), ('tools', '--tools'), ('usb', '--usb'),
         ('payload', '--payload'), ('share', '--share'),
+        ('rootfs', '--rootfs'),
         ('display', '--display'), ('vnc_display', '--vnc-display'),
         ('display_device', '--display-device'),
         ('smp', '--smp'), ('memory_mb', '--memory'),
@@ -471,6 +484,18 @@ def usb_host_option(value: str) -> str:
             f"productid=0x{int(product, 16):04x},bus=ehci0.0")
 
 
+def resolve_rootfs(path: Path | None) -> Path:
+    """Return a usable base rootfs image, refusing a missing override."""
+    if path is None:
+        if not ROOTFS.is_file():
+            raise ValueError('missing vm/rootfs.img; prepare inputs explicitly')
+        return ROOTFS
+    resolved = Path(path).resolve()
+    if not resolved.is_file():
+        raise ValueError(f'missing rootfs image: {resolved}')
+    return resolved
+
+
 def _vendor_cmdline(noapic: bool, init_override: str | None = None) -> str:
     cmdline = CMDLINE if noapic else CMDLINE.replace(" noapic", "")
     if init_override:
@@ -747,7 +772,8 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
         network: bool = False, audio: bool = False,
         usb_host: list[str] | None = None, cache: str = "writeback",
         pin_cpu: int | None = None, dry_run: bool = False,
-        lock_info: dict | None = None, outcome: dict | None = None) -> int:
+        lock_info: dict | None = None, outcome: dict | None = None,
+        rootfs: Path | None = None) -> int:
     profile = load_profile(profile_name)
     scenario = load_scenario(scenario_name) if scenario_name else None
     if profile_name == 'conformance' and (scenario is None or interactive):
@@ -926,15 +952,14 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
                 if scenario_name is not None and not allow_stale_tools:
                     raise ValueError(message + ' (or pass --allow-stale-tools for research)')
                 print(f"[vm] WARNING: {message}", flush=True)
-        if not ROOTFS.is_file():
-            raise ValueError('missing vm/rootfs.img; prepare inputs explicitly')
+        rootfs = resolve_rootfs(rootfs)
         if kernel_target == 'vendor' and not KERNEL.is_file():
             raise ValueError('missing vm/bzImage; prepare inputs explicitly')
         patched = (kernel_target == 'vendor' and kernel_mode == 'vmlinux'
                    and kernel_is_patched(KERNEL_PATCHED))
         if kernel_target == 'vendor' and kernel_mode == 'vmlinux' and not patched:
             raise ValueError('vmlinux mode requested but patched kernel is invalid')
-        inputs = {'rootfs': ROOTFS}
+        inputs = {'rootfs': rootfs}
         for name, path in (('usb', usb), ('tools', tools)):
             if path is not None:
                 inputs[name] = path.resolve(strict=True)
@@ -1040,29 +1065,22 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
                 text = bytes(ser.log).decode(errors='replace')
             except (TimeoutError, EOFError):
                 text = bytes(ser.log).decode(errors='replace')
-            checks = {name: 'FAIL' for name in scenario.get('checks', [])}
-            marker_present = marker in text
-            if marker_present:
-                for name in checks:
-                    checks[name] = 'PASS'
-            failures = []
-            if not marker_present:
-                failures.append(f'boot marker not reached: {marker}')
-            if 'Kernel panic' in text:
-                failures.append('kernel panic')
+            boot = evaluate_boot_only(scenario, text)
             failed_units = re.findall(r'Failed to start ([^\r\n]+)', text)
             result.update(
-                checks=checks,
-                failures=failures,
+                checks=boot['checks'],
+                failures=boot['failures'],
+                marker_evidence=boot['marker_evidence'],
                 failed_unit_descriptions=sorted(set(failed_units))[:20],
                 boot_only=True,
-                boot_marker=marker,
-                verdict='FAIL' if failures else 'PASS',
-                rc=1 if failures else 0,
+                boot_marker=boot['boot_marker'],
+                verdict=boot['verdict'],
+                rc=boot['rc'],
                 guest_rc=None,
             )
-            print(f"[vm] boot-only marker {'found' if marker_present else 'missing'}: {marker}",
-                  flush=True)
+            print(f"[vm] boot-only marker "
+                  f"{'found' if boot['marker_present'] else 'missing'}: "
+                  f"{boot['boot_marker']}", flush=True)
             return result['rc']
         if interactive:
             written = 0
@@ -1443,8 +1461,10 @@ def prepare() -> None:
 
 
 def doctor(verify_images: bool = False, tools: Path | None = None,
-           storage_mode: str = 'flat', graphics: bool = False) -> int:
+           storage_mode: str = 'flat', graphics: bool = False,
+           rootfs: Path | None = None) -> int:
     tools = tools or (VM / 'tools.dev.img' if (VM / 'tools.dev.img').is_file() else TOOLS)
+    base_rootfs = Path(rootfs).resolve() if rootfs is not None else ROOTFS
     checks: dict[str, object] = {}
     ok = True
 
@@ -1476,7 +1496,7 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
         for command in ('fakeroot', 'mkfs.ext4'):
             check(f'split_storage_{command}', bool(shutil.which(command)), shutil.which(command))
         checks['split_storage_note'] = 'Synthetic USB-backed filesystems; production eMMC layout/settings/labels are not reproduced.'
-    for name, path in (("kernel", KERNEL), ("rootfs", ROOTFS),
+    for name, path in (("kernel", KERNEL), ("rootfs", base_rootfs),
                        ("update", UPDATE), ("tools", tools)):
         check(name, path.exists(), str(path))
     checks['patched_kernel_optional'] = {'ok': kernel_is_patched(KERNEL_PATCHED),
@@ -1528,7 +1548,8 @@ def doctor(verify_images: bool = False, tools: Path | None = None,
     else:
         note("compat_capability", state)
 
-    for name, path in (('kernel', KERNEL), ('rootfs', ROOTFS), ('tools', tools), ('usb', UPDATE)):
+    for name, path in (('kernel', KERNEL), ('rootfs', base_rootfs),
+                       ('tools', tools), ('usb', UPDATE)):
         if path.is_file():
             checks[f'{name}_identity'] = image_identity(path, verify_images)
     checks['identity_note'] = 'Digests identify artifacts; no trusted reference manifest has been supplied.'
@@ -1612,6 +1633,8 @@ def main() -> int:
     d = sub.add_parser("doctor")
     d.add_argument('--verify-images', action='store_true', help='freshly hash large backing images (slow on CIFS)')
     d.add_argument('--tools', type=Path, help='tools image to check (prefers tools.dev.img)')
+    d.add_argument('--rootfs', type=Path, default=None,
+                   help='base vendor rootfs image to check (default: vm/rootfs.img)')
     d.add_argument('--storage', choices=('flat', 'split'), default='flat')
     d.add_argument('--graphics', action='store_true',
                    help='include Mode C compat-kernel graphics readiness checks')
@@ -1646,6 +1669,74 @@ def main() -> int:
                              help='validate every runs/bench-*/bench.json')
     check_bench.add_argument('--root', type=Path, default=None,
                              help='bench root for --all (default: runs/)')
+    check_capture_parser = sub.add_parser(
+        'check-capture', help='validate a car ground-truth capture directory')
+    check_capture_parser.add_argument('path', type=Path)
+    check_capture_parser.add_argument(
+        '--verify-hashes', action='store_true',
+        help='hash every file listed in meta/SHA256SUMS (slow)')
+    check_capture_parser.add_argument(
+        '--reject-maps', action='store_true',
+        help='fail when an archive or raw image looks like map data')
+    check_update_parser = sub.add_parser(
+        'check-update', help='validate an offline update directory or ext4 image')
+    check_update_parser.add_argument('path', type=Path)
+    check_update_parser.add_argument(
+        '--verify-hashes', action='store_true',
+        help='hash every MANIFEST.sha256 target (slow for large payloads)')
+    check_update_parser.add_argument(
+        '--verify-files', action='store_true',
+        help='compare declared IONIQ5_EU.ver sizes for files present on the media')
+    check_dp_parser = sub.add_parser(
+        'check-dp', help='validate a RedBend EF DP container')
+    check_dp_parser.add_argument('path', type=Path)
+    check_dp_parser.add_argument(
+        '--key', default=None,
+        help='lab HMAC key for the optional signature trailer')
+    check_dm_parser = sub.add_parser(
+        'check-dm-tree', help='validate a RedBend RDM tree without exposing credentials')
+    check_dm_parser.add_argument('path', type=Path)
+    check_dm_parser.add_argument('--compare', type=Path, default=None,
+                                 help='diff leaf paths against a second tree (redacted)')
+    check_dm_parser.add_argument('--fail-on-diff', action='store_true',
+                                 help='with --compare, exit 1 when the trees differ')
+    fumo = sub.add_parser(
+        'fumo-exchange', help='run the offline FUMO state-machine exchange model')
+    fumo.add_argument('--installed', default=None, metavar='VERSION')
+    fumo.add_argument('--package-version', default='8')
+    fumo.add_argument('--fail', choices=('download', 'install'), default=None)
+    fumo.add_argument('--chunk-size', type=int, default=7)
+    fumo.add_argument('--script', type=Path, default=None,
+                      help='JSON list of FUMO operations (download, install, failures)')
+    check_state = sub.add_parser(
+        'check-update-state', help='audit vendor /update metadata without exposing URLs')
+    check_state.add_argument('path', type=Path)
+    mof = sub.add_parser(
+        'mof-notify', help='decode a MOF/FUMO notification URI or build a lab one')
+    mof.add_argument('uri', nargs='?')
+    mof.add_argument('--encode', action='store_true')
+    mof.add_argument('--vin', default='VIN:LABVIN00000000000_AVN')
+    mof.add_argument('--previous', default='NE_E.EUR.S5W_L.001.001.250226')
+    mof.add_argument('--next', dest='next_version',
+                     default='NE_E.EUR.S5W_L.001.001.250604')
+    mof.add_argument('--update-id', default='54728')
+    mof.add_argument('--host', default='127.0.0.1:8002')
+    dmq = sub.add_parser(
+        'dmengine-queue', help='encode/decode vendor dmengine OEM queue messages')
+    dmq.add_argument('queue_action', choices=('decode', 'encode', 'trace'))
+    dmq.add_argument('--mtype', type=lambda value: int(value, 0),
+                     default=OEM_COMMAND_TYPE)
+    dmq.add_argument('--hex', default=None)
+    dmq.add_argument('--code', type=int, default=1)
+    dmq.add_argument('--field1', type=int, default=0)
+    dmq.add_argument('--field2', type=int, default=0)
+    dmq.add_argument('--text', default='')
+    dmq.add_argument('--file', type=Path, default=None)
+    build_media = sub.add_parser(
+        'make-update-media', help='build a small synthetic update-stick image')
+    build_media.add_argument('--output', type=Path, required=True)
+    build_media.add_argument('--size-mb', type=int, default=32)
+    build_media.add_argument('--payload-size', type=int, default=65536)
     check_scenario = sub.add_parser('check-scenario',
                                     help='validate scenario JSON contracts')
     check_scenario.add_argument('scenario', nargs='?',
@@ -1695,6 +1786,8 @@ def main() -> int:
     ds = dsub.add_parser('start')
     ds.add_argument('--daemon-dir', type=Path, default=VM / 'runs' / 'daemon')
     ds.add_argument('--kernel', choices=('vendor', 'compat'), default='vendor')
+    ds.add_argument('--rootfs', type=Path, default=None,
+                    help='base vendor rootfs image (default: vm/rootfs.img)')
     ds.add_argument('--state', type=Path, default=None)
     ds.add_argument('--reset', action='store_true')
     ds.add_argument('--tools', type=Path, default=None)
@@ -1796,6 +1889,8 @@ def main() -> int:
     r.add_argument('--cache', choices=('writeback', 'writethrough', 'directsync',
                                       'unsafe', 'none'), default='writeback',
                    help='qcow2 cache mode for non-persistent drives')
+    r.add_argument('--rootfs', type=Path, default=None,
+                   help='base vendor rootfs image (default: vm/rootfs.img; OEM data stays outside git)')
     r.add_argument('--allow-stale-tools', action='store_true',
                    help='research only: boot a stale/unmanifested tools image with a warning')
     r.add_argument('--allow-kernel-mismatch', action='store_true',
@@ -1832,7 +1927,8 @@ def main() -> int:
         prepare()
         return 0
     if args.action == "doctor":
-        return doctor(args.verify_images, args.tools, args.storage, args.graphics)
+        return doctor(args.verify_images, args.tools, args.storage,
+                      args.graphics, args.rootfs)
     if args.action == 'list-scenarios':
         for name in SCENARIO_NAMES:
             item = load_scenario(name)
@@ -1903,6 +1999,7 @@ def main() -> int:
             config = {
                 'daemon_dir': str(daemon_dir),
                 'kernel_target': args.kernel,
+                'rootfs': str(args.rootfs.resolve()) if args.rootfs else None,
                 'state': str(args.state.resolve()) if args.state else None,
                 'reset': args.reset,
                 'tools': str(args.tools.resolve()) if args.tools else None,
@@ -2141,6 +2238,100 @@ def main() -> int:
         print(json.dumps({'profile': name, 'path': str(path),
                           'ok': not problems, 'problems': problems}, indent=2))
         return 0 if not problems else 1
+    if args.action == 'check-capture':
+        report = check_capture(args.path, verify_hashes=args.verify_hashes,
+                               reject_maps=args.reject_maps)
+        print(json.dumps(report, indent=2))
+        return 0 if report['ok'] else 1
+    if args.action == 'check-update':
+        report = check_update_media(args.path, verify_hashes=args.verify_hashes,
+                                    verify_files=args.verify_files)
+        print(json.dumps(report, indent=2))
+        return 0 if report['ok'] else 1
+    if args.action == 'check-dp':
+        report = check_dp(args.path,
+                          args.key.encode() if args.key else None)
+        print(json.dumps(report, indent=2))
+        return 0 if report['ok'] else 1
+    if args.action == 'check-dm-tree':
+        if args.fail_on_diff and args.compare is None:
+            ap.error('--fail-on-diff requires --compare')
+        report = (diff_trees(args.path, args.compare) if args.compare is not None
+                  else check_dm_tree(args.path))
+        print(json.dumps(report, indent=2))
+        ok = report['ok']
+        if args.compare is not None and args.fail_on_diff:
+            ok = ok and report['identical']
+        return 0 if ok else 1
+    if args.action == 'fumo-exchange':
+        if args.script is not None:
+            steps = json.loads(args.script.read_text())
+            report = run_script(steps, installed=args.installed,
+                                chunk_size=args.chunk_size)
+        else:
+            report = run_exchange(installed=args.installed,
+                                  package_version=args.package_version,
+                                  fail_stage=args.fail,
+                                  chunk_size=args.chunk_size)
+        print(json.dumps(report, indent=2))
+        return 0 if report['ok'] else 1
+    if args.action == 'make-update-media':
+        try:
+            report = build_update_image(args.output, args.size_mb,
+                                        args.payload_size)
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(json.dumps({'ok': False, 'error': str(exc)}, indent=2))
+            return 1
+        print(json.dumps({'ok': True, **report}, indent=2))
+        return 0
+    if args.action == 'dmengine-queue':
+        try:
+            if args.queue_action == 'trace':
+                if args.file is None:
+                    ap.error('dmengine-queue trace requires --file')
+                messages = parse_strace(args.file.read_text(errors='replace'))
+                report = {'ok': True, 'count': len(messages),
+                          'messages': messages}
+            elif args.queue_action == 'decode':
+                if not args.hex:
+                    ap.error('dmengine-queue decode requires --hex')
+                data = bytes.fromhex(args.hex)
+                report = {'ok': True, **decode_message(args.mtype, data)}
+            else:
+                if args.mtype == OEM_COMMAND_TYPE:
+                    mtype, data = encode_command(args.code, args.field1,
+                                                 args.field2, args.text)
+                elif args.mtype == OEM_EVENT_TYPE:
+                    mtype, data = encode_event(args.code, args.field1,
+                                               args.field2, args.text)
+                else:
+                    raise ValueError(f'unknown mtype: {args.mtype:#x}')
+                report = {'ok': True, 'mtype': mtype, 'hex': data.hex()}
+        except (ValueError, QueueError) as exc:
+            print(json.dumps({'ok': False, 'error': str(exc)}, indent=2))
+            return 1
+        print(json.dumps(report, indent=2))
+        return 0
+    if args.action == 'mof-notify':
+        try:
+            if args.encode:
+                uri = build_notification(args.vin, args.previous,
+                                         args.next_version, args.update_id,
+                                         args.host)
+                report = {'ok': True, 'uri': uri}
+            else:
+                if not args.uri:
+                    ap.error('mof-notify requires a URI or --encode')
+                report = {'ok': True, **decode_notification(args.uri)}
+        except MofError as exc:
+            print(json.dumps({'ok': False, 'error': str(exc)}, indent=2))
+            return 1
+        print(json.dumps(report, indent=2))
+        return 0
+    if args.action == 'check-update-state':
+        report = check_update_state(args.path)
+        print(json.dumps(report, indent=2))
+        return 0 if report['ok'] else 1
     if args.action == 'check-bench':
         if args.all and args.path:
             ap.error('check-bench accepts a path or --all, not both')
@@ -2237,7 +2428,8 @@ def main() -> int:
                        args.share, args.display, args.vnc_display, args.label,
                        args.state, args.reset, args.network, args.audio, args.usb_host,
                        args.cache, pin_cpu=args.pin_cpu,
-                       dry_run=args.dry_run, lock_info=lock_info)
+                       dry_run=args.dry_run, lock_info=lock_info,
+                       rootfs=args.rootfs)
     except LockTimeout as exc:
         print(f'ERROR: {exc}', file=sys.stderr)
         return 1

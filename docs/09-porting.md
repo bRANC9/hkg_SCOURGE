@@ -79,8 +79,10 @@ the next person can re-verify.
 - The USB automount command-injection finding (a separate vulnerability,
   unused by SCOURGE, withheld until/unless a porting need makes it
   relevant).
-- Any patch that has not at least passed its offline + VM gates:
-  car-unvalidated patch sets are clearly marked WIP everywhere they
-  appear (the AppDMClient button gate + its AppLauncher prerequisite are
-  VM-validated, baked into the build-4 rootfs, and marked car-pending —
-  docs/08), never presented as finished.
+- Any patch that has not at least passed its offline + VM gates.
+  Car-unvalidated patch sets are clearly marked WIP everywhere they
+  appear — today the Reboot app and the Battery preheat flow are the
+  examples (docs/07) — and are never presented as finished. The
+  signatureless-update chain itself (eleven stubs, build 5) is
+  car-validated; the SMACK flag is baked in but its post-boot effect
+  remains pending measurement (docs/08 gate 6). See docs/08 and docs/17.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
-"""Apply the updater/launcher validator stubs (build 4, four binaries).
+"""Apply the updater/launcher validator stubs (build 5, four binaries, eleven stubs).
 
 TARGET: Hyundai Ioniq 5 Gen5W_L (Linux), EU,
         firmware NE_E.EUR.S5W_L.001.001.260128.
@@ -17,6 +17,8 @@ best-effort a patch.
     FUN_002f5b60  2086852  helper calling FUN_002f5a00
     FUN_002f5ba0  2086916  TE2 verifier wrapper
     FUN_002f5c40  2087076  second verifier wrapper
+    FUN_0028f5a0  7346024  FUMO engine checkHash dispatcher (the engine the
+                           normal-USB update flow actually runs)
 
   /app/bin/AppScomoDM   (1,934,752 B) — UsbUpdateManager
     FUN_001e3430  930864   final verify
@@ -54,10 +56,11 @@ KINDS = {
             ("FUN_002f5b60", 2086852, bytes.fromhex("4883ec1864488b04")),
             ("FUN_002f5ba0", 2086916, bytes.fromhex("554889f531f65348")),
             ("FUN_002f5c40", 2087076, bytes.fromhex("554889f5534883ec")),
+            ("FUN_0028f5a0", 7346024, bytes.fromhex("415455534883ec50")),
         ],
         STUB, "AppUpgrade",
         "5295c6e4c41fb9c03760cf006c58b66fcd11aeb4e6e889af6e31b062549b6df0",
-        "5d8422126e5df937dbd7e69aab4652ff8188640a229a6c6f9b674a9da008dc01",
+        "9dda8c03077ff59043d412dd4c351b197247788b97c9a66056792d9c0d3eebf0",
     ),
     "scomo": (
         1934752,
@@ -96,6 +99,10 @@ EXPECTED_SIZE, PATCHES = KINDS["appupgrade"][0], KINDS["appupgrade"][1]
 SCDM_SIZE, SCDM_PATCHES = KINDS["scomo"][0], KINDS["scomo"][1]
 DMCLIENT_SIZE, DMCLIENT_PATCHES = KINDS["dmclient"][0], KINDS["dmclient"][1]
 LAUNCHER_SIZE, LAUNCHER_PATCHES = KINDS["launcher"][0], KINDS["launcher"][1]
+# Compatibility aliases used by the verifiers and tools/carve_engine.py.
+ENGINE_PATCHES = PATCHES
+ENGINE_SIZE = EXPECTED_SIZE
+ENGINE_STOCK_SHA256 = KINDS["appupgrade"][4]
 
 
 def sha256_bytes(data):

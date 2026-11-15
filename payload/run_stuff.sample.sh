@@ -32,6 +32,13 @@ mount -o remount,rw "$USB_DIR" 2>/dev/null || true
     echo "id=$(id 2>/dev/null)"
     echo "uname=$(uname -a 2>/dev/null)"
     echo "smack=$(cat /proc/self/attr/current 2>/dev/null)"
+    if [ -f /etc/smack_permissive ]; then
+        echo "smack_flag=present"
+    else
+        echo "smack_flag=absent"
+    fi
+    echo "bringup_switch=$(cat /sys/fs/smackfs/bringup-switch 2>/dev/null)"
+    echo "onlycap=$(cat /sys/fs/smackfs/onlycap 2>/dev/null)"
     echo "mounts:"
     grep -E ' /(rw_data|media|tmp|update|log_data)(/| )' /proc/mounts 2>/dev/null
 } > "$OUT" 2>&1

@@ -5,9 +5,9 @@
 
 TARGET: Ioniq 5 Gen5W_L, firmware NE_E.EUR.S5W_L.001.001.260128 (EU).
 
-From the stock plaintext rootfs tar, produce in work/payload/ (build 4 —
-the ten-stub patch set, four binaries):
-  - AppUpgrade.patched    four validator stubs (31 C0 C3)
+From the stock plaintext rootfs tar, produce in work/payload/ (build 5 —
+the eleven-stub patch set, four binaries):
+  - AppUpgrade.patched    five engine stubs (31 C0 C3: SCOMO four + FUMO)
   - AppScomoDM.patched    two UsbUpdateManager stubs (31 C0 C3)
   - AppDMClient.patched   two button-gate stubs (31 C0 C3)
   - AppLauncher.patched   two .sign-gate stubs (B8 01 00 00 00 C3 —

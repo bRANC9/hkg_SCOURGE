@@ -1,5 +1,5 @@
 {
-  "build_id": "3e95092b8b3e6423d0139fc90e4e61d7ff094af155a89ee9d20fe685353db280",
+  "build_id": "c08da2c6be12f7a34039bb2a1b8e24eef3ea2fcdef4489a39919dc31826b0d32",
   "files": {
     "AppDMClient.nogui": {
       "sha256": "12a28254427b0de362ef6b2decc038a309a777aaa14d81315d7853077122e160",
@@ -242,8 +242,8 @@
       "size": 50
     },
     "phase4.sh": {
-      "sha256": "4d6185a52c96ed31b2464e7628284836e81df77496967db053205d44fdb0bfee",
-      "size": 11157
+      "sha256": "54634a7002ebaab0d476b07cc5fadc3ed59462eb16bc2778a3d2b4c9892aab9f",
+      "size": 12150
     },
     "phase4.sh.bak-180205": {
       "sha256": "0b722ff28f2d8a2d12fbe3dede8afd4b19433ffe79ad7598389422410796530b",
@@ -278,8 +278,8 @@
       "size": 1378
     },
     "scenarios.sh": {
-      "sha256": "6cdfcddc43b6b6dd99eb3f2d2d513b681eb500e2725c02321c463d63f290e099",
-      "size": 2669
+      "sha256": "ea10d01ffc8a60102409e77093df2258b8b617d4f2c972cc56c4281ff369130f",
+      "size": 2845
     },
     "update.tar.gz": {
       "sha256": "df39e305b9de8e92011d1665adf85e418927ea542759c0e648a3169d995dac52",

@@ -1,0 +1,28 @@
+{
+  "name": "dmengine-fumo-update",
+  "description": "Mode C FUMO install request: after the authenticated DD/DP download and install notification, the mock answers the DM report session with a FUMO Update Exec. The real dmengine queues the command on ./ManagedObjects/FUMO/Update and rejects the structural DP with 0x6011 / FUMO error 24593. No update-complete state is reached and no install is claimed.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-ready",
+    "fumo-http-post",
+    "fumo-response",
+    "fumo-syncml",
+    "fumo-trigger",
+    "fumo-command",
+    "fumo-server-auth",
+    "fumo-dd",
+    "fumo-confirm",
+    "fumo-download",
+    "fumo-dl-complete",
+    "fumo-state",
+    "fumo-update-request",
+    "fumo-update-rejected",
+    "fumo-update-no-completion",
+    "fumo-no-production",
+    "dmengine-fumo-update"
+  ],
+  "blockers": {}
+}

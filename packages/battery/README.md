@@ -14,7 +14,8 @@ updater, bootloader and partitions are untouched.
 - Minimum battery cell temperature from I-CAN `0x2FC`
 - Exterior temperature
 - State of charge
-- Battery heater state (Off / Preparing / Active / Requested) and heater power
+- Battery heater state (Off / Preparing / Active / Requested) and battery-care
+  instantaneous power (kW)
 - An **Engage battery preheater** toggle
 - A **Show battery preheat on dash** toggle, enabled while preheating
 - An **Open/Close charge door** toggle, enabled whenever no charging cable is
@@ -31,7 +32,8 @@ The head unit's `can0` is **I-CAN**, not M-CAN:
 |---|---|---|
 | Battery temp, SoC, charge cable | I-CAN | daemon reads `0x2FC`, `0x326` |
 | Gear / Park | M-CAN | QML `AppNModeModel.gearPosRightTxtImg` |
-| READY, utility, heater power, conditioning mode | M-CAN | QML `AppPHEVModel` |
+| READY, utility | M-CAN | QML `AppPHEVModel` |
+| Battery-care instant power (`pwrInstantHeat` + `pwrInstantBattery`, W) | M-CAN | QML `AppPHEVModel` |
 | Preheat, dash, charge-door commands | M-CAN | micom D-Bus `SetCANMicomRecv` |
 
 `battery_daemon --sniff [seconds]` prints the IDs visible on `can0` so the bus

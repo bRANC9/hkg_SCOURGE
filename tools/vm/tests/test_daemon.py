@@ -183,6 +183,7 @@ class DaemonTests(unittest.TestCase):
     def test_restart_argv_preserves_config(self) -> None:
         config = {
             'kernel_target': 'compat', 'state': '/tmp/state',
+            'rootfs': '/tmp/rootfs.img',
             'tools': '/tmp/tools.img', 'usb': '/tmp/usb.img',
             'payload': '/tmp/payload.img', 'share': '/tmp/share',
             'display': 'gtk', 'vnc_display': ':7',
@@ -196,6 +197,7 @@ class DaemonTests(unittest.TestCase):
         argv = launch.daemon_restart_argv(config, self.root)
         joined = ' '.join(argv)
         for expected in ('daemon start', '--daemon-dir', '--kernel compat',
+                         '--rootfs /tmp/rootfs.img',
                          '--state /tmp/state', '--tools /tmp/tools.img',
                          '--usb /tmp/usb.img', '--payload /tmp/payload.img',
                          '--share /tmp/share', '--display gtk',
@@ -230,12 +232,13 @@ class DaemonTests(unittest.TestCase):
         self.assertEqual(daemon._serial_tail(None), "")
 
     @unittest.skipUnless(
-        (VM / "rootfs.img").is_file()
-        and (VM / "compat" / "initramfs-linux.img").is_file(),
-        "VM/compat inputs unavailable (public mirror)")
+        (VM / "compat" / "initramfs-linux.img").is_file(),
+        "compat initramfs unavailable (public mirror)")
     def test_boot_failure_records_serial_tail_and_qemu_rc(self) -> None:
         with tempfile.TemporaryDirectory(prefix="vm-daemon-fail-") as tmp:
             root = Path(tmp)
+            fake_rootfs = root / "rootfs.img"
+            fake_rootfs.write_bytes(b"fake rootfs for the fake qemu")
             bin_dir = root / "bin"
             bin_dir.mkdir()
             fake = bin_dir / "qemu-system-x86_64"
@@ -251,6 +254,7 @@ class DaemonTests(unittest.TestCase):
             completed = subprocess.run(
                 [sys.executable, "-B", str(VM / "launch.py"), "daemon", "start",
                  "--kernel", "compat", "--daemon-dir", str(daemon_dir),
+                 "--rootfs", str(fake_rootfs),
                  "--ready-timeout", "3", "--lock-timeout", "10"],
                 cwd=VM, env=env, capture_output=True, text=True, timeout=60)
             combined = completed.stdout + completed.stderr

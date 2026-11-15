@@ -937,5 +937,263 @@ items beyond that.
   evidence validated. 396 tests; 201 VM commits.
 - **2026-11-14 — runtime provenance schema**: QEMU/runtime/options/state/
   share blocks validated. 397 tests; 203 VM commits.
-- **Remaining:** only the blocked items above; no feasible P2 work remains.
-  P3-1 is still deferred; P3-2's practical hardening is now landed.
+- **2026-11-15 — live car ground-truth capture**: root SSH access to the
+  actual `prm-gen-5` head unit produced a 14 GB core read-only dump plus a
+  3 GB non-map navi archive (maps omitted): rootfs/log_data/update/rw_data/
+  vr/space/Data/voicememo tar archives, raw p1/p2/p3/p5/p6/p7/p16/boot0/
+  boot1 images, AppUpgrade/vDM binaries, real `esinit` and SMACK rules,
+  systemd/D-Bus/CAN/PCI/USB runtime evidence, AppNavi/CANService/navi UI
+  assets.
+  Archives verified (`SHA256SUMS`, all tar listings clean; live-log `file
+  changed` warnings only). Full dump is NAS-local; only a sanitized index is
+  committed. This removes the P2-8 reconstruction gap (real `esinit` and boot
+  chain; no separate initramfs), supplies the P2-7 update engine/public key/
+  state/logs, and documents the P2-9 CAN service topology. P2-3 still lacks a
+  recorder (`wcap-decode` only); P2-6 still needs hardware. See
+  `docs/car-capture-20261115.md`.
+- **2026-11-15 — capture validator**: `launch.py check-capture <dir>
+  [--verify-hashes]` validates a car ground-truth dump (layout, required
+  files, sums, optional navi2 sums) without extracting target data; absolute
+  sums paths are normalized.  Nine tests; real USB capture reports 9 archives,
+  9 partitions, 40 hash entries.  Hash targets must resolve inside the
+  capture root; `../`/symlink escapes are rejected; `--reject-maps` turns
+  map warnings into failures; unlisted archives/partitions are rejected.
+  408 tests; doctor green.
+- **2026-11-15 — vendor esinit + local rootfs**: `vendor-esinit` boots the
+  real `/lib/systemd/esinit` as PID 1 and requires the non-FDE decision and
+  fstab selection (`FDE SUPPORT: No`, `use fstab for non FDE`) via the new
+  `boot_markers` contract. A traced run reaches `modprobe fan`, whose
+  `lge-fan` driver attach sleeps in `__driver_attach` without micom/thermal
+  hardware, so systemd is not reached; documented as a partial boot.
+  `--rootfs PATH` selects a local vendor rootfs base (OEM image outside git)
+  instead of the network-backed default and is shared by `run`, `doctor` and
+  `daemon start`. Real run PASS; 419 tests (71 skipped); doctor green with
+  both the default and a local base.
+- **2026-11-15 — P2-9 captured CAN layouts**: the micom simulator now uses
+  128-bit frames and decodes the captured CANService IDs/layouts:
+  `0x1ab` Gen3High speed/gear, `0x2fc` battery temperature, `0x2b0`
+  steering and Gen2 `0x56e`/`0x55a`. The `vehicle-state` run asserts real
+  values, the `(raw+1) > 0x3fe` refusal and the Gen2 sentinel; 12 checks
+  PASS in a real boot. Lab frames and the no-DBC limitation remain explicit.
+- **2026-11-15 — P2-7 offline media gate**: `check-update <dir|image>` parses
+  the real `IONIQ5_EU.ver` package map and `MANIFEST.sha256`, enforces path
+  confinement/duplicates and optionally verifies hashes or declared sizes.
+  It never decrypts, extracts or runs the updater. The captured
+  `update-k.img` passes with 35 entries and 2 manifest targets; 12 new tests.
+  431 tests (72 skipped); doctor green.
+- **2026-11-15 — P2-7 DM/RDM tree gate**: `check-dm-tree <tree.xml>
+  [--compare other]` validates the FUMO object (`State`, `PkgVersion`,
+  `PkgURL`), account address/port and `APPSRV`/`CLIENT` auth fields, rejects
+  DTD/entities, and never emits addresses, account names or auth values.
+  `--compare` reports credential-redacted leaf-path diffs; the stock and
+  update trees are identical. 10 new tests; 441 tests (73 skipped); doctor
+  green.
+- **2026-11-15 — P2-7 Mode V update preflight**: `update-preflight` mounts
+  `update-k.img` read-only in the vendor rootfs, validates the package-map
+  grammar/paths/sizes, verifies `MANIFEST.sha256`, requires an opaque
+  (encrypted) payload and asserts the updater was not launched. Real run PASS
+  with all five checks in about six seconds; 1 new probe test. 444 tests
+  (73 skipped); doctor green.
+- **2026-11-15 — P2-8 esinit fixture to Multi-User**: `vendor-esinit-fixture`
+  prepares the missing `/var`/passwd runtime layout, supplies an empty
+  `/etc/fstab` and installs a wrapper that skips only `modprobe fan`, then
+  hands PID 1 to the real esinit. Real run PASS in about 16 s through
+  `OEM Type:`, systemd and `Reached target Multi-User System`; only
+  `micommanager` and `nua.service` remain failed. Lab fixture, not stock
+  boot. 3 new tests; 447 tests (73 skipped); doctor green.
+- **2026-11-15 — P2-7 negative media preflight**: `update-preflight-negative`
+  sets `UPDATE_PREFLIGHT_NEGATIVE=1`, mounts the disposable USB overlay
+  read-write, proves a wrong declared size, a `..` package path and a
+  corrupted manifest hash are rejected, restores the files and re-verifies.
+  Real run PASS with nine checks in about six seconds; 3 new tests. 450 tests
+  (73 skipped); doctor green.
+- **2026-11-15 — P2-7 FUMO exchange model**: `fumo-exchange` models OMA FUMO
+  states 10/20/30/40 with strict transitions, package version/URL/size/hash
+  admission, a mock DM token endpoint and injected download/install failures.
+  Canonical exchange ends at Idle with version 8; install failure stays
+  Downloaded for retry. Model only, not dmengine/SyncML. 18 new tests; 468
+  tests (73 skipped); doctor green.
+- **2026-11-15 — P2-7 update-state audit**: `check-update-state
+  <dir|image>` validates updateVersionInfo/FUMO timing/install params/
+  dm_state/scheduled date and cross-checks the RDM tree FUMO state, without
+  printing URLs or credentials. The captured `/update` passes with version
+  `5W.XXX.S5W_L.001.001.260128`, FUMO state 10 and dm_state 0. 10 new tests;
+  478 tests (74 skipped); doctor green.
+- **2026-11-15 — P2-7 dmengine startup**: `dmengine-startup` boots Mode C,
+  creates the 932-byte DMCDEVINFO SysV segment with a lab helper, rewrites the
+  captured tree/config to lab/localhost values and runs the real dmengine.
+  Real run PASS: FUMO and SCOMO plugins initialize and `DevID len 24` is
+  accepted; no production address. 3 new tests; 481 tests (74 skipped);
+  doctor green. Session triggering remains the next gate.
+- **2026-11-15 — P2-7 scripted FUMO exchange**: `fumo-exchange --script
+  FILE` runs per-step download/install/failure/reset operations with
+  before/after state and fail-closed error records. The MOF trigger
+  investigation reached the vendor `recvDM_01` handler and event 93 but no
+  HTTP session yet. 5 new tests; 486 tests (74 skipped); doctor green.
+- **2026-11-15 — P2-7 MOF notification codec**: `mof-notify` decodes and
+  builds the `msgtype=4&cor=<base64>` device/version notification with VIN,
+  previous/next versions and update id; server hosts are never printed. The
+  captured notification decodes to a 17-character VIN and 250226 -> 250604.
+  This supplies the `recvDM_01` input; the OEM session callback remains the
+  blocker. 5 new tests; 491 tests (75 skipped); doctor green.
+- **2026-11-15 — P2-7 dmengine OEM queue codec**: traced the vendor SysV
+  queue (key `0xd54`): dmengine emits mtype `0x48` events and waits for mtype
+  `0x36` commands; 1048-byte payload with code at 0, fields at 8/16 and text
+  at 32. Added `dmengine-queue` encode/decode. 5 new tests; 496 tests (75
+  skipped); doctor green. AppDMClient's startFumoUpdate command values remain
+  the session gate.
+- **2026-11-15 — P2-7 queue trace decoder**: `dmengine-queue trace --file`
+  parses `msgsnd`/`msgrcv` lines from strace logs (including partial 300-byte
+  captures). A phase4/updater-launch trace showed AppDMClient consuming
+  dmengine events on key 0xd54 (and its own key 0xe9b) but sending no type
+  0x36 command, so the missing AppDMClient event source is confirmed. 3 new
+  tests; 499 tests (75 skipped); doctor green.
+- **2026-11-15 — synthetic update-media builder**: `make-update-media`
+  creates a vendor-4.1-mountable ext4 stick with lab `.ver`, manifest and
+  opaque payload. Both `update-preflight` and its negative variant run PASS
+  without `update-k.img`; the vendor kernel rejects default
+  `metadata_csum`/`64bit` features, so the builder pins 4K/256-byte
+  no-checksum features. 3 new tests; 502 tests (75 skipped); doctor green.
+- **2026-11-15 — P2-7 OEM queue lab handler**: `dmengine-oem-queue` runs the
+  real dmengine with `mock-oem-queue`, sends a type-0x36 command and receives
+  event 66 after a MOF-bus-aware `recvDM_01`. Real run PASS with six checks.
+  AppDMClient policy/HTTP update remains the gate. 3 new tests; 505 tests
+  (75 skipped); doctor green.
+- **2026-11-15 — device-model regression**: `device-model` asserts the QEMU
+  Q35 host bridge, SDHCI root (`mmcblk0`), ICH9 LPC/SATA and no virtio in the
+  vendor kernel. Real run PASS; 3 new tests; 508 tests (75 skipped); doctor
+  green. Documented as substrate coverage, not BXT equivalence.
+- **2026-11-15 — AppDMClient fota callback reproduced**: `dmclient-fota-events`
+  runs the updater-launch path, then calls
+  `sendEventToDMClientFromAppUpgrade(0/1/2)` on `/fotaInterface`; the running
+  AppDMClient emits real type-0x36 commands `0x28/0x29/0x2a` to dmengine.
+  Real run PASS with all eight checks. Feeding those commands to dmengine
+  alone still yields no HTTP request, so the mock-DM exchange remains open.
+  3 new tests; 511 tests (75 skipped); doctor green after rebuilding the
+  tools image.
+- **2026-11-15 — P2-7 real FUMO HTTP exchange**: decoded dmengine's OEM
+  receive jump table: command 0/1 (not 0x28/0x29/0x2a) is the session start.
+  `dmengine-fumo-http` triggers code 0/field1=1, brings loopback up and
+  captures a real `POST /dm/message` with 907-byte WBXML SyncML at the
+  loopback mock endpoint. Real run PASS with six checks. The mock returns an
+  empty 200, so update completion is not claimed. 4 new tests; 515 tests
+  (75 skipped); doctor green.
+- **2026-11-15 — WBXML SyncML response completes the session**: decoded the
+  WBXML tag table (token = table value + 0x3f; END = 0x01). The mock now
+  returns Status 200 for the Alert/Replace commands plus Final. The real
+  engine parses all three statuses, finishes with `result=0x600a` and reports
+  SCOMO session state 1/lastError 0 with no abort. Real run PASS with eight
+  checks. No update operations or success claim. 515 tests (75 skipped);
+  doctor green.
+- **2026-11-15 — P2-7 FUMO auth gate characterized**: the mock can send a
+  FUMO `Exec` command and serve a package GET, but the real engine rejects
+  the unauthenticated server with status 407 for `SyncHdr` and `Exec` and
+  aborts 0x6011 (FUMO 24593). The earlier `dmengine-fumo-auth-gate`
+  scenario asserted that gate; it is superseded by `dmengine-fumo-download`
+  once the server credential was recovered. Real run PASS with eleven checks; 3 new tests; 518 tests
+  (75 skipped); doctor green.
+- **2026-11-15 — server auth recovered, DD and DP download complete**: the
+  digest is `base64(MD5(MD5("lab:lab-secret") + ":" + "00000000"))`; the
+  nonce is `AAuthData` (`MDAwMDAwMDA=` -> ASCII `00000000`). A server `Cred`
+  that mirrors the client's exact WBXML layout is accepted (`Server
+  authentication (by client), 401`). The mock then serves an OMA Download
+  Descriptor; OEM confirmation code 10 (`DMC_REQ_DL_OK`) lets the engine
+  fetch a 184-byte object (132-byte DP body plus a 52-byte lab HMAC trailer)
+  with component/update tables and a 16-byte payload. It logs
+  `DL session complete` and advances FUMO state 30 -> 40. The DP remains a
+  structural fixture (no signature or update payload), so no install or
+  update-success claim. Added `harness/dp.py` and `launch.py check-dp` to
+  build and validate the container; 17 new tests. Real run PASS with fourteen
+  checks; 535 tests (75 skipped); doctor green.
+- **2026-11-15 — FUMO update request reaches the engine**: after download the
+  mock answers the DM report session with a FUMO `Update` Exec. The engine
+  queues `./ManagedObjects/FUMO/Update`, then rejects the structural DP with
+  `0x6011` / FUMO `24593` and never reaches a completed update state.
+  `dmengine-fumo-update` asserts the request, rejection and no completion
+  (negative). Real run PASS with seventeen checks; 3 new tests; 538 tests
+  (75 skipped); doctor green.
+- **2026-11-15 — combined FUMO DownloadAndUpdate reaches update handoff**:
+  the captured tree has an empty `DownloadAndUpdate/PkgURL` leaf, so the lab
+  probe now inserts the loopback URL there. The mock sends
+  `Exec ./ManagedObjects/FUMO/DownloadAndUpdate`; the engine downloads the
+  DD/DP, advances FUMO state 30 -> 40 -> 60 and sends event 77 with
+  `/update//lab-fumo` to the OEM handler (`confirmUpdateCB response=0`).
+  A lab OEM result command `20`/`200` then drives
+  `VDMC_FUMO_updateReport result=[200]`, `triggerReportSession(200)`, state
+  `90 -> 10` and a completed DM report session. The result is lab-supplied
+  and the physical updater is not run, so no install/update-success is
+  claimed. Real run PASS with twenty checks; 541 tests (75 skipped); doctor
+  green.
+- **2026-11-15 — FUMO update failure result**: the same combined flow reports
+  lab result `500` through OEM command `20`. The engine accepts it, logs
+  `VDMC_FUMO_updateReport result=[500]`, triggers the DM report session,
+  returns to idle and never enters success state `90`. `dmengine-fumo-update-
+  failure` asserts the failure report and absence of success (negative). Real
+  run PASS with twenty-one checks; 3 new tests; 544 tests (75 skipped); doctor
+  green.
+- **2026-11-15 — FUMO invalid update result**: result `0` is rejected by
+  `validateResultCode` and remapped to `UNDEFINED(409)`. The engine still
+  reports through a DM session, transitions state `70 -> 10`, and never enters
+  success state `90`. `dmengine-fumo-update-invalid-result` asserts the remap,
+  failure report and absence of success (negative validation path). Real run
+  PASS with twenty-two checks; 3 new tests; 550 tests (75 skipped); doctor
+  green.
+- **2026-11-15 — FUMO missing-object download**: the DD parses and the OEM
+  confirmation is sent, but `/object.bin` returns 404. The engine retries,
+  logs `DL session aborted, 0x6306` and FUMO result 407 / error 25350, and no
+  successful object download occurs. `dmengine-fumo-download-missing` asserts
+  the 404, abort code, FUMO error and absence of a downloaded object (negative).
+  Real run PASS with fourteen checks; 3 new tests; 553 tests (75 skipped);
+  doctor green.
+- **2026-11-15 — DP update-payload fixture**: `harness/dp.py` now builds and
+  validates update-table entries and payload bounds. The mock serves a
+  132-byte DP with one 16-byte `LABUPDATE-DATA01` payload; a loopback test
+  proves the C fixture is byte-identical to the Python builder. All FUMO
+  scenarios still download it. 3 new tests; 547 tests (75 skipped); doctor
+  green.
+- **2026-11-15 — FUMO resume**: the mock serves a 64/184 partial object with
+  `Accept-Ranges` and an ETag. The engine records offset 64 and retries with
+  `Range: bytes=64-` / `If-Range`; the mock returns the remaining 120 bytes
+  with 206 and the download completes (state 30 -> 40, notification posted).
+  `dmengine-fumo-resume` asserts partial, Range request, completion and
+  notification. Real run PASS with seven checks; 3 new tests; 570 tests
+  (75 skipped); doctor green.
+- **2026-11-15 — FUMO bad-signature boundary**: the mock flips one bit in
+  the lab HMAC trailer. The engine still downloads the 184-byte object, posts
+  the install notification and advances to state 40. `check-dp --key` rejects
+  the same object with a signature mismatch, proving the trailer is not
+  engine-enforced. `dmengine-fumo-download-badsig` asserts the engine path and
+  the mock marker (negative security boundary). Real run PASS with sixteen
+  checks; 3 new tests; 567 tests (75 skipped); doctor green.
+- **2026-11-15 — FUMO update without result**: the combined flow withholds
+  the OEM result after event 77. The engine remains in update progressing
+  (`Set state, 60`), never logs `VDMC_FUMO_updateReport`, never sets state 90
+  and issues no success report. `dmengine-fumo-update-no-result` asserts the
+  download/update handoff and the absence of completion. Real run PASS with
+  nineteen checks; 3 new tests; 563 tests (75 skipped); doctor green.
+- **2026-11-15 — FUMO notification failure**: the DP download succeeds but
+  `/notify` returns HTTP 500. The engine retries, logs
+  `DL session aborted, 0x6308` and FUMO result 503 / error 25352, and never
+  reaches state 40/60. `dmengine-fumo-notify-failure` asserts the 500
+  notification attempts, abort/FUMO error and absence of completion (negative).
+  Real run PASS with fifteen checks; 3 new tests; 560 tests (75 skipped);
+  doctor green.
+- **2026-11-15 — FUMO install notification**: the mock handles
+  `POST /notify`, logs `MOCK_DM_NOTIFY path=/notify bytes=11 body=900 Success`
+  and returns 200. `dmengine-fumo-download` asserts `fumo-notify`; the combined
+  scenario still passes with the same notification. Real download run PASS
+  with fifteen checks; 557 tests (75 skipped); doctor green.
+- **2026-11-15 — DP signature trailer**: `harness/dp.py` supports a lab
+  HMAC-SHA256 trailer and `check-dp --key`; the mock serves a 184-byte object
+  (132-byte body + 52-byte trailer). A loopback test verifies the C fixture
+  against the Python builder, and tampering is rejected. This is an integrity
+  fixture, not a vendor firmware signature. All FUMO scenarios still download
+  it. 4 new tests; 557 tests (75 skipped); doctor green.
+- **2026-11-15 — NAS import verified**: 9.4 GB preservation copy complete;
+  all archives, partitions, runtime files and the navi2 archive match.
+  `meta/SOURCE.txt` was finalized after the original manifest, so its one
+  stale entry was corrected on the NAS with `SHA256SUMS.orig-20261115` and
+  `MANIFEST-CORRECTION.txt`; the capture script now writes metadata first and
+  hashes last, excluding `SHA256SUMS*`.
+- **Remaining:** P2-3 (recorder), P2-6 (hardware) and the now-feasible
+  P2-7/P2-8/P2-9 slices using the car dump; P3 deferred.

@@ -62,7 +62,8 @@ HOME_ALLOW = {"root", "car", ".ssh", "72x72", "99x99", "bubble01", "menu"}
 # details: the QEMU virtio gateway/guest range, loopback, and the car-AP
 # tether gateway the WiFi app documents (the laptop joined to the car's own
 # access point normally gets 10.42.0.1; on-car ssh instructions use it).
-LAN_ALLOW = ("10.0.2.", "127.0.0.1", "0.0.0.0", "10.42.0.")
+LAN_ALLOW = ("10.0.2.", "127.0.0.1", "0.0.0.0", "10.42.0.",
+             "10.55.0.")  # head-unit USB ECM link to the Pi (product default)
 # Whole-file leak-scan exemption: the gate names its own patterns (the
 # username token inside NICK_RE, PEM headers) and holds no personal data —
 # it cannot flag itself. Nothing else belongs here.

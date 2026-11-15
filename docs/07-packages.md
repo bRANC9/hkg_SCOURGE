@@ -15,7 +15,7 @@ packages under active development, not finished products.**
 | Tweaks | Automatic DST (IANA zone → `APP_SETTING_CLOCK_DAYLIGHTSAVETIME`) | WIP — almost working |
 | Tweaks | Hyundai OTA block (vendor `setOFFlineMode`, keeps USB updates) | WIP — off by default |
 | Tweaks | **Reboot app** — fourth tile + stock Yes/No modal; clean `systemctl reboot` with a micom `SetETCCPUWDTReset` fallback after 20 s; update guard; driving allowed with a nav/media/camera warning; SMACK `_` hard gate | WIP — host-tested; VM/car pending |
-| Battery | Tile + full-screen overlay (temp, SoC, heater state/power) | WIP — almost working; installer retries a failed copy after unlinking the destination and verifies the running daemon matches the payload (`daemon_fresh`; force-restarts a stale one) |
+| Battery | Tile + full-screen overlay (temp, SoC, heater state and battery-care instant power) | WIP — almost working; installer retries a failed copy after unlinking the destination and verifies the running daemon matches the payload (`daemon_fresh`; force-restarts a stale one) |
 | Battery | Preheat engage — full WiCAN sequence mimicry: `0x0C7` burst at 40 ms pacing + `0x4E8`/`0x4CC` cluster countdown; blocked at ≥ 21 °C min-cell temp; a no-status start is reported `requested_unconfirmed` after the 70 s timeout (never assumed active; `precond_confirmed` in `/status`); exhausted retries end with a cleanup stop burst | WIP — safety-interlocked |
 | Battery | Cluster preheat countdown (WiCAN `0x4E8`+`0x4CC` layout) + standalone "Cluster display test" toggle | WIP — replaces the earlier synthetic `0x4ED` |
 | Battery | Charge door open/close with the factory `0x4A2` arm frames (all-FF then `DF` open, `EF` close; `0x4C5` is not a door command; per-child status tracking; gear/Park gate disabled while `0x036` is unreliable; observed-cable veto, unknown cable advisory) | WIP — frames dbus-1.8-validated in the VM |
@@ -138,9 +138,9 @@ Summary for package authors:
   the stock binary; only startup-group/preload spawns verify. A sigstub
   patch now ships as part of the signatureless-update chain
   (`tools/update-debug/applauncher_sigstub.sh` for already-rooted cars,
-  baked into the build-4 stage-1 rootfs — VM-validated, car validation
-  pending, docs/08); until that chain is car-validated, custom apps stay
-  on Modes A/B. The alternative route to a separate-process app is
+  baked into the build-5 stage-1 rootfs — VM-validated and car-validated,
+  docs/08 and docs/17); the normal-USB chain is confirmed, so custom apps
+  can rely on the patched launcher. The alternative route to a separate-process app is
   **Mode G** (own Wayland process outside AppLauncher, where no `.sign`
   check applies — high confidence per the research, with a hard safety
   rule: never crash weston, its death triggers a MICOM watchdog reset of

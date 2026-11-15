@@ -90,6 +90,50 @@ def evaluate_systemd_transition(scenario: dict, prep_rc: int | None,
     }
 
 
+def evaluate_boot_only(scenario: dict, serial_text: str) -> dict:
+    """Evaluate an init-override boot without a live shell.
+
+    A scenario may map check names to required serial markers with
+    ``boot_markers``.  Without it, the single ``boot_marker`` gates every
+    check (legacy behaviour).  Missing evidence fails closed.
+    """
+    marker = str(scenario.get('boot_marker', 'Reached target Multi-User System'))
+    checks = {name: 'FAIL' for name in scenario.get('checks', [])}
+    failures: list[str] = []
+    markers: dict[str, str] = scenario.get('boot_markers') or {}
+    marker_present = marker in serial_text
+    if not marker_present:
+        failures.append(f'boot marker not reached: {marker}')
+    evidence: dict[str, bool] = {}
+    if markers:
+        for text, check in markers.items():
+            present = text in serial_text
+            evidence[text] = present
+            if check in checks:
+                checks[check] = 'PASS' if present else 'FAIL'
+            if not present:
+                failures.append(f'boot marker not reached: {text}')
+        unmapped = sorted(name for name in checks if name not in markers.values())
+        for name in unmapped:
+            checks[name] = 'FAIL'
+        if unmapped:
+            failures.append('unmapped boot checks: ' + ', '.join(unmapped))
+    elif marker_present:
+        for name in checks:
+            checks[name] = 'PASS'
+    if 'Kernel panic' in serial_text:
+        failures.append('kernel panic')
+    return {
+        'checks': checks,
+        'failures': failures,
+        'marker_present': marker_present,
+        'marker_evidence': evidence,
+        'boot_marker': marker,
+        'verdict': 'FAIL' if failures else 'PASS',
+        'rc': 1 if failures else 0,
+    }
+
+
 def phase_summary(text: str) -> dict:
     return {
         'ok': bool(re.search(r'(?m)^PHASE4_OK\r?$', text)),

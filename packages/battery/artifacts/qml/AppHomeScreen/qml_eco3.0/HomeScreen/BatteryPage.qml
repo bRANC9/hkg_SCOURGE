@@ -169,18 +169,32 @@ Item {
         if (typeof AppPHEVModel !== "undefined" && AppPHEVModel.batLevel >= 0) return true
         return daemonSocValid
     }
-    readonly property int heaterPercent: {
-        if (typeof AppPHEVModel !== "undefined" && AppPHEVModel.heatBatteryPercent >= 0)
-            return AppPHEVModel.heatBatteryPercent
-        return -1
+    // Battery-care instantaneous power from the factory Electricity Use
+    // model.  This is the useful heater indicator: heatBatteryPercent is a
+    // rounded share of total electricity use, not heater strength, so 0% does
+    // not mean the heater is off.
+    readonly property real heatInstantW: {
+        if (typeof AppPHEVModel === "undefined") return -1
+        var h = AppPHEVModel.pwrInstantHeat
+        var b = AppPHEVModel.pwrInstantBattery
+        if ((h === undefined || h < 0) && (b === undefined || b < 0)) return -1
+        return (h > 0 ? h : 0) + (b > 0 ? b : 0)
     }
-    readonly property bool conditioningMode: {
-        if (typeof AppPHEVModel !== "undefined")
-            return AppPHEVModel.batteryConditionMode ? true : false
-        return false
+    readonly property string heatInstantText: {
+        if (heatInstantW < 0) return "\u2014"
+        if (heatInstantW <= 0) return "0 W"
+        return (heatInstantW / 1000).toFixed(2) + " kW"
     }
-    readonly property bool heaterActive: heaterPercent > 0 || heaterState === "preparing" || heaterState === "active"
-    readonly property bool preheatOn: preheatPending || preheatRequested || heaterActive
+    // Preconditioning state comes from the daemon (0x2AD), never from the
+    // rounded electricity-use share.
+    readonly property bool heaterActive: heaterState === "preparing" || heaterState === "active"
+    // The 10 s retry nudge is armed only while nothing proves the heater is
+    // running: the daemon state, the timeout Stop affordance, or instant power.
+    readonly property bool retryArmed: preheatRequested && !heaterActive
+                                       && heatInstantW <= 0 && !blockReason
+                                       && heaterState !== "timeout"
+    readonly property bool preheatOn: preheatPending || preheatRequested
+                                      || heaterActive || heaterState === "timeout"
     readonly property bool socLow: socValid && socPct < 20
     readonly property bool tempHigh: battValid && battMin >= 21
     // The gear/Park signal (0x036) is unreliable; only an observed cable
@@ -403,6 +417,13 @@ Item {
         xhr.send()
     }
 
+    function expireStaleRequest() {
+        if (preheatRequested && !heaterActive && heaterState !== "timeout"
+            && heatInstantW <= 0
+            && Date.now() - preheatRequestedAt > 180000)
+            preheatRequested = false
+    }
+
     function togglePreheat() {
         if (!serviceOk || preheatPending) return
         // Decide the direction BEFORE touching preheatPending: preheatOn
@@ -439,22 +460,26 @@ Item {
         if (preheatPending) return "Requesting"
         if (heaterState === "preparing") return "Preparing"
         if (heaterState === "active") return "Active"
-        if (heaterPercent > 0) return "Heating"
+        if (heaterState === "timeout") return "Not confirmed"
         if (preheatRequested) return "Requested"
         if (heaterState === "starting") return "Starting"
         if (heaterState === "stopping") return "Stopping"
-        if (heaterState === "timeout") return "Not confirmed"
         return "Off"
     }
 
     function heaterSubText() {
         if (preheatPending) return "Sending request\u2026"
         if (heaterState === "timeout")
-            return "Request not confirmed \u2014 tap to stop"
+            return heatInstantW > 0
+                   ? "Request not confirmed \u2014 battery care " + heatInstantText
+                     + " \u2014 tap to stop"
+                   : "Request not confirmed \u2014 tap to stop"
         if (heaterState === "preparing" && etaS > 0)
-            return "Battery heater \u00b7 about " + etaS + " s"
-        if (heaterPercent >= 0)
-            return "Heater power " + heaterPercent + "%"
+            return heatInstantW >= 0
+                   ? "Battery care " + heatInstantText + " \u00b7 about " + etaS + " s"
+                   : "Battery heater \u00b7 about " + etaS + " s"
+        if (heatInstantW >= 0)
+            return "Battery care " + heatInstantText
         if (preheatRequested) return "Waiting for the BMS"
         return "Battery heater"
     }
@@ -492,10 +517,10 @@ Item {
     }
 
     Timer {
+        id: preheatRetryTimer
         interval: 10000
         repeat: true
-        running: root.preheatRequested && !root.heaterActive
-                 && !root.blockReason && root.heaterState !== "timeout"
+        running: root.retryArmed
         onTriggered: {
             if (root.preheatRetries < 4) {
                 root.preheatRetries++
@@ -508,11 +533,7 @@ Item {
         interval: 5000
         running: true
         repeat: true
-        onTriggered: {
-            if (root.preheatRequested && !root.heaterActive &&
-                Date.now() - root.preheatRequestedAt > 180000)
-                root.preheatRequested = false
-        }
+        onTriggered: root.expireStaleRequest()
     }
 
     // ---- background: the stock themed home background (styleguide §3) ----
@@ -797,8 +818,8 @@ Item {
                       + (root.battCondKnown && root.battCond > 0 ? "  \u00b7  0x25D=" + root.battCond : "")
                 font.pixelSize: ConstantModel.FONT_SIZE_42
                 textBold: true
-                color: root.preheatOn ? "#4CAF50"
-                     : (root.heaterState === "timeout" ? "#E53935" : HomeThemeHelper.normalTextColor)
+                color: root.heaterState === "timeout" ? "#E53935"
+                     : (root.preheatOn ? "#4CAF50" : HomeThemeHelper.normalTextColor)
             }
             QText {
                 x: 28
@@ -961,6 +982,7 @@ Item {
                 var fg = root.atOtherApp ? "other" : "home"
                 var mon = root.homeMonitor ? "on" : "off"
                 var cond = root.battCondKnown ? ("Cond " + root.battCond) : "Cond ?"
+                var heat = "Heat " + root.heatInstantText
                 var smack = root.smack ? root.smack : "?"
                 if (!root.smackOk && root.smackExpected)
                     smack += " (want " + root.smackExpected + ")"
@@ -968,6 +990,7 @@ Item {
                           ? Math.round(root.battAgeMs / 1000) + "s" : "?"
                 var micom = root.micomName ? root.micomName : "?"
                 var line = "FG " + fg + "   \u00b7   " + cond
+                           + "   \u00b7   " + heat
                            + "   \u00b7   Smack " + smack
                            + "   \u00b7   Micom " + micom
                            + "   \u00b7   Gear " + gear

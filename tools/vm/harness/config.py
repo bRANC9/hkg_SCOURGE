@@ -18,7 +18,21 @@ SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'can-smoke', 'vehicle-state', 'recovery-reboot', 'recovery-no-space',
                   'recovery-corrupt-media', 'recovery-usb-removal',
                   'recovery-power-loss', 'vendor-systemd',
-                  'vendor-systemd-dbus', 'recovery-repeat-update')
+                  'vendor-systemd-dbus', 'vendor-esinit',
+                  'vendor-esinit-fixture', 'update-preflight',
+                  'update-preflight-negative', 'dmengine-startup',
+                  'dmengine-oem-queue', 'dmengine-fumo-http',
+                  'dmengine-fumo-download', 'dmengine-fumo-update',
+                  'dmengine-fumo-download-update',
+                  'dmengine-fumo-update-failure',
+                  'dmengine-fumo-update-invalid-result',
+                  'dmengine-fumo-download-missing',
+                  'dmengine-fumo-notify-failure',
+                  'dmengine-fumo-update-no-result',
+                  'dmengine-fumo-download-badsig',
+                  'dmengine-fumo-resume', 'device-model',
+                  'dmclient-fota-events',
+                  'recovery-repeat-update')
 
 
 def load_profile(name: str) -> dict:
@@ -94,6 +108,50 @@ echo 'HARNESS_CHECK recovery-no-space PASS'
         return (VM / 'probes' / 'recovery-corrupt-media.sh').read_text()
     if name == 'recovery-repeat-update':
         return (VM / 'probes' / 'recovery-repeat-update.sh').read_text()
+    if name == 'update-preflight':
+        return (VM / 'probes' / 'update-preflight.sh').read_text()
+    if name == 'update-preflight-negative':
+        return ('export UPDATE_PREFLIGHT_NEGATIVE=1\n'
+                + (VM / 'probes' / 'update-preflight.sh').read_text())
+    if name == 'dmengine-startup':
+        return (VM / 'probes' / 'dmengine-startup.sh').read_text()
+    if name == 'dmengine-oem-queue':
+        return (VM / 'probes' / 'dmengine-oem-queue.sh').read_text()
+    if name == 'dmengine-fumo-http':
+        return (VM / 'probes' / 'dmengine-fumo-http.sh').read_text()
+    if name == 'dmengine-fumo-download':
+        return (VM / 'probes' / 'dmengine-fumo-download.sh').read_text()
+    if name == 'dmengine-fumo-update':
+        return ('export FUMO_MODE=update\n' +
+                (VM / 'probes' / 'dmengine-fumo-download.sh').read_text())
+    if name == 'dmengine-fumo-download-update':
+        return ('export FUMO_MODE=combined\n' +
+                (VM / 'probes' / 'dmengine-fumo-download.sh').read_text())
+    if name == 'dmengine-fumo-update-failure':
+        return ('export FUMO_MODE=combined FUMO_RESULT=500\n' +
+                (VM / 'probes' / 'dmengine-fumo-download.sh').read_text())
+    if name == 'dmengine-fumo-update-invalid-result':
+        return ('export FUMO_MODE=combined FUMO_RESULT=0 '
+                'FUMO_INVALID_RESULT=1\n' +
+                (VM / 'probes' / 'dmengine-fumo-download.sh').read_text())
+    if name == 'dmengine-fumo-download-missing':
+        return ('export FUMO_MODE=missing\n' +
+                (VM / 'probes' / 'dmengine-fumo-download.sh').read_text())
+    if name == 'dmengine-fumo-notify-failure':
+        return ('export FUMO_MODE=notifyfail\n' +
+                (VM / 'probes' / 'dmengine-fumo-download.sh').read_text())
+    if name == 'dmengine-fumo-update-no-result':
+        return ('export FUMO_MODE=combined FUMO_SKIP_RESULT=1\n' +
+                (VM / 'probes' / 'dmengine-fumo-download.sh').read_text())
+    if name == 'dmengine-fumo-download-badsig':
+        return ('export FUMO_MODE=badsig\n' +
+                (VM / 'probes' / 'dmengine-fumo-download.sh').read_text())
+    if name == 'dmengine-fumo-resume':
+        return (VM / 'probes' / 'dmengine-fumo-resume.sh').read_text()
+    if name == 'device-model':
+        return (VM / 'probes' / 'device-model.sh').read_text()
+    if name == 'vendor-esinit-fixture':
+        return (VM / 'probes' / 'vendor-esinit-fixture.sh').read_text()
     if name == 'recovery-usb-removal':
         return r'''set -u
 modprobe ehci-pci 2>/dev/null || true

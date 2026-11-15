@@ -4,10 +4,16 @@
 # Four binaries:
 #
 #   /app/bin/AppUpgrade   (10,787,256 B) — installed updater engine
+#     SCOMO engine (embedded at 31,844):
 #     FUN_002f5a00  2086500  final hash/signature verifier
 #     FUN_002f5b60  2086852  helper calling FUN_002f5a00
 #     FUN_002f5ba0  2086916  TE2 verifier wrapper
 #     FUN_002f5c40  2087076  second verifier wrapper
+#     FUMO engine (embedded at 5,710,280) — the engine the normal-USB
+#     update actually runs (car-logged AppUpgradeEngine.cpp line numbers
+#     match the FUMO build only):
+#     FUN_0028f5a0  7346024  FUMO checkHash dispatcher (returns -403 for
+#                            re-encrypted containers when stock)
 #
 #   /app/bin/AppScomoDM   (1,934,752 B) — UsbUpdateManager
 #     FUN_001e3430  930864   final verify
@@ -79,6 +85,7 @@ if [ -f "$F" ] && [ "$(stat -c%s "$F" 2>/dev/null)" = "$F_SIZE" ]; then
     patch_one "$F" 2086852 FUN_002f5b60 4883ec1864488b04 31c0c3 '\061\300\303' 0
     patch_one "$F" 2086916 FUN_002f5ba0 554889f531f65348 31c0c3 '\061\300\303' 0
     patch_one "$F" 2087076 FUN_002f5c40 554889f5534883ec 31c0c3 '\061\300\303' 0
+    patch_one "$F" 7346024 FUN_0028f5a0 415455534883ec50 31c0c3 '\061\300\303' 0
 fi
 
 if [ -f "$SCDM" ] && [ "$(stat -c%s "$SCDM" 2>/dev/null)" = "$SCDM_SIZE" ]; then

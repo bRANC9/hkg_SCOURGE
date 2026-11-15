@@ -21,13 +21,14 @@ mkdir -p /rw_data 2>/dev/null || true
     mount 2>/dev/null | head -40
     echo "--- df ---"
     df -h 2>/dev/null | head -30
-    echo "--- updater (engine: four stubs expected) ---"
+    echo "--- updater (engine: five stubs expected; eleven total) ---"
     F=/app/bin/AppUpgrade
     if [ -f "$F" ]; then
         stat -c '%s %n' "$F" 2>/dev/null
         md5sum "$F" 2>/dev/null
         for pair in 2086500:FUN_002f5a00 2086852:FUN_002f5b60 \
-                    2086916:FUN_002f5ba0 2087076:FUN_002f5c40; do
+                    2086916:FUN_002f5ba0 2087076:FUN_002f5c40 \
+                    7346024:FUN_0028f5a0; do
             off=${pair%%:*}; name=${pair##*:}
             printf '%s bytes at %s: ' "$name" "$off"
             dd if="$F" bs=1 skip="$off" count=3 2>/dev/null | od -An -tx1 | tr -d ' \n'

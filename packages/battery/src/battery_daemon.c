@@ -64,7 +64,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BATTERY_DAEMON_VERSION "2026-11-14.2"
+#define BATTERY_DAEMON_VERSION "2026-11-15.1"
 
 #define IFACE_DEFAULT "can0"
 #define HTTP_PORT 8088

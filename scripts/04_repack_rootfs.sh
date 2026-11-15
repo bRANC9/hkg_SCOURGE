@@ -6,8 +6,10 @@
 # hashes in docs/03-stage1-build.md).
 #
 #   work/stock-plain.tar.gz (genuine plaintext)
-#     -> surgery.py replaces AppUpgrade + AppScomoDM + the two .qm files
-#     -> tar --append the four failsafe entries from payload/rootfs/
+#     -> 03b patches /etc/smack_setup.sh + the permissive flag
+#     -> surgery.py replaces AppUpgrade + AppScomoDM + AppDMClient +
+#        AppLauncher + /etc/smack_setup.sh + the two .qm files
+#     -> tar --append the four failsafe entries + the SMACK flag
 #     -> libdeflate L10 (concatenated gzip members)
 #     -> truncate to exactly GENUINE_BODY_SIZE
 #     -> TE2-encrypt with the genuine envelope as the metadata template
@@ -21,6 +23,8 @@ need_fetched
 
 W="$WORK_DIR"
 P="$W/payload"
+SMACK="$W/smack"
+SMACK_ETC="$SMACK/etc"
 mkdir -p "$W" "$OUT_DIR"
 
 STOCK="$W/stock-plain.tar.gz"
@@ -38,17 +42,31 @@ GENUINE="$INPUT_DIR/mango-rootfs.tar.gz"
 [ -f "$P/AppDMClient.patched" ] || { echo "missing patched AppDMClient (run 03_patch_payload.py)" >&2; exit 1; }
 [ -f "$P/AppLauncher.patched" ] || { echo "missing patched AppLauncher (run 03_patch_payload.py)" >&2; exit 1; }
 
-echo "== surgery: replace AppUpgrade + AppScomoDM + AppDMClient + AppLauncher + .qm"
+echo "== patch /etc/smack_setup.sh + flag (build artifact in work/smack/)"
+"$PYTHON" "$SCOURGE_ROOT/scripts/03b_patch_smack.py" --stock-tar "$STOCK" --out "$SMACK_ETC"
+
+echo "== surgery: replace AppUpgrade + AppScomoDM + AppDMClient + AppLauncher + smack_setup + .qm"
 "$PYTHON" "$SCOURGE_ROOT/tools/surgery.py" "$STOCK" "$REPLACED" \
   --replace ./app/bin/AppUpgrade="$P/AppUpgrade.patched" \
   --replace ./app/bin/AppScomoDM="$P/AppScomoDM.patched" \
   --replace ./app/bin/AppDMClient="$P/AppDMClient.patched" \
   --replace ./app/bin/AppLauncher="$P/AppLauncher.patched" \
+  --replace ./etc/smack_setup.sh="$SMACK_ETC/smack_setup.sh" \
   --replace ./app/share/AppStandbyClock/localization/qm/translation_en-gb.qm="$P/translation_en-gb.qm" \
   --replace ./app/share/AppStandbyClock/localization/qm/translation_en-au.qm="$P/translation_en-au.qm"
 
 echo "== decompress to tar"
 zcat "$REPLACED" > "$TAR"
+
+# Fixed mtimes for the appended payload entries: the TE2 hash is only
+# deterministic if the tar headers are. Absolute epochs (not `touch -t`)
+# keep the build identical on any host timezone; these match the
+# car-validated stage-1 build-5 image.
+touch -d @1793998494 "$SCOURGE_ROOT/payload/rootfs/etc/initial_root/run_stuff_loader.sh"
+touch -d @1794152667 "$SCOURGE_ROOT/payload/rootfs/etc/initial_root/updater_guard.sh"
+touch -d @1793997988 "$SCOURGE_ROOT/payload/rootfs/etc/systemd/system/initial-root-failsafe.service"
+touch -h -d @1793997991 "$SCOURGE_ROOT/payload/rootfs/etc/systemd/system/multi-user.target.wants/initial-root-failsafe.service"
+touch -d @1794317608 "$SMACK_ETC/smack_permissive"
 
 echo "== append the failsafe entries (only new entries; parent dirs exist)"
 tar --append -f "$TAR" --format=ustar --numeric-owner --owner=0 --group=0 \
@@ -57,6 +75,8 @@ tar --append -f "$TAR" --format=ustar --numeric-owner --owner=0 --group=0 \
     ./etc/initial_root/updater_guard.sh \
     ./etc/systemd/system/initial-root-failsafe.service \
     ./etc/systemd/system/multi-user.target.wants/initial-root-failsafe.service
+tar --append -f "$TAR" --format=ustar --numeric-owner --owner=0 --group=0 \
+    -C "$SMACK" ./etc/smack_permissive
 
 echo "== libdeflate L10"
 "$PYTHON" "$TOCTOU_REPO/pizero/chunkgz.py" "$TAR" "$GZ" 10 67108864

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
-"""05_verify_rootfs.py — verify the stage-1 TE2 envelope end to end.
+"""05_verify_rootfs.py — verify the stage-1 build-5 TE2 envelope end to end.
 
 Checks:
   1. envelope size == GENUINE_ENVELOPE_SIZE (879,126,179)
   2. TE2 inspect: metadata integrity, IV, body size
   3. decrypt -> exact GENUINE_BODY_SIZE plaintext, gzip -t, tar entries
-  4. patched AppUpgrade: four stubs present
+  4. patched AppUpgrade: five engine stubs present (SCOMO four + FUMO)
   5. patched AppScomoDM: two button-gate stubs present
   6. patched .qm files carry the boot message
-  7. the four failsafe entries are present in the tar
+  7. the four failsafe entries + SMACK flag are present in the tar
 
 Usage: 05_verify_rootfs.py [--container out/stage1.te2]
 """
@@ -39,6 +39,7 @@ NEW_FILES = [
     "./etc/initial_root/updater_guard.sh",
     "./etc/systemd/system/initial-root-failsafe.service",
     "./etc/systemd/system/multi-user.target.wants/initial-root-failsafe.service",
+    "./etc/smack_permissive",
 ]
 QM_FILES = [
     "./app/share/AppStandbyClock/localization/qm/translation_en-gb.qm",
@@ -121,12 +122,15 @@ def main():
     for n in NEW_FILES:
         check(n in names, "entry %s" % n)
 
-    print("5. patched updater/launcher binaries (ten stubs)")
+    print("5. patched updater/launcher binaries (eleven stubs)")
     tmp = tempfile.mkdtemp(prefix="scourge_verify_")
     try:
         subprocess.run(["tar", "-xzf", plain, "-C", tmp,
                         "./app/bin/AppUpgrade", "./app/bin/AppScomoDM",
-                        "./app/bin/AppDMClient", "./app/bin/AppLauncher"],
+                        "./app/bin/AppDMClient", "./app/bin/AppLauncher",
+                        "./etc/smack_setup.sh", "./etc/smack_permissive",
+                        "./etc/systemd/system/initial-root-failsafe.service",
+                        "./etc/initial_root/run_stuff_loader.sh"],
                        check=True)
         data = open(os.path.join(tmp, "app/bin/AppUpgrade"), "rb").read()
         for name, off, _expect in ENGINE_PATCHES:
@@ -145,6 +149,48 @@ def main():
             check(ldata[off:off + len(LAUNCHER_STUB)] == LAUNCHER_STUB,
                   "%s bytes at %d = %s" % (name, off,
                                            ldata[off:off + len(LAUNCHER_STUB)].hex()))
+
+        print("5b. failsafe hardening")
+        unit = open(os.path.join(
+            tmp, "etc/systemd/system/initial-root-failsafe.service"),
+            encoding="utf-8").read()
+        check("After=local-fs.target" in unit,
+              "service ordered After=local-fs.target")
+        check("Before=multi-user.target ApplicationLauncher.service" in unit,
+              "service ordered Before=multi-user.target + ApplicationLauncher")
+        check("Restart=always" in unit, "service Restart=always")
+        check("ExecStart=/bin/sh /etc/initial_root/run_stuff_loader.sh" in unit,
+              "service execs the loader via /bin/sh (SMACK-safe)")
+        loader = open(os.path.join(
+            tmp, "etc/initial_root/run_stuff_loader.sh"),
+            encoding="utf-8").read()
+        for marker in ("modprobe texfat", "modprobe usb-storage",
+                       "modprobe vfat", "/dev/sd?1", "scan_raw",
+                       "try_mount", "texfat", "STAGE3=1", "sleep 8"):
+            check(marker in loader, "loader hardening marker %r" % marker)
+        check("/rw_data/initial_root_boot.txt" in loader,
+              "loader writes the boot marker")
+        check("[ -d /rw_data ] || LOG=/tmp/initial_root.log" in loader,
+              "loader log falls back to /tmp")
+
+        print("5c. SMACK permissive flag")
+        smack = open(os.path.join(tmp, "etc/smack_setup.sh"), encoding="utf-8").read()
+        flag = open(os.path.join(tmp, "etc/smack_permissive"), encoding="utf-8").read()
+        check(smack.count("if [ -f /etc/smack_permissive ]; then") == 2,
+              "smack_setup.sh checks the flag in both write sites")
+        check("printf '%s' '-' > $ONLYCAP_FILE" in smack,
+              "onlycap is cleared by the flag (check_label_final)")
+        check(smack.count('echo "Privileged" >> $ONLYCAP_FILE') == 1,
+              "vendor Privileged fallback retained once")
+        check("printf '%s' '-' > /sys/fs/smackfs/onlycap" in smack,
+              "onlycap is cleared by the flag (nosmack)")
+        check(smack.count('echo "Privileged" > /sys/fs/smackfs/onlycap') == 1,
+              "vendor nosmack Privileged fallback retained once")
+        check('CHECK_UNECE2 == "0" ] || [ -f /etc/smack_permissive ]' in smack,
+              "bringup-switch is forced by the flag")
+        check("bringup-switch" in smack, "bringup-switch write present")
+        check("Stage-4 SMACK flag" in flag and "onlycap" in flag,
+              "flag file documents the policy")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

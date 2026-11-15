@@ -56,6 +56,8 @@ Item {
             page.blockReason = ""
             page.battValid = true
             page.battMin = 7
+            AppPHEVModel.setInstantPower(-1, -1)
+            AppPHEVModel.setHeatPercent(-1)
             scene.lastPost = ""
             scene.postCount = 0
         }
@@ -121,6 +123,100 @@ Item {
             d.state = "timeout"
             page.applyStatus(d)
             compare(page.preheatRequested, true)
+        }
+
+        // Battery-care instant power is the heater indicator; the rounded
+        // heatBatteryPercent share is deliberately not used.
+        function test_instant_power_kw() {
+            AppPHEVModel.setInstantPower(1240, 0)
+            compare(page.heatInstantW, 1240)
+            compare(page.heatInstantText, "1.24 kW")
+            page.heaterState = "active"
+            verify(page.heaterSubText().indexOf("Battery care 1.24 kW") >= 0)
+        }
+
+        function test_instant_power_zero_and_unavailable() {
+            AppPHEVModel.setInstantPower(0, 0)
+            compare(page.heatInstantW, 0)
+            compare(page.heatInstantText, "0 W")
+            AppPHEVModel.setInstantPower(-1, -1)
+            compare(page.heatInstantW, -1)
+            compare(page.heatInstantText, "\u2014")
+        }
+
+        // The rounded electricity-use share must never activate the heater
+        // or the switch; only the daemon state and instant power matter.
+        function test_share_does_not_activate_heater() {
+            AppPHEVModel.setHeatPercent(80)
+            AppPHEVModel.setInstantPower(-1, -1)
+            page.heaterState = "idle"
+            compare(page.heaterActive, false)
+            compare(page.preheatOn, false)
+            verify(page.heaterSubText().indexOf("80%") < 0)
+        }
+
+        function test_one_channel_power() {
+            AppPHEVModel.setInstantPower(-1, 900)
+            compare(page.heatInstantW, 900)
+            compare(page.heatInstantText, "0.90 kW")
+        }
+
+        function test_retry_suppressed_by_power() {
+            page.preheatRequested = true
+            page.heaterState = "starting"
+            AppPHEVModel.setInstantPower(500, 0)
+            compare(page.retryArmed, false)
+            AppPHEVModel.setInstantPower(-1, -1)
+            compare(page.retryArmed, true)
+        }
+
+        function test_stale_timeout_keeps_stop() {
+            page.preheatRequested = true
+            page.preheatRequestedAt = Date.now() - 200000
+            page.heaterState = "timeout"
+            page.expireStaleRequest()
+            compare(page.preheatRequested, true)
+        }
+
+        function test_stale_idle_request_expires() {
+            page.preheatRequested = true
+            page.preheatRequestedAt = Date.now() - 200000
+            page.heaterState = "idle"
+            page.expireStaleRequest()
+            compare(page.preheatRequested, false)
+        }
+
+        // A freshly reloaded page has no local request, but the daemon's
+        // timeout state still needs a working Stop action.
+        function test_fresh_timeout_keeps_stop() {
+            page.preheatRequested = false
+            page.heaterState = "timeout"
+            AppPHEVModel.setInstantPower(900, 0)
+            compare(page.preheatOn, true)
+            compare(page.heaterText(), "Not confirmed")
+            verify(page.heaterSubText().indexOf("tap to stop") >= 0)
+            page.togglePreheat()
+            compare(scene.lastPost, "/stop")
+        }
+
+        function test_preparing_fallback_without_power() {
+            page.heaterState = "preparing"
+            page.etaS = 42
+            AppPHEVModel.setInstantPower(-1, -1)
+            verify(page.heaterSubText().indexOf("Battery heater") >= 0)
+            verify(page.heaterSubText().indexOf("42") >= 0)
+        }
+
+        function test_timeout_with_power_keeps_stop() {
+            AppPHEVModel.setInstantPower(900, 0)
+            page.preheatRequested = true
+            page.preheatRequestedAt = 0
+            var d = baseStatus()
+            d.state = "timeout"
+            page.applyStatus(d)
+            verify(page.heaterSubText().indexOf("battery care 0.90 kW") >= 0)
+            page.togglePreheat()
+            compare(scene.lastPost, "/stop")
         }
 
         // Once the daemon reports idle/stopped, the optimistic request ends.

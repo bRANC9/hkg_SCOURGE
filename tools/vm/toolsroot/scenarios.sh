@@ -53,14 +53,18 @@ case "$SCENARIO" in
         dbus-send --session --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames
         echo 'HARNESS_CHECK dbus-session PASS'
         ;;
-    dmclient-events|updater-launch)
+    dmclient-events|updater-launch|dmclient-fota-events)
         if [ "${HARNESS_PROFILE:-research}" != research ]; then
             echo 'HARNESS_BLOCKED unmodified application prerequisites unresolved'
             exit 77
         fi
         modprobe texfat 2>/dev/null || true
         find_update
-        export HARNESS_TARGET=$SCENARIO
+        if [ "$SCENARIO" = dmclient-fota-events ]; then
+            export HARNESS_TARGET=updater-launch HARNESS_FOTA_EVENTS=1
+        else
+            export HARNESS_TARGET=$SCENARIO
+        fi
         exec /bin/bash /media/tools/phase4.sh
         ;;
     *) echo "HARNESS_FAIL unknown scenario $SCENARIO"; exit 1 ;;

@@ -351,14 +351,17 @@ class LauncherTests(TemporaryTest):
             launch.run(None, False, 5, profile_name="conformance",
                        scenario_name="boot", dry_run=True, screenshot=True)
 
-    @unittest.skipUnless((VM / "rootfs.img").is_file()
-                         and (VM / "bzImage").is_file(),
-                         "VM images unavailable (public mirror)")
+    @unittest.skipUnless((VM / "bzImage").is_file(),
+                         "kernel unavailable (public mirror)")
     def test_dry_run_builds_command_without_qemu(self) -> None:
-        completed = subprocess.run(
-            [sys.executable, "-B", str(VM / "launch.py"), "run",
-             "--dry-run", "--no-lock", "--scenario", "boot", "--timeout", "30"],
-            cwd=VM, capture_output=True, text=True, timeout=60)
+        with tempfile.TemporaryDirectory(prefix="vm-dry-run-") as tmp:
+            rootfs = Path(tmp) / "rootfs.img"
+            rootfs.write_bytes(b"fake base image for a dry run")
+            completed = subprocess.run(
+                [sys.executable, "-B", str(VM / "launch.py"), "run",
+                 "--dry-run", "--no-lock", "--scenario", "boot",
+                 "--rootfs", str(rootfs), "--timeout", "30"],
+                cwd=VM, capture_output=True, text=True, timeout=60)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("dry-run", completed.stdout)
         run_dir = next(Path(line[5:].strip()) for line in completed.stdout.splitlines()

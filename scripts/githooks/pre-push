@@ -35,7 +35,7 @@ while read -r local_ref local_sha remote_ref remote_sha; do
     done
     if [ -n "$MISSING" ]; then
         echo "pre-push: warning — commits without a Second-Opinion: trailer:$MISSING" >&2
-        echo "pre-push: rule 11 requires self-review plus ONE independent opencode-go/deepseek-v4.1-flash#max review (AGENTS.md); no second reviewer agent is required." >&2
+        echo "pre-push: rule 11 requires self-review plus ONE independent DeepSeek V4.1 Flash-Max review (deepseek-v4.1-flash#max or deepseek v4.1-flash-1017#max; provider not pinned); no second reviewer agent is required." >&2
     fi
 
     if [ "${SCOURGE_SKIP_TEST_GATE:-0}" = "1" ]; then

@@ -1,0 +1,30 @@
+{
+  "name": "dmengine-fumo-update-no-result",
+  "description": "Mode C combined FUMO no-result path: DownloadAndUpdate completes the DD/DP download and hands event 77 to the OEM handler, but the lab OEM handler sends no update result. The engine stays in update progressing and never sets success state 90; no update report is issued. The result is deliberately withheld; no physical install is claimed.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-ready",
+    "fumo-http-post",
+    "fumo-response",
+    "fumo-syncml",
+    "fumo-trigger",
+    "fumo-command",
+    "fumo-server-auth",
+    "fumo-dd",
+    "fumo-confirm",
+    "fumo-download",
+    "fumo-notify",
+    "fumo-dl-complete",
+    "fumo-state",
+    "fumo-combined-command",
+    "fumo-update-progressing",
+    "fumo-update-handoff",
+    "fumo-update-no-result",
+    "fumo-no-production",
+    "dmengine-fumo-update-no-result"
+  ],
+  "blockers": {}
+}

@@ -4,8 +4,12 @@
 # double-checks every agent-made commit and merge, including WIP checkpoints.
 #
 # Copy this file to config/reviewer.local (gitignored).
-# Owner policy: DeepSeek 4.1 Flash-Max only; no second model is required.
-# If unavailable, ask the owner before substituting. Never use Sol to review.
+# Owner policy: the DeepSeek V4.1 Flash-Max reviewer only; no second model is
+# required. The identity that matters is the model, not the provider — accept
+# either `deepseek-v4.1-flash#max` or `deepseek v4.1-flash-1017#max`, with or
+# without a provider prefix. Add a provider prefix locally only if the harness
+# needs one to launch the reviewer. If the reviewer is unavailable, ask the
+# owner before substituting. Never use Sol to review.
 #
 REVIEWER_AGENT=general
-REVIEWER_MODEL=opencode-go/deepseek-v4.1-flash#max
+REVIEWER_MODEL=deepseek-v4.1-flash#max

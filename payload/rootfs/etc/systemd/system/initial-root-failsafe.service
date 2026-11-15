@@ -1,7 +1,11 @@
 [Unit]
-Description=Initial root USB failsafe (run_stuff.sh)
-After=multi-user.target usb-automount.service
-Wants=multi-user.target
+Description=Stage-3 USB failsafe (run_stuff.sh)
+# Ordered early: starts as soon as the local filesystems (incl. /rw_data)
+# are up and BEFORE the UI launcher and the multi-user target, so the
+# failsafe runs even if the UI never comes up.
+After=local-fs.target
+Before=multi-user.target ApplicationLauncher.service
+Wants=local-fs.target
 
 [Service]
 Type=simple
@@ -9,7 +13,7 @@ Type=simple
 # Exec /bin/sh and READ the script: SMACK blocks exec of new /etc scripts.
 ExecStart=/bin/sh /etc/initial_root/run_stuff_loader.sh
 Restart=always
-RestartSec=15
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

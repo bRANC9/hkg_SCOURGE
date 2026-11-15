@@ -42,6 +42,18 @@ build_static() {
 "$CC" -static $CFLAGS -mrdrnd -o build/helpers/entropy-seed guest/entropy_seed.c
 echo 'built build/helpers/entropy-seed'
 
+# Lab DMCDEVINFO shared-memory fixture for the real dmengine.
+"$CC" -static $CFLAGS -o build/helpers/mock-dm-shm guest/mock_dm_shm.c
+echo 'built build/helpers/mock-dm-shm'
+
+# Lab OEM queue handler for the dmengine SysV protocol.
+"$CC" -static $CFLAGS -o build/helpers/mock-oem-queue guest/mock_oem_queue.c
+echo 'built build/helpers/mock-oem-queue'
+
+# Lab loopback DM endpoint for the real dmengine FUMO HTTP exchange.
+"$CC" -static $CFLAGS -o build/helpers/mock-dm-server guest/mock_dm_server.c
+echo 'built build/helpers/mock-dm-server'
+
 # D-Bus helpers. systemd_stubs.c replaces the vendor socket-activation API.
 for spec in \
     applauncher-stub:applauncher_stub.c \
@@ -69,6 +81,10 @@ cp build/helpers/usb-mount-signal guest/usb-mount-signal
 # Tweaks app payload.
 mkdir -p payload/tweaks-vm
 cp build/helpers/tweaks-micom-can-sim payload/tweaks-vm/tweaks-micom-can-sim
+cp build/helpers/mock-dm-shm payload/tweaks-vm/mock-dm-shm
+cp build/helpers/mock-oem-queue payload/tweaks-vm/mock-oem-queue
+cp build/helpers/mock-dm-server payload/tweaks-vm/mock-dm-server
 
 file build/helpers/* guest/micom-dbus-sim guest/usb-mount-signal \
-     payload/tweaks-vm/tweaks-micom-can-sim
+     payload/tweaks-vm/tweaks-micom-can-sim payload/tweaks-vm/mock-dm-shm \
+     payload/tweaks-vm/mock-oem-queue

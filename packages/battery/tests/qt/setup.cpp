@@ -46,14 +46,33 @@ class Phev : public QObject {
     Q_PROPERTY(bool vcuEvReady MEMBER ready CONSTANT)
     Q_PROPERTY(int utilityMode MEMBER utility CONSTANT)
     Q_PROPERTY(double batLevel MEMBER level CONSTANT)
-    Q_PROPERTY(int heatBatteryPercent MEMBER heat CONSTANT)
+    Q_PROPERTY(int heatBatteryPercent MEMBER heat NOTIFY heatPercentChanged)
+    Q_PROPERTY(int pwrInstantHeat MEMBER heatW NOTIFY instantPowerChanged)
+    Q_PROPERTY(int pwrInstantBattery MEMBER batteryW NOTIFY instantPowerChanged)
     Q_PROPERTY(int batteryConditionMode MEMBER cond CONSTANT)
 public:
     bool ready = true;
     int utility = 0;
     double level = 78.5;
     int heat = -1;
+    int heatW = -1;
+    int batteryW = -1;
     int cond = 0;
+
+    Q_INVOKABLE void setInstantPower(int heat, int battery)
+    {
+        heatW = heat;
+        batteryW = battery;
+        emit instantPowerChanged();
+    }
+    Q_INVOKABLE void setHeatPercent(int percent)
+    {
+        heat = percent;
+        emit heatPercentChanged();
+    }
+signals:
+    void instantPowerChanged();
+    void heatPercentChanged();
 };
 
 class NMode : public QObject {

@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 
 # Deterministic vehicle-state model on the synthetic micom CAN interface.
-# The frame mapping is lab-defined (see guest/tweaks_micom_can_sim.c); it is
-# not a vendor DBC and does not claim stock vehicle fidelity.
+# The 0x0100/0x0101 mapping is lab-defined; the 0x1ab/0x2fc/0x2b0 and Gen2
+# 0x56e/0x55a layouts mirror the captured CANService parsers. It is not a
+# vendor DBC and does not claim stock vehicle fidelity.
 set -u
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
@@ -100,7 +101,7 @@ fixed /tmp/vehicle-f7.out array:byte:0x01,0x01 int32:24 int32:8 int32:253 \
 
 STATE=$(state_line decode) || fail 'vehicle-state-read'
 case "$STATE" in
-    *'speed=42 gear=3 ignition=2 battery=77 doors=5 climate=22.0 outside=-3 frames=0100,0101'*)
+    *'speed=42 gear=3 ignition=2 battery=77 doors=5 climate=22.0 outside=-3 vendor_speed=0.0 vendor_gear=0 vendor_batt=0 vendor_steer=0.0 vendor_steer_status=0 frames=0100,0101'*)
         ;;
     *)
         echo "unexpected decoded state: $STATE"
@@ -139,11 +140,11 @@ echo 'HARNESS_CHECK vehicle-clamp PASS'
 # Untrusted range values must be ignored, not overflow into the frame.
 fixed /tmp/vehicle-r1.out array:byte:0x01,0x00 int32:2147483647 int32:1 int32:1 \
     || fail 'vehicle-range-max-write'
-fixed /tmp/vehicle-r2.out array:byte:0x01,0x00 int32:64 int32:1 int32:1 \
+fixed /tmp/vehicle-r2.out array:byte:0x01,0x00 int32:128 int32:1 int32:1 \
     || fail 'vehicle-range-boundary-write'
 grep -q 'TWEAKS_VEHICLE_WRITE_IGNORED reason=range startbit=2147483647 size=1' \
     /tmp/can-sim.log || fail 'vehicle-range-max-guard'
-grep -q 'TWEAKS_VEHICLE_WRITE_IGNORED reason=range startbit=64 size=1' \
+grep -q 'TWEAKS_VEHICLE_WRITE_IGNORED reason=range startbit=128 size=1' \
     /tmp/can-sim.log || fail 'vehicle-range-boundary-guard'
 STATE=$(state_line range) || fail 'vehicle-range-state-read'
 case "$STATE" in
@@ -154,6 +155,75 @@ case "$STATE" in
         ;;
 esac
 echo 'HARNESS_CHECK vehicle-range-guard PASS'
+
+# Captured CANService Gen3High parsers: 0x1ab speed/gear, 0x2fc battery
+# temperature and 0x2b0 steering.  These are the real filter IDs and bit
+# layouts, not the lab-defined 0x0100/0x0101 model above.
+fixed /tmp/vehicle-v1.out array:byte:0x01,0xab int32:70 int32:2 int32:3 \
+    || fail 'vehicle-vendor-gear-write'
+fixed /tmp/vehicle-v2.out array:byte:0x01,0xab int32:88 int32:8 int32:59 \
+    || fail 'vehicle-vendor-speed-write'
+fixed /tmp/vehicle-v3.out array:byte:0x02,0xfc int32:56 int32:8 int32:35 \
+    || fail 'vehicle-vendor-battery-write'
+fixed /tmp/vehicle-v4.out array:byte:0x02,0xb0 int32:40 int32:8 int32:1 \
+    || fail 'vehicle-vendor-steer-msb-write'
+fixed /tmp/vehicle-v5.out array:byte:0x02,0xb0 int32:48 int32:8 int32:44 \
+    || fail 'vehicle-vendor-steer-lsb-write'
+fixed /tmp/vehicle-v6.out array:byte:0x02,0xb0 int32:56 int32:8 int32:2 \
+    || fail 'vehicle-vendor-steer-status-write'
+for marker in \
+    'field=speed id=1ab raw=59 kmh=30.0 gear=3' \
+    'field=battery id=2fc temp=35' \
+    'field=steering id=2b0 raw=300 tenths=300 status=8'; do
+    grep -q "TWEAKS_VEHICLE_VENDOR $marker" /tmp/can-sim.log \
+        || fail "vehicle-vendor-marker $marker"
+done
+STATE=$(state_line vendor) || fail 'vehicle-vendor-state-read'
+case "$STATE" in
+    *'vendor_speed=30.0 vendor_gear=3 vendor_batt=35 vendor_steer=30.0 vendor_steer_status=8'*)
+        ;;
+    *)
+        echo "unexpected vendor state: $STATE"
+        exit 1
+        ;;
+esac
+echo 'HARNESS_CHECK vehicle-vendor-decode PASS'
+
+# (raw + 1) > 0x3fe must be ignored without changing the last speed.
+fixed /tmp/vehicle-vr.out array:byte:0x01,0xab int32:88 int32:10 int32:1023 \
+    || fail 'vehicle-vendor-range-write'
+grep -q 'TWEAKS_VEHICLE_VENDOR_IGNORED field=speed id=1ab raw=1023 reason=range' \
+    /tmp/can-sim.log || fail 'vehicle-vendor-range-guard'
+STATE=$(state_line vendor-range) || fail 'vehicle-vendor-range-state-read'
+case "$STATE" in
+    *'vendor_speed=30.0 vendor_gear=3'*) ;;
+    *)
+        echo "unexpected vendor state after range guard: $STATE"
+        exit 1
+        ;;
+esac
+echo 'HARNESS_CHECK vehicle-vendor-range PASS'
+
+# Gen2 fallback frames: 0x56e speed/gear and 0x55a battery byte 9.
+fixed /tmp/vehicle-v7.out array:byte:0x05,0x5a int32:72 int32:8 int32:42 \
+    || fail 'vehicle-vendor-gen2-battery-write'
+fixed /tmp/vehicle-v8.out array:byte:0x05,0x6e int32:88 int32:8 int32:100 \
+    || fail 'vehicle-vendor-gen2-speed-write'
+fixed /tmp/vehicle-v9.out array:byte:0x05,0x6e int32:85 int32:2 int32:1 \
+    || fail 'vehicle-vendor-gen2-gear-write'
+grep -q 'TWEAKS_VEHICLE_VENDOR field=battery id=55a temp=42 generation=2' \
+    /tmp/can-sim.log || fail 'vehicle-vendor-gen2-battery-marker'
+grep -q 'TWEAKS_VEHICLE_VENDOR field=speed id=56e raw=100 kmh=100 gear=1 generation=2' \
+    /tmp/can-sim.log || fail 'vehicle-vendor-gen2-speed-marker'
+STATE=$(state_line vendor-gen2) || fail 'vehicle-vendor-gen2-state-read'
+case "$STATE" in
+    *'vendor_speed=100.0 vendor_gear=1 vendor_batt=42'*) ;;
+    *)
+        echo "unexpected Gen2 vendor state: $STATE"
+        exit 1
+        ;;
+esac
+echo 'HARNESS_CHECK vehicle-vendor-gen2 PASS'
 
 # The simulator retains at most 16 distinct canids. Fill the table, then
 # require the overflow write to be dropped (logged) without erroring.
@@ -207,7 +277,7 @@ grep -q 'method return' /tmp/vehicle-reset.out || fail 'vehicle-reset-reply'
 grep -q 'TWEAKS_VEHICLE_RESET' /tmp/can-sim.log || fail 'vehicle-reset-marker'
 STATE=$(state_line reset) || fail 'vehicle-reset-state-read'
 case "$STATE" in
-    *'speed=0 gear=0 ignition=0 battery=0 doors=0 climate=22.0 outside=20 frames= bulk='*)
+    *'speed=0 gear=0 ignition=0 battery=0 doors=0 climate=22.0 outside=20 vendor_speed=0.0 vendor_gear=0 vendor_batt=0 vendor_steer=0.0 vendor_steer_status=0 frames= bulk='*)
         ;;
     *)
         echo "unexpected reset state: $STATE"
@@ -217,5 +287,5 @@ esac
 echo 'HARNESS_CHECK vehicle-reset PASS'
 
 echo '=== VEHICLE STATE LOG ==='
-grep -E 'TWEAKS_VEHICLE_(STATE|CLAMP|RESET|BULK|WRITE_IGNORED)' /tmp/can-sim.log | tail -24
+grep -E 'TWEAKS_VEHICLE_(STATE|CLAMP|RESET|BULK|WRITE_IGNORED|VENDOR)' /tmp/can-sim.log | tail -32
 echo 'HARNESS_CHECK vehicle-state-smoke PASS'

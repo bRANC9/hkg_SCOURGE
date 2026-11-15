@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # 09_preflight.sh — offline go/no-go gate before any deployment.
 #
-#   A. stage-1 rootfs envelope: size/IV/integrity/decrypt/tar/message/six stubs
+#   A. stage-1 rootfs envelope: size/IV/integrity/decrypt/tar/message/eleven stubs + SMACK
 #   B. package_second:  stock USB wrapper, stubs in the rootfs
 #   C. package_wrapper: patched USB wrapper, stubs in both
 #
@@ -22,7 +22,7 @@ echo "########## A. stage-1 rootfs"
 if [ -d "$OUT_DIR/package_second" ]; then
     echo
     echo "########## B. package_second (stock wrapper)"
-    "$PYTHON" "$HERE/verify_package.py" \
+    "$PYTHON" "$SCOURGE_ROOT/verify/verify_package.py" \
         --variant second \
         --package "$OUT_DIR/package_second" \
         --stock "$STOCK_PACKAGE" \
@@ -33,7 +33,7 @@ fi
 if [ -d "$OUT_DIR/package_wrapper" ]; then
     echo
     echo "########## C. package_wrapper (patched wrapper)"
-    "$PYTHON" "$HERE/verify_package.py" \
+    "$PYTHON" "$SCOURGE_ROOT/verify/verify_package.py" \
         --variant wrapper \
         --package "$OUT_DIR/package_wrapper" \
         --stock "$STOCK_PACKAGE" \

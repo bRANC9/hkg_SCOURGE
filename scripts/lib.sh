@@ -7,8 +7,12 @@
 # > config/paths.env.example defaults. Firmware constants always come from
 # config/firmware_locks.env (single source of truth).
 set -euo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[1]}")/.." && pwd)"
-SCOURGE_ROOT="$HERE"
+# Do not override the caller's HERE (the scripts/ directory): lib.sh is
+# sourced by the numbered scripts and sets only the repo root. Fall back to
+# this file's own path when sourced interactively (no BASH_SOURCE[1]).
+_lib_src="${BASH_SOURCE[1]:-${BASH_SOURCE[0]}}"
+SCOURGE_ROOT="$(cd "$(dirname "$_lib_src")/.." && pwd)"
+unset _lib_src
 
 # --- paths ---------------------------------------------------------------------
 if [ -f "$SCOURGE_ROOT/config/paths.local.env" ]; then

@@ -32,7 +32,7 @@ Ioniq 5 Gen5W_L, 260128 (EU) unless noted.
 | Symptom | Cause / fix |
 |---|---|
 | Update button grayed out | The button gate chain (docs/08): AppDMClient's `checkUSBUpdate()` verifies the drive wrapper + signed XML against `teruten5_pub.key`, and the stock AppLauncher refuses to spawn a modified AppDMClient. Confirm the `dmclient_gate` deployer ran all stages (launcher + dmclient + installed stubs) and the unit was **rebooted** afterward. |
-| Update fails at 0% | A signature gate ran before the install. Known gates: the four engine validators (baked into stage-1) and the button gate. Collect evidence (`tools/update-debug/both_copies.sh`) instead of retrying blind. |
+| Update fails at 0% | A signature gate ran before the install. Known gates: the five engine validators (SCOMO four + FUMO, baked into stage-1) and the button gate. Collect evidence (`tools/update-debug/both_copies.sh`) instead of retrying blind. |
 | Update rejected as unrecognizable | `.lge.upgrade.xml` was modified — it must stay byte-identical to stock. |
 | HU does not mount the stick | Try bare exFAT on the whole device (no partition table) — that matches the proven TOCTOU image layout. |
 | Boot message unchanged after flash | The displayed `.qm` may be the `new_gui` partition copy (a separate, higher-risk variant, intentionally not built). The failsafe and stubs are unaffected. |

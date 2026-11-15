@@ -1,0 +1,515 @@
+{
+  "_note": "Inferred annotations for docs/15. The '*' in the rendered table marks these as not decoded from the micom protocol.",
+  "audio": {
+    "NotifyAudioMainCHChange": {
+      "meaning": "new main audio channel/source",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyAudioMixingCHChange": {
+      "meaning": "new mixing channel (navigation/voice overlay)",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyAudioSetupControl": {
+      "meaning": "changed sound setting",
+      "example": "\u2014"
+    },
+    "NotifyAudioVolumeStep": {
+      "meaning": "current volume step",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyAudioVolumeStepChangeEvent": {
+      "meaning": "volume step delta",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifySetAudioVolume": {
+      "meaning": "applied volume value",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifySoundMICStatus": {
+      "meaning": "microphone on/off status",
+      "example": "`array:byte:0x01`"
+    }
+  },
+  "radio": {
+    "NotifyAMRefreshEvent": {
+      "meaning": "AM refresh result",
+      "example": "\u2014"
+    },
+    "NotifyITMNoSignalStatusChange": {
+      "meaning": "no-signal state",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyRadioBSMPreset": {
+      "meaning": "BSM/autostore result",
+      "example": "\u2014"
+    },
+    "NotifyRadioFreqUpdate": {
+      "meaning": "tuned frequency",
+      "example": "\u2014"
+    },
+    "NotifyRadioPresetDelete": {
+      "meaning": "deleted preset index",
+      "example": "\u2014"
+    },
+    "NotifyRadioSearchFinish": {
+      "meaning": "search result/station",
+      "example": "\u2014"
+    },
+    "NotifyRefreshFinishEvent": {
+      "meaning": "refresh completion",
+      "example": "\u2014"
+    },
+    "NotifyStationListUpdate": {
+      "meaning": "station list data",
+      "example": "\u2014"
+    },
+    "NotifyTPEGSearchFinish": {
+      "meaning": "TPEG search result",
+      "example": "\u2014"
+    },
+    "NotifyTPEGUpdate": {
+      "meaning": "TPEG traffic data",
+      "example": "\u2014"
+    },
+    "NotifyTuneStressTest": {
+      "meaning": "stress-test tune result",
+      "example": "\u2014"
+    }
+  },
+  "tmu": {
+    "NotifyTMUBCANCARIFEvent": {
+      "meaning": "body-CAN vehicle-interface event",
+      "example": "\u2014"
+    },
+    "NotifyTMUDIAGUROBOTConnectEvent": {
+      "meaning": "diagnostic robot connection",
+      "example": "\u2014"
+    },
+    "NotifyTMUDIAGVINInformEvent": {
+      "meaning": "VIN reported for diagnostics",
+      "example": "\u2014"
+    },
+    "NotifyTMUFuelConsumptionEvent": {
+      "meaning": "fuel consumption data",
+      "example": "\u2014"
+    },
+    "NotifyTMUKeyPressEvent": {
+      "meaning": "key press via TMU",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyTMUMCANStatusEvent": {
+      "meaning": "M-CAN status",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyTMUPanicEvent": {
+      "meaning": "panic/alarm state",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyTMUPowerConditionEvent": {
+      "meaning": "TMU power condition",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyTMURMKEYEvent": {
+      "meaning": "remote-key button",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyTMURMKeyStuckEvent": {
+      "meaning": "stuck remote key",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyTMUServiceAlarmEvent": {
+      "meaning": "telematics service alarm",
+      "example": "\u2014"
+    },
+    "NotifyTMUServiceBootStatusEvent": {
+      "meaning": "TMU service boot status",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyTMUVCRMResponseEvent": {
+      "meaning": "VCRM response",
+      "example": "\u2014"
+    },
+    "NotifyTMUVRMResponseEvent": {
+      "meaning": "VRM response",
+      "example": "\u2014"
+    },
+    "NotifyTMUVRMResponseexceptionEvent": {
+      "meaning": "VRM response exception",
+      "example": "\u2014"
+    }
+  },
+  "ihu": {
+    "NotifyEtcDCOffSetStatusEvent": {
+      "meaning": "audio DC offset status",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyETCDayNightStatusEvent": {
+      "meaning": "day/night state",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyETCILLPWMStatusEvent": {
+      "meaning": "illumination PWM value",
+      "example": "\u2014"
+    },
+    "NotifyEtcLcd2SensorNotSupportPwmControl": {
+      "meaning": "LCD2 PWM unsupported",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyEtcLcd2SensorSupportPwmControl": {
+      "meaning": "LCD2 PWM supported",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyETCLCDSetInfoEvent": {
+      "meaning": "LCD setting",
+      "example": "\u2014"
+    },
+    "NotifyETCPopupEvent": {
+      "meaning": "popup request",
+      "example": "\u2014"
+    },
+    "NotifyHUDAbsentStatusEvent": {
+      "meaning": "HUD present/absent",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyMonitorPowerEvent": {
+      "meaning": "monitor power state",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyRearMonitorStatusEvent": {
+      "meaning": "rear monitor state",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyETCNaviSCCMsgTriggerEvent": {
+      "meaning": "navigation-to-SCC trigger",
+      "example": "\u2014"
+    },
+    "NotifyETCCANSleepEvent": {
+      "meaning": "CAN sleep state",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyETCPowerKeyEvent": {
+      "meaning": "power-key event",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyETCSleepRequest": {
+      "meaning": "sleep request",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyRecoveryModeEvent": {
+      "meaning": "recovery-mode state",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyETCCarIFStatusEvent": {
+      "meaning": "vehicle-interface status",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifySpeedValueEvent": {
+      "meaning": "vehicle speed",
+      "example": "`array:byte:0x00`"
+    },
+    "NotifyCANNodeStatusEvent": {
+      "meaning": "CAN node online state",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyInfoFaultCodeStatusEvent": {
+      "meaning": "fault-code status",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyTraceDateSetEvent": {
+      "meaning": "trace date",
+      "example": "\u2014"
+    },
+    "NotifyDiagAdvancedSecurityKeyEvent": {
+      "meaning": "diagnostic security key",
+      "example": "\u2014"
+    },
+    "NotifyScheduledUpdateEvent": {
+      "meaning": "scheduled update state",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifySystemHashDataEvent": {
+      "meaning": "system hash data",
+      "example": "\u2014"
+    },
+    "NotifyUpdateTouchICControl": {
+      "meaning": "touch-IC update status",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyVehicleOtaSessionInfoEvent": {
+      "meaning": "OTA session information",
+      "example": "\u2014"
+    },
+    "NotifyFactoryModeInfoByFScan": {
+      "meaning": "factory-mode F-scan info",
+      "example": "\u2014"
+    },
+    "NotifyMPCANTestEvent": {
+      "meaning": "media-player CAN test event",
+      "example": "\u2014"
+    },
+    "NotifyDMBCASIDSetEvent": {
+      "meaning": "DMB CAS ID",
+      "example": "\u2014"
+    },
+    "NotifyETCPeriodicAVNStatusEvent": {
+      "meaning": "periodic AVN status",
+      "example": "\u2014"
+    },
+    "NotifySerialNumberSetEvent": {
+      "meaning": "serial number set",
+      "example": "\u2014"
+    },
+    "NotifySYSVariantOptionSetEvent": {
+      "meaning": "variant option set",
+      "example": "\u2014"
+    },
+    "NotifyDiagBTInspectionEndEvent": {
+      "meaning": "Bluetooth inspection end",
+      "example": "\u2014"
+    },
+    "NotifyDiagBTInspectionStartEvent": {
+      "meaning": "Bluetooth inspection start",
+      "example": "\u2014"
+    },
+    "NotifyDiagSessionInfoEvent": {
+      "meaning": "diagnostic session info",
+      "example": "\u2014"
+    }
+  },
+  "hdr": {
+    "NotifyHDRAECommand": {
+      "meaning": "HD AE command/data",
+      "example": "\u2014"
+    },
+    "NotifyHDRAEDataUpdate": {
+      "meaning": "HD AE data update",
+      "example": "\u2014"
+    },
+    "NotifyHDRCommercialMessage": {
+      "meaning": "commercial message",
+      "example": "\u2014"
+    },
+    "NotifyHDRCommonMessage": {
+      "meaning": "general HD message",
+      "example": "\u2014"
+    },
+    "NotifyHDRiTuneStatus": {
+      "meaning": "iTunes tagging status",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyHDROnOffStatusEvent": {
+      "meaning": "HD on/off state",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyHDRPSDData": {
+      "meaning": "PSD title/artist",
+      "example": "\u2014"
+    },
+    "NotifyHDRSISData": {
+      "meaning": "SIS station name/info",
+      "example": "\u2014"
+    },
+    "NotifyHDRStatusInfo": {
+      "meaning": "HD status and signal strength",
+      "example": "\u2014"
+    },
+    "NotifyRBDSDataUpdateEvent": {
+      "meaning": "RBDS data",
+      "example": "\u2014"
+    },
+    "NotifyTaggingTokenData": {
+      "meaning": "tagging token",
+      "example": "\u2014"
+    },
+    "NotifyFactoryResetCompleteEvent": {
+      "meaning": "factory reset complete",
+      "example": "`array:byte:0x01`"
+    }
+  },
+  "tmc": {
+    "NotifyDABToFMCoChannelDetect": {
+      "meaning": "DAB/FM co-channel detection",
+      "example": "\u2014"
+    },
+    "NotifyDABToFMPICodeEvent": {
+      "meaning": "DAB-to-FM PI code",
+      "example": "\u2014"
+    },
+    "NotifyDABToFMQuality": {
+      "meaning": "DAB/FM quality comparison",
+      "example": "\u2014"
+    },
+    "NotifyRDSInfoFinishEvent": {
+      "meaning": "RDS information end",
+      "example": "\u2014"
+    },
+    "NotifyRDSInfoStartEvent": {
+      "meaning": "RDS information start",
+      "example": "\u2014"
+    },
+    "NotifyRDSRTPlusUpdateEvent": {
+      "meaning": "RT+ data",
+      "example": "\u2014"
+    },
+    "NotifyRDSStationListUpdate": {
+      "meaning": "RDS station list",
+      "example": "\u2014"
+    },
+    "NotifyRDSTextUpdateEvent": {
+      "meaning": "RDS radio text",
+      "example": "\u2014"
+    },
+    "NotifyRDSTPLossEvent": {
+      "meaning": "TP-flag loss",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyTMCInfoUpdateEvent": {
+      "meaning": "TMC traffic information",
+      "example": "\u2014"
+    }
+  },
+  "can": {
+    "NotifyKeyCCPEvent": {
+      "meaning": "CCP key event",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyKeyFrontPannelEvent": {
+      "meaning": "front-panel key event",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyKeyFrontSpecialEvent": {
+      "meaning": "special front-panel key event",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyKEYPressCounterEvent": {
+      "meaning": "key-press counter",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyKeyREAREvent": {
+      "meaning": "rear key event",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyKeyRRCEvent": {
+      "meaning": "RRC key event",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyKeySWRCEvent": {
+      "meaning": "steering-wheel key event",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyBCANEachMsg": {
+      "meaning": "body-CAN frame",
+      "example": "\u2014"
+    },
+    "NotifyCANTPMicomSend": {
+      "meaning": "CAN-TP send",
+      "example": "\u2014"
+    },
+    "NotifyCANTPMicomSendException": {
+      "meaning": "CAN-TP send exception",
+      "example": "\u2014"
+    },
+    "NotifyCANTPRECVMsg": {
+      "meaning": "CAN-TP receive",
+      "example": "\u2014"
+    },
+    "NotifyExtMMCanRxEvent": {
+      "meaning": "external MM-CAN frame",
+      "example": "\u2014"
+    },
+    "NotifyICANEachMsg": {
+      "meaning": "I-CAN frame",
+      "example": "\u2014"
+    },
+    "NotifyICANRxExtMsg": {
+      "meaning": "external I-CAN frame",
+      "example": "\u2014"
+    },
+    "NotifyMCANEachMsg": {
+      "meaning": "M-CAN frame",
+      "example": "\u2014"
+    },
+    "NotifyEDTStatusEvent": {
+      "meaning": "EDT status",
+      "example": "`array:byte:0x01`"
+    }
+  },
+  "eng": {
+    "NotifySndAResponse": {
+      "meaning": "sound processor A response",
+      "example": "\u2014"
+    },
+    "NotifySndBResponse": {
+      "meaning": "sound processor B response",
+      "example": "\u2014"
+    },
+    "NotifyAMResponse": {
+      "meaning": "AM tuner response",
+      "example": "\u2014"
+    },
+    "NotifyANTConnectivityStatusInfoResponse": {
+      "meaning": "antenna connectivity status",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyFMNewInfoResponse": {
+      "meaning": "FM new information",
+      "example": "\u2014"
+    },
+    "NotifyFMResponse": {
+      "meaning": "FM tuner response",
+      "example": "\u2014"
+    },
+    "NotifySaturnStatusResponse": {
+      "meaning": "Saturn tuner status",
+      "example": "\u2014"
+    },
+    "NotifyTunerStatusResponse": {
+      "meaning": "tuner status",
+      "example": "\u2014"
+    },
+    "NotifyAFTraceLogResponse": {
+      "meaning": "AF trace log",
+      "example": "\u2014"
+    },
+    "NotifyRDSAFLogResponse": {
+      "meaning": "RDS AF log",
+      "example": "\u2014"
+    },
+    "NotifyTMCResponse": {
+      "meaning": "TMC response",
+      "example": "\u2014"
+    },
+    "NotifyHDAFResponse": {
+      "meaning": "HD AF response",
+      "example": "\u2014"
+    },
+    "NotifyHDRConfigInfoAdvance": {
+      "meaning": "HD configuration, advanced",
+      "example": "\u2014"
+    },
+    "NotifyHDRConfigInfoBasic": {
+      "meaning": "HD configuration, basic",
+      "example": "\u2014"
+    },
+    "NotifyHDTunerStatusResponse": {
+      "meaning": "HD tuner status",
+      "example": "\u2014"
+    },
+    "NotifyMsgSelfEmergencyGO": {
+      "meaning": "emergency self-programming start",
+      "example": "`array:byte:0x01`"
+    },
+    "NotifyEngAirConditionKeyTest": {
+      "meaning": "A/C key test",
+      "example": "\u2014"
+    },
+    "NotifyMPAutoModeTestMsgEvent": {
+      "meaning": "media-player auto-mode test message",
+      "example": "\u2014"
+    },
+    "NotifyMPAutoModeTestStartEvent": {
+      "meaning": "media-player auto-mode test start",
+      "example": "\u2014"
+    }
+  }
+}

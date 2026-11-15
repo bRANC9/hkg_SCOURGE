@@ -59,17 +59,113 @@ VM-validated (vendor kernel):
 - repeat-update recovery (`recovery-repeat-update`): media-level verify,
   corruption detection, backup repair, re-verify and rediscovery; not the
   AppUpgrade engine's credential-gated repeat path
+- offline update-media validation (`check-update`): package-map grammar,
+  manifest coverage and confinement, optional hashes and declared sizes for a
+  directory or raw ext4 stick; no decryption or updater execution
+- update-state audit (`check-update-state`): version/FUMO timing/install
+  params/dm_state consistency against the RDM tree, with URLs and credentials
+  kept out of the report
+- update-media preflight (`update-preflight`): read-only Mode V mount,
+  package-map grammar/sizes, manifest hashes and opaque-payload checks without
+  launching the updater
+- synthetic update media (`make-update-media`): vendor-4.1-mountable ext4
+  image with lab package map/manifest/payload, letting both preflight
+  scenarios run without OEM media
+- negative update preflight (`update-preflight-negative`): a disposable
+  read-write overlay proves size/path/manifest corruption is rejected and the
+  media is restored; the base stick is never modified
+- DM/RDM tree validation and diff (`check-dm-tree`): FUMO state, account and
+  auth structure, DTD/entity rejection and credential-redacted leaf diffs
+- offline FUMO exchange model (`fumo-exchange`): strict Idle/Downloading/
+  Downloaded/Updating transitions, package size/hash/version admission, mock
+  DM endpoint, injected failures and a per-step `--script` runner; not
+  dmengine or SyncML
+- dmengine startup (`dmengine-startup`): real vendor DM engine with a lab
+  DMCDEVINFO SysV segment, tree/config rewrite, FUMO/SCOMO plugin init and
+  device-info acceptance; no DM session or production address
+- dmengine OEM queue handler (`dmengine-oem-queue`): lab SysV client sends a
+  type-0x36 command and receives event 66 after `recvDM_01`; no AppDMClient
+  policy or HTTP FUMO update
+- dmengine FUMO HTTP exchange (`dmengine-fumo-http`): OEM command 0/field1=1
+  starts `dmc_startFumoSession`; the engine POSTs WBXML SyncML to a loopback
+  mock endpoint, which returns a minimal WBXML response with Status 200 and
+  Final. The engine completes the session handshake (state 1, lastError 0)
+  without performing an update
+- FUMO package download (`dmengine-fumo-download`): the mock sends a
+  `syncml:auth-md5` server Cred and a FUMO Exec, then an OMA Download
+  Descriptor. OEM confirmation code 10 (`DMC_REQ_DL_OK`) lets the engine
+  fetch a 184-byte object (132-byte DP body with component/update tables and
+  a 16-byte payload, plus a 52-byte lab HMAC trailer); `DL session
+  complete` and FUMO state 30 -> 40 are asserted; the install-notification
+  POST `900 Success` is also checked. `launch.py check-dp` validates the
+  container layout. The DP is a structural fixture, so this is a download,
+  not an install
+- FUMO update request (`dmengine-fumo-update`): the mock answers the DM report
+  session with a FUMO Update Exec. The engine queues
+  `./ManagedObjects/FUMO/Update` and rejects the structural DP with
+  `0x6011` / FUMO `24593`; no completed update state is asserted (negative)
+- FUMO combined command (`dmengine-fumo-download-update`): Exec on
+  `./ManagedObjects/FUMO/DownloadAndUpdate` downloads the DD/DP, advances
+  state 30 -> 40 -> 60, hands event 77 with `/update//lab-fumo` to the OEM
+  handler, then reports lab result 200, reaching state 90 and idle. The
+  result is lab-supplied; no physical install is claimed
+- FUMO failure result (`dmengine-fumo-update-failure`): the lab OEM reports
+  result 500; the engine reports the failure through a DM session and returns
+  to idle without state 90 (negative result path)
+- FUMO invalid result (`dmengine-fumo-update-invalid-result`): result 0 is
+  remapped to `UNDEFINED(409)`, reported through a DM session, and state 90 is
+  never reached (negative validation path)
+- FUMO missing object (`dmengine-fumo-download-missing`): the DD parses and
+  confirmation is sent, but `/object.bin` returns 404; the engine aborts the
+  DL session with `0x6306`, FUMO result 407 / error 25350 (negative)
+- FUMO notification failure (`dmengine-fumo-notify-failure`): the DP download
+  succeeds but `/notify` returns HTTP 500; the engine aborts with `0x6308`,
+  FUMO result 503 / error 25352 and never reaches downloaded/update states
+- FUMO update without result (`dmengine-fumo-update-no-result`): after the
+  DownloadAndUpdate handoff the OEM sends no result; the engine stays in
+  update progressing and never sets state 90 or reports success
+- FUMO bad signature (`dmengine-fumo-download-badsig`): one trailer bit is
+  flipped; the engine still downloads and advances to state 40, while
+  `check-dp --key` rejects the object with a signature mismatch (negative
+  engine-validation boundary)
+- FUMO resume (`dmengine-fumo-resume`): a 64/184 partial response with
+  `Accept-Ranges`/ETag makes the engine retry `Range: bytes=64-`; the mock
+  returns the remaining 120 bytes with 206 and the download completes
+- device-model regression (`device-model`): asserts Q35 host bridge, SDHCI
+  root, ICH9 LPC/SATA and no virtio; substrate only, not captured BXT hardware
+- AppDMClient fota callback (`dmclient-fota-events`): `/fotaInterface`
+  `sendEventToDMClientFromAppUpgrade(0/1/2)` produces real dmengine queue
+  commands `0x28/0x29/0x2a`; callback only, no HTTP update or credentials
+- dmengine OEM queue codec (`dmengine-queue`): encode/decode the 1048-byte
+  SysV command/event message (key 0xd54, mtype 0x36/0x48) and parse
+  `strace -xx` queue logs; the AppDMClient event source remains the session
+  gate
+- MOF notification codec (`mof-notify`): decode/encode the
+  `msgtype=4&cor=...` device/version notification, with host redaction;
+  supplies the `recvDM_01` input but not the OEM session callback
 - vendor systemd partial boot (`vendor-systemd`): real systemd reaches
   Multi-User; SMACK units fail, consistent with the missing vendor initramfs (documented)
 - vendor systemd D-Bus service/ordering (`vendor-systemd-dbus`): the research shell
   prepares the missing runtime layout and hands PID 1 to systemd; the D-Bus
   socket/service start before Multi-User, with micommanager still failing
   without vehicle hardware (lab fixture, not stock/esinit)
+- vendor esinit partial boot (`vendor-esinit`): the real vendor
+  `/lib/systemd/esinit` runs as PID 1 through OEM/car/country detection, eMMC
+  fsck and the non-FDE fstab decision; the lge-fan driver attach blocks
+  without micom/thermal hardware, so systemd is not reached (partial boot,
+  documented hardware gate)
+- vendor esinit fixture (`vendor-esinit-fixture`): a lab runtime layout, an
+  empty `/etc/fstab` and a modprobe wrapper that skips only `fan` let the real
+  esinit reach real systemd and Multi-User; micommanager/nua still fail and
+  the hardware gate is bypassed, not emulated
 - synthetic micom CAN interface smoke (`can-smoke`): READY/CALL/ACK for
   fixed and bulk calls; contract only, not real CAN timing
 - vehicle-state model (`vehicle-state`): lab-defined fixed-frame decode for
-  speed/gear/ignition/battery/doors/climate/outside, clamps, bulk retention
-  and reset; not a vendor DBC or stock vehicle fidelity
+  speed/gear/ignition/battery/doors/climate/outside plus the captured
+  CANService Gen3High layouts (`0x1ab` speed/gear, `0x2fc` battery,
+  `0x2b0` steering) and Gen2 fallbacks (`0x56e`, `0x55a`), clamps, range
+  guards, bulk retention and reset; not a vendor DBC or stock vehicle
+  fidelity
 
 VM-validated (compat kernel):
 

@@ -114,7 +114,7 @@ but the QML uses the factory models instead:
 | `0x036` | gear | raw frame kept; `gear_b3` = `byte3 & 3`, `gear_b4` = `byte4 & 0x0F` — the two factory binaries disagree on the byte (AppHomeScreen reads byte3, TmsRemoteApp byte4), so both are reported and the on-car sniff settles it | `AppNModeModel.gearPosRightTxtImg` |
 | `0x038` | READY | `(byte0 & 0x0F) == 0x04` | `AppPHEVModel.vcuEvReady` |
 | `0x2FC` | min cell temp | byte2 (Gen3High) or byte4 (Gen2); default byte2 |
-| `0x2AD` | precondition state | `byte1 & 0x1F`: 00 off, 01 idle, 05 preparing, 15 active | `AppPHEVModel.heatBatteryPercent` |
+| `0x2AD` | precondition state | `byte1 & 0x1F`: 00 off, 01 idle, 05 preparing, 15 active | daemon `/status` `precond_raw` |
 | `0x2AE` | utility | byte4 01 normal, 06 utility | `AppPHEVModel.utilityMode` |
 | `0x3AA` | charge door | `(byte4 >> 1) & 3`: 1 open, 2 closed | daemon last command |
 
@@ -151,8 +151,10 @@ battery temperature is above 21 °C** (`temp_high`). A stop already in progress
 (`stopping`) is also blocked.
 
 While the QML keeps a preheat request active and the heater has not engaged, it
-re-posts `/start` every 10 s (up to 4 times) to re-nudge the BMS. This mirrors
-the WiCAN firmware's retry behavior.
+re-posts `/start` every 10 s (up to 4 times) to re-nudge the BMS. The nudge is
+suppressed when a block reason is present, when the daemon reports `timeout`
+(the Stop affordance stays armed), or when battery-care instant power is
+visible. This mirrors the WiCAN firmware's retry behavior.
 
 ### 5.3 Cluster display (full WiCAN mimicry)
 
@@ -391,13 +393,26 @@ The `QListViewHomePage` model and page count are unchanged.
 | READY | `AppPHEVModel.vcuEvReady` |
 | utility mode | `AppPHEVModel.utilityMode === 2` |
 | SoC fallback | `AppPHEVModel.batLevel` |
-| heater power | `AppPHEVModel.heatBatteryPercent` |
-| conditioning mode | `AppPHEVModel.batteryConditionMode` |
+| battery-care instant power | `AppPHEVModel.pwrInstantHeat` + `AppPHEVModel.pwrInstantBattery` (W, shown as kW) |
 | exterior temperature | `appClimateModel.ambienTemp` |
 
 All factory-model reads are guarded with `typeof`. The charge-door switch is
 enabled when the service is up and no charging cable is observed.  An unknown
 cable state is advisory; the gear/Park signal is not a gate for now.
+
+`AppPHEVModel.heatBatteryPercent` is the factory Electricity Use widget's
+battery-care **share** of current electricity use (the widget reads the same
+family of values for its `batCarePercent` tile), not heater strength or a duty
+cycle. A 0% share does not mean the heater is off, so the page does not use it
+for the heater state. The instant power fields are the useful indicator:
+`pwrInstantHeat + pwrInstantBattery` is shown as kW, either channel may be
+negative (unavailable), and both negative means the page shows `—`. `0x2AD`
+remains the authoritative preconditioning state.
+
+The page shows the daemon's control state, not an externally started factory
+navigation preheat: the daemon deliberately does not adopt `0x2AD` `0x05`/`0x15`
+while idle. `/status` still reports `precond_raw` and `precond_confirmed` for
+diagnosis, and instant power is shown even when the switch is Off.
 
 ## 7. Installer
 

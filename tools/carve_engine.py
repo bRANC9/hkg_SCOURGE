@@ -8,10 +8,11 @@ parameterize and re-verify — see docs/09-porting.md).
 
 /app/bin/AppUpgrade is a host ELF with the AppScomoUpgrade engine (itself an
 ELF) embedded at file offset 0x7C64 (31,844) on 260128. Every validator
-patch offset in payload/patch_validators.py is engine-relative, so:
+patch offset in payload/patch_validators.py is a host-file offset; subtract
+the engine base to get the engine-relative offset:
 
-    file_offset = ENGINE_BASE + engine_offset
-    e.g. 0x7C64 + 0x1F5A00 = 0x1FD664 = 2,086,500
+    engine_offset = file_offset - ENGINE_BASE
+    e.g. 2,086,500 - 0x7C64 = 0x1F5A00
 
 This tool:
   1. verifies the input's sha256 against config/firmware_locks.env

@@ -1,0 +1,27 @@
+{
+  "name": "dmengine-fumo-download-badsig",
+  "description": "Mode C FUMO bad-signature boundary: the mock serves the 184-byte object with one bit flipped in the lab HMAC signature trailer. The real engine does not validate the trailer, downloads the object, posts the install notification and advances FUMO state 30 -> 40. Host check-dp --key rejects the same object with a signature mismatch. No install or vendor-signature claim is made.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-ready",
+    "fumo-http-post",
+    "fumo-response",
+    "fumo-syncml",
+    "fumo-trigger",
+    "fumo-command",
+    "fumo-server-auth",
+    "fumo-dd",
+    "fumo-confirm",
+    "fumo-download",
+    "fumo-notify",
+    "fumo-badsig",
+    "fumo-dl-complete",
+    "fumo-state",
+    "fumo-no-production",
+    "dmengine-fumo-download-badsig"
+  ],
+  "blockers": {}
+}

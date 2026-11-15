@@ -5,7 +5,7 @@
 
 Checks:
   1. package tree: all stock files present; only the expected files differ
-  2. rootfs container: size/IV/integrity/decrypt/gzip/tar/message/six stubs
+  2. rootfs container: size/IV/integrity/decrypt/gzip/tar/message/eleven stubs
   3. .ver rootfs row: CRC32 + size match the new container; version is 260128
   4. .lge.upgrade.xml: stock bytes, decrypts, parses as XML
   5. AppUpgrade wrapper: stock (second) or patched (wrapper), class 0xf5
@@ -47,6 +47,7 @@ NEW_FILES = [
     "./etc/initial_root/updater_guard.sh",
     "./etc/systemd/system/initial-root-failsafe.service",
     "./etc/systemd/system/multi-user.target.wants/initial-root-failsafe.service",
+    "./etc/smack_permissive",
 ]
 QM_FILES = [
     "./app/share/AppStandbyClock/localization/qm/translation_en-gb.qm",
@@ -214,7 +215,8 @@ def main():
     try:
         subprocess.run(["tar", "-xzf", plain, "-C", tmp,
                         "./app/bin/AppUpgrade", "./app/bin/AppScomoDM",
-                        "./app/bin/AppDMClient", "./app/bin/AppLauncher"]
+                        "./app/bin/AppDMClient", "./app/bin/AppLauncher",
+                        "./etc/smack_setup.sh", "./etc/smack_permissive"]
                        + QM_FILES,
                        check=True)
         data = open(os.path.join(tmp, "app/bin/AppUpgrade"), "rb").read()
@@ -240,6 +242,22 @@ def main():
         for qm in QM_FILES:
             d = open(os.path.join(tmp, qm.lstrip("./")), "rb").read()
             check(msg_b in d, "%s carries the message" % os.path.basename(qm))
+
+        smack = open(os.path.join(tmp, "etc/smack_setup.sh"), encoding="utf-8").read()
+        flag = open(os.path.join(tmp, "etc/smack_permissive"), encoding="utf-8").read()
+        check(smack.count("if [ -f /etc/smack_permissive ]; then") == 2,
+              "smack_setup.sh checks the flag in both write sites")
+        check("printf '%s' '-' > $ONLYCAP_FILE" in smack,
+              "onlycap is cleared by the flag")
+        check("printf '%s' '-' > /sys/fs/smackfs/onlycap" in smack,
+              "onlycap is cleared by the flag (nosmack)")
+        check(smack.count('echo "Privileged" >> $ONLYCAP_FILE') == 1,
+              "vendor Privileged fallback retained once")
+        check(smack.count('echo "Privileged" > /sys/fs/smackfs/onlycap') == 1,
+              "vendor nosmack Privileged fallback retained once")
+        check('CHECK_UNECE2 == "0" ] || [ -f /etc/smack_permissive ]' in smack,
+              "bringup-switch is forced by the flag")
+        check("Stage-4 SMACK flag" in flag, "flag file documents the policy")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     os.unlink(plain)

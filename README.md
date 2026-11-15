@@ -54,7 +54,7 @@ This is likely readily adaptable to other cars & environments, but I am noting t
 | Component | Status |
 |---|---|
 | TOCTOU delivery + stage-1 root firmware (sideloading, failsafe) | Validated on the target car |
-| Updater signature-check bypass baked into the firmware | Built & verified offline; on-car validation in progress |
+| Updater signature-check bypass baked into the firmware (unsigned normal-USB update) | Validated on the target car (2026-11-15); see `docs/17-usb-update-confirmed.md` |
 | Battery / WiFi+SSH / Tweaks (incl. Reboot) app packages | Work-in-progress; the WiFi package is VM-validated on the vendor kernel/Qt (on-car retest pending). Reboot's clean path and daemon endpoint are host/QML-tested; the micom hard-reset fallback is host-tested with a fake D-Bus helper and derived from the vendor script (car pending) |
 | Tweaks: safety-disclaimer auto-accept | Working reliably |
 | Anything beyond the exact firmware above (`NE_E.EUR.S5W_L.001.001.260128`, EU) | Untested — see the porting runbook before trying |
@@ -87,18 +87,18 @@ No claims are made about other vehicles or platforms (including S5W_M/Android un
 As a general rule of thumb:
 
 - If you are not yet rooted, but you think you might want to root, DO NOT install updates from Hyundai without first checking this repo / the discord to see whether it blocks the initial jailbreak.
-- If you are rooted, DO NOT install updates out of the box. We're working on a runbook for installing custom firmware as ordinary USB updates through the patched updater — that flow is functional offline but still under on-car validation (see `docs/08-postroot-updates.md`).
+- If you are rooted, DO NOT install stock OEM updates out of the box. Custom firmware can be installed as an ordinary USB update through the patched updater; the normal-USB flow is validated on the target car (see `docs/08-postroot-updates.md` and `docs/17-usb-update-confirmed.md`).
 
 ## Optional / Further in Development Steps
 
-- The patched-updater custom-firmware update path is under active car validation. The updater's signature gates (four engine validators + the update-button gate in AppScomoDM) are stubbed in the stage-1 firmware; the remaining work is confirming the full update flow end-to-end on the car. Once that lands, serving updates from a plain flash drive becomes the normal path — faster and more reliable than the Pi rig.
+- The patched-updater custom-firmware update path is **confirmed on the car**. Stage-1 build 5 carries the eleven updater/launcher stubs (including the FUMO engine gate) and the SMACK permissive flag, so a plain exFAT flash drive can install a custom 260128 rootfs through `Settings > General > Software Update > Update via USB` — faster and more reliable than the Pi rig. See `docs/17-usb-update-confirmed.md`.
 - An alternative semi-tethered jailbreak that does not require building and deploying an entire 27GB firmware image is being validated. Others are also investigating an option that strips this down to a ~8GB image, which is faster and easier to deploy.
 - A "dealer mode" firmware image that is rooted & has disabled signature checks, but which has no obvious visible signs of being rooted. We can also try password protecting the update path.
 - Packaging & making it easier to sideload apps
 - Making sideload app installers less likely to interfere with each other
 - Support networked installation scripts/packages
 - A QEMU/KVM **VM lab** for bench-testing packages, installers and patches against your own decrypted firmware before they go near the car, with a planned graphics mode for UI work — see `docs/14-vm-lab.md` (WIP: the harness runs today, but is not yet packaged in-repo)
-- Separate-process custom apps: the platform's AppLauncher RSA-verifies every spawned app's `.sign` section, which blocks the "official app" route. A bypass exists (built, not yet tested — not shipped), and there is a second route (an own Wayland process outside AppLauncher) that needs no patch at all. See `docs/07-packages.md` and `docs/ui/deployment-modes.md`.
+- Separate-process custom apps: the platform's AppLauncher RSA-verifies the `.sign` section of startup-group/preload spawns (on-demand `request.launch` spawns already skip it), which blocks the "official app" route. A sigstub for those paths ships in stage-1 build 5 and is car-validated (`docs/07-packages.md`), and there is a second route (an own Wayland process outside AppLauncher) that needs no patch at all. See `docs/07-packages.md` and `docs/ui/deployment-modes.md`.
 
 ## AI Usage Disclaimer
 
@@ -110,12 +110,12 @@ If a markdown file in this repo is handwritten, I will highlight that. The READM
 
 | Path | What |
 |---|---|
-| `docs/01–13` | The runbooks: TOCTOU explainer, firmware format, stage-1 build, Pi rig, car install, failsafe/packages, post-root updates (WIP), porting, Ghidra re-derivation, troubleshooting, safety/legal, upstream references |
+| `docs/01–17` | The runbooks: TOCTOU explainer, firmware format, stage-1 build, Pi rig, car install, failsafe/packages, post-root updates (confirmed), porting, Ghidra re-derivation, troubleshooting, safety/legal, upstream references, VM lab (WIP), the micom command surface, the micom MCU images, and the unsigned normal-USB update confirmation |
 | `docs/ui/` | The Gen5W UI/UX research: styleguide, deployment modes (A–L), UX behavior patterns, design tokens, component library, glossary, and 15 evidence reports |
 | `scripts/` | The build pipeline (fetch → stage → decrypt → patch → repack → verify → package → image → preflight → Pi deploy) |
-| `payload/` | What gets baked into the rootfs: the failsafe, the six-stub patch tables, the sample run_stuff.sh |
+| `payload/` | What gets baked into the rootfs: the failsafe, the eleven-stub patch tables, the sample run_stuff.sh |
 | `packages/` | Battery, WiFi (+CarPlay+SSH), Tweaks (incl. the Reboot overlay) — sources, patchers, installers — plus `compose.sh` (the combo-stick builder) |
-| `tools/` | First-party firmware-format tools, the update-debug (both_copies) tooling, the optional Ghidra/carve porting aids |
+| `tools/` | First-party firmware-format tools, the update-debug (dmclient_gate/button_gate) tooling, the optional Ghidra/carve porting aids, and `tools/micom/` (command/signal-table and MCU-image readers) |
 | `verify/` | Offline package verification |
 | `config/` | `firmware_locks.env` (the compatibility pins), `third_party.lock` (fetch pins), paths/key examples |
 

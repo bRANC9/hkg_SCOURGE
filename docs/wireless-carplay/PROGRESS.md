@@ -15,8 +15,10 @@ The two initial blocking findings were corrected; see BASELINE-ISSUES.md for
 pre-existing WIP that still gates release. No implementation files were included
 in that preservation commit.
 
-Owner policy update: one `opencode-go/deepseek-v4.1-flash#max` review per commit;
-remove the previous two-model requirement. GLM was unavailable (provider budget).
+Owner policy update: one independent DeepSeek V4.1 Flash-Max review per commit
+(`deepseek-v4.1-flash#max` / `deepseek v4.1-flash-1017#max`, provider not
+pinned); remove the previous two-model requirement. GLM was unavailable
+(provider budget).
 
 ## Milestones
 
