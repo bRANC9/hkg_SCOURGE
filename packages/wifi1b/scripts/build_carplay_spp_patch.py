@@ -714,12 +714,15 @@ def _verify_outside_delta(original: bytes, patched: bytes, offset: int,
         raise BuildError("patched output is identical to input")
 
 
-def _cleanup_owned_files(records: list[tuple[Path, int, int]], label: str) -> list[str]:
+def _cleanup_owned_files(records: list[tuple[Path, int | None, int | None]],
+                         label: str) -> list[str]:
     errors = []
     for path, device, inode in reversed(records):
         try:
             current = path.lstat()
-            if (current.st_dev, current.st_ino) != (device, inode):
+            if device is None or inode is None:
+                errors.append(f"unverified {label} preserved: {path}")
+            elif (current.st_dev, current.st_ino) != (device, inode):
                 errors.append(f"changed {label} preserved: {path}")
             else:
                 path.unlink()
@@ -728,6 +731,47 @@ def _cleanup_owned_files(records: list[tuple[Path, int, int]], label: str) -> li
         except OSError as exc:
             errors.append(f"cannot remove owned {label} {path}: {exc}")
     return errors
+
+
+def _create_private_temp(prefix: str, directory: Path,
+                         records: list[tuple[Path, int | None, int | None]],
+                         anchors: list[int]) -> tuple[int, Path]:
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=str(directory))
+    # Own the raw descriptor until the outer finally. No fdopen transfer can
+    # fail between descriptor creation and registration.
+    anchors.append(fd)
+    path = Path(name)
+    index = len(records)
+    records.append((path, None, None))
+    try:
+        identity = os.fstat(fd)
+    except OSError:
+        # Abort on the failed gate, but recover identity for cleanup through
+        # the still-open descriptor when /proc is available. Otherwise retain
+        # and explicitly report the unverified path instead of deleting it.
+        try:
+            identity = os.stat(f"/proc/self/fd/{fd}")
+        except OSError:
+            pass
+        else:
+            records[index] = (path, identity.st_dev, identity.st_ino)
+        raise
+    records[index] = (path, identity.st_dev, identity.st_ino)
+    return fd, path
+
+
+def _write_private_temp(fd: int, content: bytes, mode: int) -> None:
+    remaining = memoryview(content)
+    while remaining:
+        try:
+            written = os.write(fd, remaining)
+        except InterruptedError:
+            continue
+        if written <= 0:
+            raise OSError("private output write made no progress")
+        remaining = remaining[written:]
+    os.fchmod(fd, mode)
+    os.fsync(fd)
 
 
 def build_patch(input_path: Path, out_dir: Path,
@@ -904,37 +948,19 @@ def build_patch(input_path: Path, out_dir: Path,
     tmp_output = None
     tmp_manifest = None
     published: list[tuple[Path, int, int]] = []
-    private_temps: list[tuple[Path, int, int]] = []
+    private_temps: list[tuple[Path, int | None, int | None]] = []
     anchors: list[int] = []
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".vbtd-63.spp-rx.patched.", dir=str(out_dir)
-        )
-        tmp_output = Path(tmp_name)
-        with os.fdopen(fd, "wb") as handle:
-            identity = os.fstat(handle.fileno())
-            private_temps.append((tmp_output, identity.st_dev, identity.st_ino))
-            anchors.append(os.dup(handle.fileno()))
-            handle.write(patched_bytes)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_output, output_mode)
+        fd, tmp_output = _create_private_temp(
+            ".vbtd-63.spp-rx.patched.", out_dir, private_temps, anchors)
+        _write_private_temp(fd, patched_bytes, output_mode)
 
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=".vbtd-63.spp-rx.manifest.", dir=str(out_dir)
-        )
-        tmp_manifest = Path(tmp_name)
+        fd, tmp_manifest = _create_private_temp(
+            ".vbtd-63.spp-rx.manifest.", out_dir, private_temps, anchors)
         manifest_bytes = (
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
-        with os.fdopen(fd, "wb") as handle:
-            identity = os.fstat(handle.fileno())
-            private_temps.append((tmp_manifest, identity.st_dev, identity.st_ino))
-            anchors.append(os.dup(handle.fileno()))
-            handle.write(manifest_bytes)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_manifest, 0o644)
+        _write_private_temp(fd, manifest_bytes, 0o644)
 
         # Retain the private temporary links until both files and their
         # readback succeed; they anchor the identities used for rollback.
