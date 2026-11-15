@@ -10,6 +10,22 @@ HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 OUT=${1:-"$HERE/../out/appcombo-flat"}
 mkdir -p "$OUT"
 OUT=$(CDPATH= cd -- "$OUT" && pwd)
+CLEANUP_SOURCE="$HERE/common/runtime_cleanup.sh"
+[ -f "$CLEANUP_SOURCE" ] && [ ! -L "$CLEANUP_SOURCE" ] || {
+    echo "missing canonical cleanup helper: $CLEANUP_SOURCE" >&2; exit 1; }
+cleanup_sha=$(sha256sum "$CLEANUP_SOURCE" | cut -d' ' -f1)
+# A stale top-level helper from an older three-file build is removed only when
+# it is byte-identical to our canonical helper.  Any unknown file is preserved
+# and the build refuses rather than unlinking owner data.
+if [ -e "$OUT/runtime_cleanup.sh" ] || [ -L "$OUT/runtime_cleanup.sh" ]; then
+    if [ -f "$OUT/runtime_cleanup.sh" ] && [ ! -L "$OUT/runtime_cleanup.sh" ] &&
+       [ "$(sha256sum "$OUT/runtime_cleanup.sh" | cut -d' ' -f1)" = "$cleanup_sha" ]; then
+        rm -f "$OUT/runtime_cleanup.sh"
+    else
+        echo "refusing to overwrite unknown file: $OUT/runtime_cleanup.sh" >&2
+        exit 1
+    fi
+fi
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/scourge-flat.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/tree"
@@ -42,11 +58,12 @@ python3 "$HERE/common/test_layout_qt.py" \
     "$STAGE/final.qml"
 (cd "$STAGE/tree" && tar -czf "$STAGE/appcombo.tar.gz" .)
 digest=$(sha256sum "$STAGE/appcombo.tar.gz" | cut -d' ' -f1)
-cleanup_sha=$(sha256sum "$HERE/common/runtime_cleanup.sh" | cut -d' ' -f1)
 # Inject the canonical helper function definitions verbatim.  The flat pair
 # stays two files; no external cleanup helper is copied or extracted.
+[ "$(sha256sum "$CLEANUP_SOURCE" | cut -d' ' -f1)" = "$cleanup_sha" ] || {
+    echo "canonical cleanup helper changed during build" >&2; exit 1; }
 awk -v tarball="$digest" -v cleanup_sha="$cleanup_sha" \
-    -v helper="$HERE/common/runtime_cleanup.sh" '
+    -v helper="$CLEANUP_SOURCE" '
     /^# @RUNTIME_CLEANUP_SHELL@$/ {
         while ((getline line < helper) > 0) print line
         close(helper)
@@ -64,7 +81,6 @@ if grep -Eq '@[A-Z_][A-Z0-9_]*@' "$STAGE/run_stuff.sh"; then
 fi
 sh -n "$STAGE/run_stuff.sh"
 cp -f "$STAGE/appcombo.tar.gz" "$STAGE/run_stuff.sh" "$OUT/"
-rm -f "$OUT/runtime_cleanup.sh"
 cat > "$OUT/README.txt" <<'EOF'
 SCOURGE standalone flat combo — Battery, Tweaks/Reboot and Wifi1b
 =================================================================
@@ -82,10 +98,10 @@ wrapper verifies the archive SHA256 and readback before running any stage; do
 not extract the archive. The canonical cleanup helper is embedded in
 run_stuff.sh; no third file is needed.
 Bounded runtime log truncation happens first. Removed-WiFi cleanup is
-evidence-gated: it runs only with readable QML absence evidence, no existing
-or dangling WiFi page/service, no running owned WiFi daemon, and a verified
-private WiFi archive or a prior removal receipt. Otherwise owner credentials
-and backups are preserved and reported.
+evidence-gated: it runs only with readable QML/asset absence evidence, no
+existing or dangling WiFi page/service, no running owned WiFi daemon, and a
+newly verified private archive of the current WiFi state. Otherwise owner
+credentials and backups are preserved and reported.
 SENSITIVE: appcombo.tar.gz contains the compiled Wifi1b payload, which may
 include owner credentials from the private source, plus any
 SCOURGE_WIFI1B_TXT/SCOURGE_WIFI_TXT or SCOURGE_AUTHORIZED_KEYS inputs.
