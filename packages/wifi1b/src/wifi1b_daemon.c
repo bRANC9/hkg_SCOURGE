@@ -151,6 +151,9 @@ static bool g_apply_failed;
 static int64_t g_start_ms;
 static pid_t g_apply_pid;
 static int64_t g_apply_start_ms;
+static bool g_apply_dhcp_capable;
+static bool g_txn_active;
+static int64_t g_apply_deadline_ms;
 static bool g_in_child;
 static int64_t g_last_autodump_ms;
 static int64_t g_last_dump_try_ms;
@@ -193,7 +196,8 @@ static char g_home_member[48];
 typedef enum {
     W2_DHCP_ACQUIRE = 0,
     W2_DHCP_RENEW,
-    W2_DHCP_REBIND
+    W2_DHCP_REBIND,
+    W2_DHCP_RELEASE
 } w2_dhcp_step_t;
 
 typedef enum { WORK_MODE, WORK_SCAN, WORK_SSH, WORK_PAIR_STOP, WORK_DUMP, WORK_DHCP } work_t;
@@ -253,11 +257,63 @@ static void probe_tick(void);
 /* small helpers                                                       */
 /* ------------------------------------------------------------------ */
 
+/* One total budget per apply transaction.  Every command and DHCP wait is
+ * capped by the remaining monotonic time, so cleanup/handoff steps cannot
+ * silently extend a nominal 35 s into an unbounded sequence of 8 s commands. */
+#define WIFI1B_TXN_BUDGET_MS 60000
+#define WIFI1B_TXN_GRACE_MS  3000
+
+#ifdef WIFI_TEST
+static int64_t (*test_now_ms)(void);
+static int test_txn_budget_ms;
+#endif
+
 static int64_t now_ms(void)
 {
+#ifdef WIFI_TEST
+    if (test_now_ms) return test_now_ms();
+#endif
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static void w2_txn_begin(bool dhcp_capable)
+{
+    g_txn_active = true;
+    g_apply_dhcp_capable = dhcp_capable;
+    g_apply_start_ms = now_ms();
+    int budget = WIFI1B_TXN_BUDGET_MS;
+#ifdef WIFI_TEST
+    if (test_txn_budget_ms > 0) budget = test_txn_budget_ms;
+#endif
+    g_apply_deadline_ms = g_apply_start_ms + budget;
+}
+
+static void w2_txn_end(void)
+{
+    g_txn_active = false;
+    g_apply_dhcp_capable = false;
+}
+
+static int64_t w2_txn_remaining_ms(void)
+{
+    if (!g_txn_active) return -1;
+    int64_t left = g_apply_deadline_ms - now_ms();
+    return left > 0 ? left : 0;
+}
+
+static bool w2_txn_expired(void)
+{
+    return g_txn_active && w2_txn_remaining_ms() == 0;
+}
+
+static int w2_txn_command_timeout(int requested)
+{
+    int64_t left = w2_txn_remaining_ms();
+    if (left < 0) return requested;
+    if (left == 0) return 0;
+    return left < requested ? (int)left : requested;
 }
 
 static long long disk_free_kb(void)
@@ -366,6 +422,11 @@ static void set_msg(const char *fmt, ...)
 static int (*test_command)(char *, size_t, const char *);
 static bool (*test_work)(work_t, bool);
 static int test_iface = -1, test_owned_wpa = -1, test_dhcpd_start = -1;
+static int test_dhcp_pool_first = -1, test_dhcp_pool_last = -1;
+static int test_dhcpd_running = -1;
+static int test_owner_write_fail;
+static int test_owner_dir_sync_fail;
+static int test_lineage_require_lock;
 static const char *test_if_inet6_path;
 static const char *test_ipv6_conf_dir;
 static const char *test_mac_override;
@@ -373,6 +434,7 @@ static const char *test_mac_override;
 static int run_command(char *out, size_t outsz, const char *cmd, int timeout_ms)
 {
     if (out && outsz) out[0] = 0;
+    if (timeout_ms <= 0) return 124;
 #ifdef WIFI_TEST
     if (test_command) return test_command(out, outsz, cmd);
 #endif
@@ -438,7 +500,9 @@ static int sh(const char *fmt, ...)
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
     va_end(ap);
 
-    return run_command(NULL, 0, cmd, g_probe_child ? 1500 : 8000);
+    int timeout = w2_txn_command_timeout(g_probe_child ? 1500 : 8000);
+    if (timeout <= 0) return 124;
+    return run_command(NULL, 0, cmd, timeout);
 }
 
 static int sh_out(char *out, size_t outsz, const char *fmt, ...)
@@ -448,7 +512,9 @@ static int sh_out(char *out, size_t outsz, const char *fmt, ...)
     va_start(ap, fmt);
     vsnprintf(cmd, sizeof(cmd), fmt, ap);
     va_end(ap);
-    return run_command(out, outsz, cmd, g_probe_child ? 1500 : 8000);
+    int timeout = w2_txn_command_timeout(g_probe_child ? 1500 : 8000);
+    if (timeout <= 0) return 124;
+    return run_command(out, outsz, cmd, timeout);
 }
 
 /* Single-quote a value for /bin/sh. */
@@ -3817,6 +3883,10 @@ static void apply_cancel(void)
     if (g_apply_pid <= 0) return;
     g_apply_cancelled = true;
     g_cancel_ms = now_ms();
+    /* A DHCP transaction may already have changed the exact address/route.
+     * Let its bounded worker finish and harvest the result for cleanup before
+     * the superseding work runs. Other work kinds keep prompt cancellation. */
+    if (g_apply_dhcp_capable) return;
     kill(-g_apply_pid, SIGTERM);
     kill(g_apply_pid, SIGTERM);
 }
@@ -3839,6 +3909,7 @@ static bool accept_apply_result(char *buf)
     char lease_ip[32] = "", lease_server[32] = "", lease_gateway[32] = "";
     char lease_iface[16] = "";
     int lease_updated = 0, lease_valid = 0, lease_route_ok = 0;
+    int lease_cleanup_pending = 0, lease_fs_unconfirmed = 0;
     int lease_prefix = 0, lease_s = 0, lease_t1 = 0, lease_t2 = 0;
     unsigned int lease_metric = 0, lease_proto = 0;
     while ((line = strtok_r(NULL, "\n", &save))) {
@@ -3875,6 +3946,8 @@ static bool accept_apply_result(char *buf)
         else if (!strcmp(line, "client_lease_t1_s")) lease_t1 = v;
         else if (!strcmp(line, "client_lease_t2_s")) lease_t2 = v;
         else if (!strcmp(line, "client_lease_route_ok")) lease_route_ok = v == 1;
+        else if (!strcmp(line, "client_lease_cleanup_pending")) lease_cleanup_pending = v == 1;
+        else if (!strcmp(line, "client_lease_fs_unconfirmed")) lease_fs_unconfirmed = v == 1;
         else if (!strcmp(line, "client_route_metric")) {
             unsigned int tmp;
             if (w2_route_token_u32(eq, &tmp)) lease_metric = tmp;
@@ -3883,7 +3956,36 @@ static bool accept_apply_result(char *buf)
             if (w2_route_token_u32(eq, &tmp)) lease_proto = tmp;
         }
     }
-    if (lease_updated) {
+    g_dhcp_owner_fs_unconfirmed = lease_fs_unconfirmed != 0;
+    if (lease_cleanup_pending) {
+        /* Pending cleanup wins over any "updated" flag. Adopt the exact
+         * retained owner so the bounded tick can retry even in Off/carplay
+         * modes; a route-only owner has no IP but still needs the interface. */
+        struct in_addr ip_addr;
+        bool have_ip = inet_pton(AF_INET, lease_ip, &ip_addr) == 1 &&
+                       lease_prefix > 0 && lease_prefix <= 32;
+        if (lease_iface[0] != '\0' && (have_ip || lease_ip[0] == '\0')) {
+            memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+            /* Not clean: the exact owner is retained only for retry. */
+            g_dhcp_lease.updated = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.ip = have_ip ? ntohl(ip_addr.s_addr) : 0;
+            g_dhcp_lease.prefix = have_ip ? lease_prefix : 0;
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), lease_iface);
+            g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+            g_dhcp_next_try_ms = 0;
+        } else {
+            /* Keep the parent's existing exact owner rather than forgetting
+             * it on a malformed pending result. */
+            log_msg("dhcp client: malformed cleanup-pending lease readback");
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+            g_dhcp_next_try_ms = 0;
+        }
+    } else if (lease_updated) {
         struct in_addr ip_addr, server_addr, gateway_addr;
         bool parsed = inet_pton(AF_INET, lease_ip, &ip_addr) == 1 &&
                       inet_pton(AF_INET, lease_gateway, &gateway_addr) == 1 &&
@@ -3898,6 +4000,9 @@ static bool accept_apply_result(char *buf)
             g_dhcp_lease.valid = true;
             g_dhcp_lease.updated = true;
             g_dhcp_lease.route_ok = lease_route_ok;
+            /* A complete validated result owns this exact state; a stale
+             * pending flag from the previous lease must not trigger RELEASE. */
+            g_dhcp_lease.cleanup_pending = false;
             g_dhcp_lease.ip = ntohl(ip_addr.s_addr);
             g_dhcp_lease.server = lease_server[0] ? ntohl(server_addr.s_addr) : 0;
             g_dhcp_lease.gateway = ntohl(gateway_addr.s_addr);
@@ -3932,6 +4037,74 @@ static bool accept_apply_result(char *buf)
     return true;
 }
 
+static bool apply_result_generation(const char *text, int *gen)
+{
+    int ok = 0;
+    if (text == NULL || gen == NULL) return false;
+    if (sscanf(text, "%d %d", gen, &ok) != 2) return false;
+    return ok == 0 || ok == 1;
+}
+
+/* A superseded/cancelled DHCP worker may already have changed the exact
+ * address or ledged route. Harvest only ownership facts for bounded cleanup;
+ * never publish a stale lease as ready and never replays config/messages. */
+static void adopt_superseded_dhcp_result(const char *text)
+{
+    char copy[4096];
+    char ip[32] = "", iface[16] = "";
+    int updated = 0, valid = 0, pending = 0, prefix = 0;
+    int fs_unconfirmed = 0;
+    char *save = NULL;
+
+    if (text == NULL) return;
+    str_copy(copy, sizeof(copy), text);
+    for (char *line = strtok_r(copy, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq++ = 0;
+        int v = atoi(eq);
+        if (!strcmp(line, "client_lease_updated")) updated = v == 1;
+        else if (!strcmp(line, "client_lease_valid")) valid = v == 1;
+        else if (!strcmp(line, "client_lease_cleanup_pending")) pending = v == 1;
+        else if (!strcmp(line, "client_lease_fs_unconfirmed")) fs_unconfirmed = v == 1;
+        else if (!strcmp(line, "client_lease_ip")) str_copy(ip, sizeof(ip), eq);
+        else if (!strcmp(line, "client_lease_iface")) str_copy(iface, sizeof(iface), eq);
+        else if (!strcmp(line, "client_lease_prefix")) prefix = v;
+    }
+
+    g_dhcp_owner_fs_unconfirmed = fs_unconfirmed != 0;
+    struct in_addr ip_addr;
+    bool have_ip = inet_pton(AF_INET, ip, &ip_addr) == 1 &&
+                   prefix > 0 && prefix <= 32;
+    if (pending || (updated && valid)) {
+        /* A completed-but-superseded lease is an exact owner to remove. */
+        if (iface[0] != '\0' && (have_ip || ip[0] == '\0')) {
+            memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+            g_dhcp_lease.ip = have_ip ? ntohl(ip_addr.s_addr) : 0;
+            g_dhcp_lease.prefix = have_ip ? prefix : 0;
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), iface);
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+            g_dhcp_next_try_ms = 0;
+            log_msg("dhcp client: superseded result retained for cleanup (%s/%d %s)",
+                    have_ip ? ip : "route-only", prefix, iface);
+        } else {
+            log_msg("dhcp client: superseded cleanup result lacks exact owner");
+        }
+    } else if (updated && !valid) {
+        /* A clean failure/release with no retained owner: forget the old
+         * lease so it cannot be advertised. */
+        memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+        g_dhcp_lease.updated = true;
+        g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+        log_msg("dhcp client: superseded result confirmed clean cleanup");
+    }
+}
+
 static void request_work(work_t kind, bool pair)
 {
     if (!g_cfg.wlan_on || g_cfg.mode != MODE_CARPLAY) g_ap_restart_requested = false;
@@ -3962,7 +4135,10 @@ static void request_work(work_t kind, bool pair)
             kind == WORK_DUMP ? "Saving logs..." :
             kind == WORK_SSH ? "Updating SSH..." :
             kind == WORK_PAIR_STOP ? "Stopping pairing..." :
-            kind == WORK_DHCP ? "Renewing client lease..." : "Applying mode...");
+            kind == WORK_DHCP ?
+                (g_dhcp_work_step == W2_DHCP_RELEASE
+                    ? "Clearing expired client lease..."
+                    : "Renewing client lease...") : "Applying mode...");
     start_pending_work();
     write_status();
 }
@@ -3977,6 +4153,14 @@ static void start_pending_work(void)
     g_work_pending = false;
     g_apply_cancelled = false;
     unlink(APPLY_RESULT);
+    bool dhcp_capable = g_work_kind == WORK_DHCP ||
+        (g_work_kind == WORK_MODE &&
+         ((g_cfg.mode == MODE_CLIENT && g_cfg.wlan_on) ||
+          g_dhcp_lease.cleanup_pending || g_dhcp_lease.ip != 0 ||
+          g_dhcp_lease.iface[0] != '\0' ||
+          access(WIFI1B_DHCP_OWNER_JOURNAL, F_OK) == 0 ||
+          access(WIFI1B_CLIENT_ROUTE_LEDGER, F_OK) == 0));
+    w2_txn_begin(dhcp_capable);
     pid_t pid = fork();
     if (pid == 0) {
         g_in_child = true;
@@ -3987,12 +4171,16 @@ static void start_pending_work(void)
         close_child_fds(-1);
         g_apply_pid = 0;
         bool ok = false;
+        bool release_work = g_work_kind == WORK_DHCP &&
+                            g_dhcp_work_step == W2_DHCP_RELEASE;
 #ifdef WIFI_TEST
         if (test_work) ok = test_work(g_work_kind, g_current_pair);
         else
 #endif
         if (g_work_kind != WORK_MODE && g_work_kind != WORK_DUMP &&
-            radio_begin("wifi1b_daemon", g_work_kind == WORK_SCAN || (g_cfg.wlan_on && g_cfg.mode != MODE_OFF)) != 1) {
+            radio_begin("wifi1b_daemon",
+                        release_work || g_work_kind == WORK_SCAN ||
+                        (g_cfg.wlan_on && g_cfg.mode != MODE_OFF)) != 1) {
             set_msg("Radio busy/reserved; turn the owning WiFi app Off first");
         }
         else if (g_work_kind == WORK_MODE) ok = apply_mode_work(g_current_pair);
@@ -4005,6 +4193,7 @@ static void start_pending_work(void)
             ok = g_pair_stop_confirmed;
         } else if (g_work_kind == WORK_DHCP) {
             ok = w2_dhcp_client_renew(g_dhcp_work_step);
+            if (release_work) radio_release();
         } else if (g_work_kind == WORK_DUMP) ok = dump_logs_to_usb(true);
         else if (g_work_kind == WORK_SCAN) {
             char scan[32768];
@@ -4017,8 +4206,11 @@ static void start_pending_work(void)
         if (lease_relevant && (g_cfg.mode != MODE_CLIENT || !g_cfg.wlan_on)) {
             g_dhcp_lease.valid = false;
             g_dhcp_lease.route_ok = false;
-            g_dhcp_lease.updated = true;
+            /* Pending cleanup wins over the mode transition's clean flag. */
+            g_dhcp_lease.updated = !g_dhcp_lease.cleanup_pending;
         }
+        if (g_work_kind == WORK_DHCP && g_dhcp_work_step == W2_DHCP_RELEASE && !ok)
+            g_dhcp_lease.updated = false;
         if (!lease_relevant) g_dhcp_lease.updated = false;
         if (g_dhcp_lease.ip) w2_ip4_str(g_dhcp_lease.ip, lease_ip, sizeof(lease_ip));
         if (g_dhcp_lease.server) w2_ip4_str(g_dhcp_lease.server, lease_server, sizeof(lease_server));
@@ -4030,6 +4222,8 @@ static void start_pending_work(void)
                  "dhcp_tx=%d\ndhcp_rx_offer=%d\ndhcp_rx_ack=%d\ndhcp_attempts=%d\n"
                  "dhcp_bssid=%s\ndhcp_error=%s\n"
                  "client_lease_updated=%d\nclient_lease_valid=%d\n"
+                 "client_lease_cleanup_pending=%d\n"
+                 "client_lease_fs_unconfirmed=%d\n"
                  "client_lease_ip=%s\nclient_lease_server=%s\nclient_lease_gateway=%s\n"
                  "client_lease_prefix=%d\nclient_lease_lease_s=%d\n"
                  "client_lease_t1_s=%d\nclient_lease_t2_s=%d\n"
@@ -4043,6 +4237,8 @@ static void start_pending_work(void)
                  g_dhcp_tx, g_dhcp_rx_offer, g_dhcp_rx_ack, g_dhcp_attempts,
                  g_dhcp_bssid, g_dhcp_error,
                  g_dhcp_lease.updated ? 1 : 0, g_dhcp_lease.valid ? 1 : 0,
+                 g_dhcp_lease.cleanup_pending ? 1 : 0,
+                 g_dhcp_owner_fs_unconfirmed ? 1 : 0,
                  lease_ip, lease_server, lease_gateway,
                  g_dhcp_lease.prefix, g_dhcp_lease.lease_s,
                  g_dhcp_lease.t1_s, g_dhcp_lease.t2_s,
@@ -4062,6 +4258,7 @@ static void start_pending_work(void)
             g_dhcp_next_try_ms = now_ms() + delay;
         }
         set_msg("apply: fork failed");
+        w2_txn_end();
         return;
     }
     setpgid(pid, pid);
@@ -4071,18 +4268,30 @@ static void start_pending_work(void)
 
 static void apply_reap(void)
 {
-    if (g_apply_pid <= 0) { start_pending_work(); return; }
+    if (g_apply_pid <= 0) { w2_txn_end(); start_pending_work(); return; }
     int st = 0;
     pid_t pid = g_apply_pid;
     pid_t r = waitpid(pid, &st, WNOHANG);
     if (r == 0) {
-        if (g_apply_cancelled && now_ms() - g_cancel_ms > 300) {
-            kill(-pid, SIGKILL); kill(pid, SIGKILL);
-        } else if (!g_apply_cancelled && now_ms() - g_apply_start_ms > 150000) {
+        int64_t deadline = g_txn_active ? g_apply_deadline_ms
+                                        : g_apply_start_ms + 150000;
+        if (!g_apply_cancelled && now_ms() >= deadline) {
             g_apply_failed = true;
             if (g_work_kind == WORK_MODE) g_network_failed = true;
-            set_msg("apply timed out");
+            set_msg("apply transaction deadline exceeded");
             apply_cancel();
+        }
+        if (g_apply_cancelled) {
+            if (g_apply_dhcp_capable) {
+                /* The worker unwinds through remaining-time command/wait
+                 * budgets.  Only after that grace may its process group be
+                 * killed; the durable owner journal is the reconciliation. */
+                if (now_ms() >= deadline + WIFI1B_TXN_GRACE_MS) {
+                    kill(-pid, SIGKILL); kill(pid, SIGKILL);
+                }
+            } else if (now_ms() - g_cancel_ms > 300) {
+                kill(-pid, SIGKILL); kill(pid, SIGKILL);
+            }
         }
         return;
     }
@@ -4091,11 +4300,45 @@ static void apply_reap(void)
     kill(-pid, SIGKILL);
     g_apply_pid = 0;
     char buf[4096] = "";
-    bool valid = !g_apply_cancelled && WIFEXITED(st) && WEXITSTATUS(st) == 0 &&
-                 read_file(APPLY_RESULT, buf, sizeof(buf)) > 0 && accept_apply_result(buf);
+    bool have_result = read_file(APPLY_RESULT, buf, sizeof(buf)) > 0;
+    bool stale_dhcp = false;
+    int result_gen = -1;
+    bool current_gen = have_result &&
+        apply_result_generation(buf, &result_gen) && result_gen == g_apply_gen;
+    bool child_failed = !WIFEXITED(st) || WEXITSTATUS(st) != 0;
+    bool txn_over = g_txn_active && now_ms() > g_apply_deadline_ms;
+    if (g_apply_dhcp_capable && have_result &&
+        (g_apply_cancelled || !current_gen || child_failed || txn_over)) {
+        /* A WORK_MODE client transaction contains a DHCP acquisition too;
+         * harvest it exactly like a WORK_DHCP worker. */
+        adopt_superseded_dhcp_result(buf);
+        (void)w2_dhcp_reconcile_owned_state();
+        stale_dhcp = true;
+    } else if (g_apply_dhcp_capable &&
+               (!have_result || child_failed || txn_over)) {
+        /* Forced exit/no result: adopt only durable exact ownership, never a
+         * stale ready lease. */
+        g_apply_failed = true;
+        if (g_work_kind == WORK_MODE) g_network_failed = true;
+        set_msg("worker result missing or failed; exact owner reconciliation pending");
+        (void)w2_dhcp_reconcile_owned_state();
+        g_dhcp_lease.valid = false;
+        g_dhcp_lease.route_ok = false;
+        if (g_dhcp_lease.ip != 0 || g_dhcp_lease.prefix != 0 ||
+            g_dhcp_lease.cleanup_pending) {
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+        } else {
+            g_dhcp_lease.updated = true;
+        }
+        stale_dhcp = true;
+    }
+    bool valid = !stale_dhcp && !g_apply_cancelled &&
+                 WIFEXITED(st) && WEXITSTATUS(st) == 0 && have_result &&
+                 accept_apply_result(buf);
     unlink(APPLY_RESULT);
     if (g_work_kind == WORK_MODE && (!g_apply_cancelled || !g_work_pending)) g_ap_restart_requested = false;
-    if (!valid && !g_apply_cancelled) {
+    if (!valid && !g_apply_cancelled && !stale_dhcp) {
         g_apply_failed = true;
         if (g_work_kind == WORK_MODE) g_network_failed = true;
         set_msg("worker failed; result absent, invalid or stale");
@@ -4106,7 +4349,7 @@ static void apply_reap(void)
         g_dhcp_lease.route_ok = false;
         g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
     }
-    if (g_work_kind == WORK_DHCP && !g_apply_cancelled) {
+    if (g_work_kind == WORK_DHCP && !g_apply_cancelled && !stale_dhcp) {
         if (valid && !g_apply_failed) {
             g_dhcp_retry_failures = 0;
             g_dhcp_next_try_ms = 0;
@@ -4124,6 +4367,7 @@ static void apply_reap(void)
     }
     g_apply_cancelled = false;
     g_last_probe_ms = 0;
+    w2_txn_end();
     start_pending_work();
     if (!g_apply_pid && !g_work_pending && g_dump_requested) {
         g_dump_requested = false;
@@ -4156,16 +4400,36 @@ static dhcp_tick_t dhcp_lease_action(bool valid, int64_t now, int64_t t1,
  * gets to remove the stale address/route. */
 static void dhcp_lease_tick(void)
 {
-    if (g_stop || !g_cfg.wlan_on || g_cfg.mode != MODE_CLIENT) return;
+    if (g_stop) return;
     if (g_apply_pid > 0 || g_work_pending) return;
+    (void)w2_dhcp_reconcile_owned_state();
     int64_t now = now_ms();
-    if (g_dhcp_lease.valid && g_client_expiry_at_ms > 0 &&
+    if (g_cfg.mode == MODE_CLIENT && g_cfg.wlan_on &&
+        g_dhcp_lease.valid && g_client_expiry_at_ms > 0 &&
         now >= g_client_expiry_at_ms) {
         g_dhcp_lease.valid = false;
         g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.cleanup_pending = true;
         g_client_t1_at_ms = g_client_t2_at_ms = 0;
     }
     if (now < g_dhcp_next_try_ms) return;
+    /* Exact-owner cleanup is not limited to client mode: a mode-off or
+     * CarPlay transition can leave a pending address/route that must still
+     * be retried until both readbacks are absent. */
+    if (g_dhcp_lease.cleanup_pending) {
+        g_dhcp_work_step = W2_DHCP_RELEASE;
+        request_work(WORK_DHCP, false);
+        return;
+    }
+    if (g_cfg.mode != MODE_CLIENT || !g_cfg.wlan_on) return;
+    /* Remove an expired/stale lease before trying to acquire another one. */
+    if (!g_dhcp_lease.valid &&
+        (g_dhcp_lease.ip != 0 || g_dhcp_lease.iface[0] != '\0')) {
+        g_dhcp_lease.cleanup_pending = true;
+        g_dhcp_work_step = W2_DHCP_RELEASE;
+        request_work(WORK_DHCP, false);
+        return;
+    }
     dhcp_tick_t action = dhcp_lease_action(g_dhcp_lease.valid, now,
                                            g_client_t1_at_ms,
                                            g_client_t2_at_ms,
@@ -4659,7 +4923,10 @@ static void scan_networks(char *out, size_t n)
     if (was_off) {
         g_cfg.wlan_on = false;
         g_cfg.mode = MODE_OFF;
+        bool scan_txn = !g_txn_active;
+        if (scan_txn) w2_txn_begin(false);
         apply_mode_work(false);
+        if (scan_txn) w2_txn_end();
     }
     set_msg("scan: %d network(s) found", count);
     write_status();
@@ -5349,8 +5616,103 @@ static void usage(const char *argv0)
             argv0, argv0, argv0, argv0);
 }
 
+static bool shutdown_cleanup_work(void)
+{
+    g_cfg.wlan_on = false;
+    g_cfg.mode = MODE_OFF;
+    w2_txn_end();
+    w2_txn_begin(false); /* fresh bounded cleanup/handoff budget */
+    bool ok = apply_mode_work(false);
+    w2_txn_end();
+    return ok;
+}
+
+static int shutdown_sequence(void)
+{
+    /* Coordinated shutdown: cancel any in-flight apply and undo the network
+     * state we own so stopping the daemon does not leave owned routes,
+     * addresses, firewall rules or supplicant state behind. */
+    apply_cancel();
+    g_work_pending = false; g_dump_requested = false;
+    /* Wait only to the transaction's real monotonic deadline (plus a short
+     * unwind grace).  The worker itself caps every command/wait by the
+     * remaining budget; this is not a nominal 35 s over more 8 s commands. */
+    int64_t until = now_ms() + 1500;
+    if (g_apply_pid > 0 && g_apply_dhcp_capable) {
+        int64_t deadline = g_txn_active ? g_apply_deadline_ms
+                                        : now_ms() + WIFI1B_TXN_BUDGET_MS;
+        until = deadline + WIFI1B_TXN_GRACE_MS;
+        if (until < now_ms() + 1000) until = now_ms() + 1000;
+    }
+    while (g_apply_pid > 0 && now_ms() < until) {
+        apply_reap();
+        usleep(20000);
+    }
+    if (g_apply_pid > 0) {
+        set_msg("shutdown: apply transaction deadline reached; exact owner reconciliation required");
+        kill(-g_apply_pid, SIGKILL);
+        kill(g_apply_pid, SIGKILL);
+        while (waitpid(g_apply_pid, NULL, WNOHANG) == 0) {
+            if (now_ms() >= until + 2000) break;
+            usleep(20000);
+        }
+        g_apply_pid = 0;
+    }
+    if (g_apply_dhcp_capable)
+        (void)w2_dhcp_reconcile_owned_state();
+    if (g_probe_pid > 0) {
+        kill(-g_probe_pid, SIGKILL); kill(g_probe_pid, SIGKILL);
+        waitpid(g_probe_pid, NULL, WNOHANG);
+    }
+    /* Cleanup is unconditional: configured Off is not proof an interrupted
+     * previous apply removed its firewall/AP/SSH state. Keep it bounded and
+     * outside the parent, including on SIGTERM when g_stop is already set. */
+    int shutdown_rc = 0;
+    pid_t cleanup = fork();
+    if (cleanup == 0) {
+        setpgid(0, 0); g_in_child = true; g_stop = 0;
+        close_child_fds(-1);
+        bool cleanup_ok = shutdown_cleanup_work();
+        _exit(cleanup_ok ? 0 : 1);
+    }
+    if (cleanup > 0) {
+        setpgid(cleanup, cleanup);
+        until = now_ms() + WIFI1B_TXN_BUDGET_MS + WIFI1B_TXN_GRACE_MS;
+        int cst = 0;
+        pid_t cr = 0;
+        while ((cr = waitpid(cleanup, &cst, WNOHANG)) == 0 && now_ms() < until)
+            usleep(20000);
+        if (cr == 0) {
+            kill(-cleanup, SIGKILL); kill(cleanup, SIGKILL);
+            while (waitpid(cleanup, &cst, 0) < 0 && errno == EINTR) {}
+        }
+        bool cleanup_ok = cr == cleanup && WIFEXITED(cst) &&
+                          WEXITSTATUS(cst) == 0;
+        if (!cleanup_ok) {
+            set_msg("shutdown cleanup not confirmed; exact address/route owner retained");
+            log_msg("shutdown: cleanup did not confirm absence; handoff refused");
+            write_status();
+            shutdown_rc = 1;
+        }
+    } else {
+        shutdown_rc = 1;
+    }
+    return shutdown_rc;
+}
+
 int main(int argc, char **argv)
 {
+#ifdef WIFI_TEST
+    if (argc > 1 && !strcmp(argv[1], "--test-shutdown-exit"))
+        return shutdown_cleanup_work() ? 0 : 1;
+    if (argc > 1 && !strcmp(argv[1], "--test-sigterm-mainloop")) {
+        signal(SIGTERM, on_signal);
+        signal(SIGINT, on_signal);
+        (void)write_file_atomic(APP_DIR "/sigterm-ready", "ready\n", 0600);
+        while (!g_stop) usleep(10000);
+        return shutdown_sequence();
+    }
+#endif
     umask(0077);
     int port = DEFAULT_HTTP_PORT;
     bool dhcpd_mode = false;
@@ -5453,7 +5815,9 @@ int main(int argc, char **argv)
             else g_cfg.mode = MODE_OFF;
             g_cfg.wlan_on = g_cfg.mode != MODE_OFF;
             config_save();
+            w2_txn_begin(false);
             bool ok = apply_mode_work(false);
+            w2_txn_end();
             collect_observation(&g_observed);
             g_observed_ms = now_ms();
             char buf[8192];
@@ -5482,7 +5846,13 @@ int main(int argc, char **argv)
         }
         if (!strcmp(one_shot, "dhcp-client")) {
             char ip[64] = "";
+            bool applies = getenv("WIFI1B_DHCP_TEST_NOAPPLY") == NULL;
+            if (applies && radio_begin("wifi1b_daemon", true) != 1) {
+                printf("{\"ok\":false,\"ip\":\"\"}\n");
+                return 1;
+            }
             bool ok = w2_dhcp_client("wlan0", ip, sizeof(ip));
+            if (applies) radio_release();
             printf("{\"ok\":%s,\"ip\":\"%s\"}\n", ok ? "true" : "false", ip);
             return ok ? 0 : 1;
         }
@@ -5588,40 +5958,9 @@ int main(int argc, char **argv)
         }
     }
 
-    /* Coordinated shutdown: cancel any in-flight apply and undo the network
-     * state we own (tether, firewall rules, supplicant, SSH) so stopping the
-     * daemon does not leave ConnMan tethering or iptables rules behind. */
-    apply_cancel();
-    g_work_pending = false; g_dump_requested = false;
-    int64_t until = now_ms() + 1500;
-    while (g_apply_pid > 0 && now_ms() < until) {
-        apply_reap();
-        usleep(20000);
-    }
-    if (g_probe_pid > 0) {
-        kill(-g_probe_pid, SIGKILL); kill(g_probe_pid, SIGKILL);
-        waitpid(g_probe_pid, NULL, WNOHANG);
-    }
-    /* Cleanup is unconditional: configured Off is not proof an interrupted
-     * previous apply removed its firewall/AP/SSH state. Keep it bounded and
-     * outside the parent, including on SIGTERM when g_stop is already set. */
-    pid_t cleanup = fork();
-    if (cleanup == 0) {
-        setpgid(0, 0); g_in_child = true; g_stop = 0;
-        close_child_fds(-1);
-        g_cfg.wlan_on = false; g_cfg.mode = MODE_OFF;
-        apply_mode_work(false);
-        _exit(0);
-    }
-    if (cleanup > 0) {
-        setpgid(cleanup, cleanup);
-        until = now_ms() + 18000;
-        while (waitpid(cleanup, NULL, WNOHANG) == 0 && now_ms() < until) usleep(20000);
-        kill(-cleanup, SIGKILL); kill(cleanup, SIGKILL);
-        waitpid(cleanup, NULL, WNOHANG);
-    }
+    int shutdown_rc = shutdown_sequence();
     home_monitor_cleanup();
     close(srv);
     log_msg("wifi1b_daemon stopped");
-    return 0;
+    return shutdown_rc;
 }

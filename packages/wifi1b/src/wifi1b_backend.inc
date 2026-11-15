@@ -24,6 +24,8 @@
 #define WIFI1B_AP_FW_CHAIN     "WIFI1B_APP_AP"
 #define WIFI1B_AP_FW6_CHAIN    "WIFI1B_APP_AP6"
 #define WIFI1B_CLIENT_ROUTE_LEDGER APP_DIR "/client.route"
+#define WIFI1B_DHCP_OWNER_JOURNAL   APP_DIR "/client.owner"
+#define WIFI1B_DHCP_LINEAGE         APP_DIR "/client.lineage"
 #define WIFI1B_CLIENT_ROUTE_PROTO  66U
 #define WIFI1B_CLIENT_DEFAULT_METRIC 1000U
 
@@ -610,6 +612,29 @@ static void w2_ip4_str(uint32_t ip, char *out, size_t n)
     inet_ntop(AF_INET, &a, out, n);
 }
 
+/* The DHCP pool is configuration, not a request-driven value. An invalid
+ * range fails closed: no address outside the intended /24 pool is offered. */
+static bool w2_dhcp_pool_bounds(uint32_t *first, uint32_t *last)
+{
+    int pool_first = WIFI1B_DHCP_POOL_FIRST;
+    int pool_last = WIFI1B_DHCP_POOL_LAST;
+    uint32_t ap = w2_ip4(WIFI1B_AP_IP);
+#ifdef WIFI_TEST
+    if (test_dhcp_pool_first >= 0) pool_first = test_dhcp_pool_first;
+    if (test_dhcp_pool_last >= 0) pool_last = test_dhcp_pool_last;
+#endif
+    if (first == NULL || last == NULL || ap == 0) return false;
+    if (pool_first < 1 || pool_last < pool_first || pool_last > 254) return false;
+    uint32_t base = ap & 0xffffff00U;
+    uint32_t computed_first = base + (uint32_t)pool_first;
+    uint32_t computed_last = base + (uint32_t)pool_last;
+    if (computed_first < base || computed_last < computed_first) return false;
+    if (ap >= computed_first && ap <= computed_last) return false;
+    *first = computed_first;
+    *last = computed_last;
+    return true;
+}
+
 static int w2_dhcpd_pid(void)
 {
     char buf[64];
@@ -627,6 +652,9 @@ static int w2_dhcpd_pid(void)
 
 static bool dhcpd_running(void)
 {
+#ifdef WIFI_TEST
+    if (test_dhcpd_running >= 0) return test_dhcpd_running != 0;
+#endif
     return w2_dhcpd_pid() > 0;
 }
 
@@ -672,27 +700,32 @@ static void w2_lease_write(void)
 static void w2_lease_load(void)
 {
     char buf[8192];
+    uint32_t first = 0, last = 0;
+    if (!w2_dhcp_pool_bounds(&first, &last)) {
+        log_msg("dhcpd: invalid lease pool; persisted leases ignored");
+        return;
+    }
+    memset(g_w2_leases, 0, sizeof(g_w2_leases));
     if (read_file(WIFI1B_DHCP_LEASE_FILE, buf, sizeof(buf)) <= 0) return;
     int64_t now = now_ms();
     time_t wall = time(NULL);
-    uint32_t base = w2_ip4(WIFI1B_AP_IP) & 0xffffff00U;
-    uint32_t first = base + WIFI1B_DHCP_POOL_FIRST;
-    uint32_t last = base + WIFI1B_DHCP_POOL_LAST;
     char *save = NULL;
 
     for (char *line = strtok_r(buf, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {
         char *p = trim(line);
-        char mac_text[32], ip_text[32];
+        char mac_text[32], ip_text[32], extra[2];
         long long expiry = 0;
         uint8_t mac[6];
         struct in_addr address;
         uint32_t ip;
 
         if (!*p || *p == '#') continue;
-        if (sscanf(p, "%31s %31s %lld", mac_text, ip_text, &expiry) != 3) continue;
+        if (sscanf(p, "%31s %31s %lld %1s", mac_text, ip_text, &expiry, extra) != 3)
+            continue;
         if (expiry <= (long long)wall) continue;
         if (!parse_mac6(mac_text, mac)) continue;
+        if (mac[0] & 1) continue; /* multicast/broadcast source is not a lease */
         if (inet_pton(AF_INET, ip_text, &address) != 1) continue;
         ip = ntohl(address.s_addr);
         if (ip < first || ip > last) continue;
@@ -751,13 +784,19 @@ static bool w2_ip_in_use(uint32_t ip, int64_t now)
 
 static uint32_t w2_lease_alloc(const uint8_t mac[6], uint32_t requested, int64_t now)
 {
-    uint32_t base = w2_ip4(WIFI1B_AP_IP) & 0xffffff00U;
-    uint32_t first = base + WIFI1B_DHCP_POOL_FIRST;
-    uint32_t last = base + WIFI1B_DHCP_POOL_LAST;
+    uint32_t first = 0, last = 0;
+    if (mac == NULL || (mac[0] & 1)) return 0;
+    if (!w2_dhcp_pool_bounds(&first, &last)) return 0;
     uint32_t existing = w2_lease_for_mac(mac, now);
     if (existing) {
-        w2_lease_write();
-        return existing;
+        if (existing >= first && existing <= last) {
+            w2_lease_write();
+            return existing;
+        }
+        /* A persisted lease outside the configured pool is not reusable. */
+        for (size_t i = 0; i < sizeof(g_w2_leases)/sizeof(g_w2_leases[0]); i++)
+            if (g_w2_leases[i].used && !memcmp(g_w2_leases[i].mac, mac, 6))
+                g_w2_leases[i].used = false;
     }
     if (requested >= first && requested <= last && !w2_ip_in_use(requested, now))
         goto assign;
@@ -859,54 +898,70 @@ static size_t w2_dhcp_put(uint8_t *dst, size_t cap, uint8_t code, uint8_t len, c
 }
 
 static void w2_dhcp_send(int fd, const struct w2_dhcp_packet *req, size_t reqlen,
-                         uint8_t type, uint32_t yiaddr, bool ack)
+                         uint8_t type, uint32_t yiaddr, bool ack, bool inform)
 {
     (void)reqlen;
+    (void)ack;
     struct w2_dhcp_packet rep;
+    bool nak = type == 6;
     memset(&rep, 0, sizeof(rep));
     rep.op = 2;
     rep.htype = 1;
     rep.hlen = 6;
     rep.xid = req->xid;
     rep.flags = req->flags;
-    rep.ciaddr = req->ciaddr;
-    rep.yiaddr = htonl(yiaddr);
-    rep.siaddr = htonl(w2_ip4(WIFI1B_AP_IP));
+    rep.ciaddr = nak ? 0 : req->ciaddr;
+    rep.yiaddr = (nak || inform) ? 0 : htonl(yiaddr);
+    rep.siaddr = (nak || inform) ? 0 : htonl(w2_ip4(WIFI1B_AP_IP));
     memcpy(rep.chaddr, req->chaddr, 6);
     rep.options[0] = 99; rep.options[1] = 130; rep.options[2] = 83; rep.options[3] = 99;
     size_t off = 4;
     off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 53, 1, &type);
     uint32_t server = htonl(w2_ip4(WIFI1B_AP_IP));
     off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 54, 4, &server);
-    uint32_t lease = htonl(ack ? 3600 : 3600);
-    off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 51, 4, &lease);
-    uint32_t renew = htonl(1800);
-    off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 58, 4, &renew);
-    uint32_t rebind = htonl(3150);
-    off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 59, 4, &rebind);
-    uint32_t mask = htonl(w2_ip4(WIFI1B_AP_NETMASK));
-    off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 1, 4, &mask);
-    uint32_t router = htonl(w2_ip4(WIFI1B_AP_IP));
-    off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 3, 4, &router);
-    off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 6, 4, &router);
-    uint32_t bcast = htonl(w2_ip4(WIFI1B_AP_BROADCAST));
-    off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 28, 4, &bcast);
+    if (!nak) {
+        if (!inform) {
+            uint32_t lease = htonl(3600);
+            off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 51, 4, &lease);
+            uint32_t renew = htonl(1800);
+            off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 58, 4, &renew);
+            uint32_t rebind = htonl(3150);
+            off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 59, 4, &rebind);
+        }
+        uint32_t mask = htonl(w2_ip4(WIFI1B_AP_NETMASK));
+        off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 1, 4, &mask);
+        uint32_t router = htonl(w2_ip4(WIFI1B_AP_IP));
+        off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 3, 4, &router);
+        off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 6, 4, &router);
+        uint32_t bcast = htonl(w2_ip4(WIFI1B_AP_BROADCAST));
+        off += w2_dhcp_put(rep.options + off, sizeof(rep.options) - off, 28, 4, &bcast);
+    }
     rep.options[off++] = 255;
+
+    size_t sendlen = offsetof(struct w2_dhcp_packet, options) + off;
+    if (sendlen < 300) sendlen = 300; /* BOOTP/DHCP minimum, zero padded */
 
     struct sockaddr_in to;
     memset(&to, 0, sizeof(to));
     to.sin_family = AF_INET;
     to.sin_port = htons(w2_dhcp_client_port());
     if (getenv("WIFI1B_DHCP_TEST_LOOPBACK")) to.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    else if (nak) to.sin_addr.s_addr = htonl(INADDR_BROADCAST);
     else if (req->ciaddr) to.sin_addr.s_addr = req->ciaddr;
+    /* No ARP-reachability guess: ciaddr-less OFFER/ACK uses the bounded
+     * broadcast fallback even when the broadcast flag is clear. */
     else to.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-    sendto(fd, &rep, offsetof(struct w2_dhcp_packet, options) + off, 0,
-           (struct sockaddr *)&to, sizeof(to));
+    sendto(fd, &rep, sendlen, 0, (struct sockaddr *)&to, sizeof(to));
 }
 
 static bool w2_dhcpd_run(void)
 {
     prctl(PR_SET_NAME, "wifi1b_dhcpd", 0, 0, 0);
+    uint32_t pool_first = 0, pool_last = 0;
+    if (!w2_dhcp_pool_bounds(&pool_first, &pool_last)) {
+        log_msg("dhcpd: invalid lease pool bounds; refusing to serve");
+        return false;
+    }
     w2_lease_load();
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return false;
@@ -944,6 +999,16 @@ static bool w2_dhcpd_run(void)
         if (n < (ssize_t)(offsetof(struct w2_dhcp_packet, options) + 4)) continue;
         struct w2_dhcp_packet *p = (struct w2_dhcp_packet *)buf;
         if (p->op != 1 || p->htype != 1 || p->hlen != 6) continue;
+        if (p->giaddr != 0) {
+            /* Relayed DHCP is deliberately unsupported: no ACK/NAK is sent
+             * to an address we did not validate. */
+            static bool relay_logged;
+            if (!relay_logged) {
+                log_msg("dhcpd: relayed requests (giaddr) unsupported; ignoring");
+                relay_logged = true;
+            }
+            continue;
+        }
         uint8_t type = w2_dhcp_msgtype(p, (size_t)n);
         if (!type) continue;
         uint32_t requested = w2_dhcp_requested(p, (size_t)n);
@@ -958,27 +1023,48 @@ static bool w2_dhcpd_run(void)
             if (!ip) { log_msg("dhcpd: pool exhausted for %s", mac); continue; }
             w2_ip4_str(ip, ips, sizeof(ips));
             log_msg("dhcpd: DISCOVER %s -> OFFER %s", mac, ips);
-            w2_dhcp_send(fd, p, (size_t)n, 2, ip, false);
+            w2_dhcp_send(fd, p, (size_t)n, 2, ip, false, false);
         } else if (type == 3) { /* REQUEST */
             if (has_sid && sid != w2_ip4(WIFI1B_AP_IP)) continue;
+            uint32_t ciaddr = ntohl(p->ciaddr);
             uint32_t ip = w2_lease_for_mac(p->chaddr, now);
-            if (!ip && requested) ip = w2_lease_alloc(p->chaddr, requested, now);
+            if (ip && ((requested && requested != ip) ||
+                       (ciaddr && ciaddr != ip))) {
+                log_msg("dhcpd: REQUEST %s identity/address mismatch; NAK", mac);
+                w2_dhcp_send(fd, p, (size_t)n, 6, 0, false, false);
+                continue;
+            }
+            if (!ip && ciaddr) {
+                /* A renewal for a lease this server does not own is NAKed
+                 * so the client performs a clean DISCOVER. */
+                log_msg("dhcpd: REQUEST %s renews unknown lease; NAK", mac);
+                w2_dhcp_send(fd, p, (size_t)n, 6, 0, false, false);
+                continue;
+            }
+            if (!ip && requested) {
+                if (requested < pool_first || requested > pool_last ||
+                    w2_ip_in_use(requested, now)) {
+                    log_msg("dhcpd: REQUEST %s asks for out-of-pool/in-use address; NAK", mac);
+                    w2_dhcp_send(fd, p, (size_t)n, 6, 0, false, false);
+                    continue;
+                }
+                ip = w2_lease_alloc(p->chaddr, requested, now);
+            }
             if (!ip) {
                 log_msg("dhcpd: REQUEST %s but no lease; NAK", mac);
-                w2_dhcp_send(fd, p, (size_t)n, 6, 0, false);
+                w2_dhcp_send(fd, p, (size_t)n, 6, 0, false, false);
                 continue;
             }
             w2_ip4_str(ip, ips, sizeof(ips));
             log_msg("dhcpd: REQUEST %s -> ACK %s", mac, ips);
-            w2_dhcp_send(fd, p, (size_t)n, 5, ip, true);
+            w2_dhcp_send(fd, p, (size_t)n, 5, ip, true, false);
             w2_lease_write();
         } else if (type == 7) { /* RELEASE */
             log_msg("dhcpd: RELEASE %s", mac);
             w2_lease_release(p->chaddr);
         } else if (type == 8) { /* INFORM */
-            uint32_t ip = w2_ip4(WIFI1B_AP_IP);
             log_msg("dhcpd: INFORM %s -> ACK", mac);
-            w2_dhcp_send(fd, p, (size_t)n, 5, ip, true);
+            w2_dhcp_send(fd, p, (size_t)n, 5, 0, true, true);
         }
     }
     close(fd);
@@ -1466,16 +1552,66 @@ static size_t w2_dhcp_client_opts(uint8_t *opts, size_t cap, uint8_t type,
     return off;
 }
 
-static bool w2_addr_present(const char *iface, const char *ip, int prefix)
+static bool w2_addr_query(const char *iface, const char *ip, int prefix,
+                          bool *present)
 {
     char buf[4096], needle[128];
+    if (iface == NULL || ip == NULL || present == NULL) return false;
+    *present = false;
     if (sh_out(buf, sizeof(buf), "ip -o -4 addr show dev %s 2>/dev/null", iface) != 0)
         return false;
     snprintf(needle, sizeof(needle), "inet %s/%d", ip, prefix);
     char *hit = strstr(buf, needle);
-    if (!hit) return false;
+    if (!hit) return true;
     char next = hit[strlen(needle)];
-    return next == ' ' || next == '\0' || next == '\\' || next == '\n';
+    *present = next == ' ' || next == '\0' || next == '\\' || next == '\n';
+    return true;
+}
+
+static bool w2_addr_present(const char *iface, const char *ip, int prefix)
+{
+    bool present = false;
+    return w2_addr_query(iface, ip, prefix, &present) && present;
+}
+
+/* Remove exactly one address and prove it disappeared. A failed command is
+ * not assumed to have failed the removal; a failed readback is not assumed
+ * to be absence. */
+static bool w2_addr_remove_exact(const char *iface, uint32_t ip, int prefix)
+{
+    char ipbuf[32];
+    bool present = false;
+
+    if (ip == 0) return true; /* nothing owned */
+    if (prefix <= 0 || prefix > 32) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "invalid prefix for owned address cleanup");
+        return false;
+    }
+    if (iface == NULL || *iface == '\0') {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "no interface for address cleanup");
+        return false;
+    }
+    w2_ip4_str(ip, ipbuf, sizeof(ipbuf));
+    if (!w2_addr_query(iface, ipbuf, prefix, &present)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot read back %s/%d on %s", ipbuf, prefix, iface);
+        return false;
+    }
+    if (!present) return true;
+    (void)w2_ip_command("addr del %s/%d dev %s", ipbuf, prefix, iface);
+    if (!w2_addr_query(iface, ipbuf, prefix, &present)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot verify removal of %s/%d on %s", ipbuf, prefix, iface);
+        return false;
+    }
+    if (present) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "address %s/%d is still present on %s", ipbuf, prefix, iface);
+        return false;
+    }
+    return true;
 }
 
 /* Only the connected route is verified. The modem/default route is never
@@ -1511,10 +1647,25 @@ typedef struct {
     unsigned int proto;
 } w2_owned_route_t;
 
+/* Durable exact address intent/owner.  The route ledger above is the route
+ * half of the same ownership journal; both are written before a kernel
+ * mutation and cleared only after exact absence is proven. */
+typedef struct {
+    char state[8];      /* pending|current */
+    int gen;
+    pid_t pid;
+    char iface[16];
+    uint32_t ip;
+    int prefix;
+} w2_owner_journal_t;
+
+static bool g_dhcp_owner_fs_unconfirmed;
+
 typedef struct {
     bool valid;
     bool updated;
     bool route_ok;
+    bool cleanup_pending;
     uint32_t ip;
     uint32_t server;
     uint32_t mask;
@@ -1559,38 +1710,310 @@ static bool w2_route_token_proto(const char *text, unsigned int *out)
     return true;
 }
 
-/* Parse a route spec line without trusting it: the ledger is local, but a
- * corrupt/partial file must never make us delete an unrelated route. */
-static bool w2_owned_route_parse(const char *text, w2_owned_route_t *route)
+static bool w2_owner_dir_sync(const char *path);
+static bool w2_addr_query(const char *iface, const char *ip, int prefix,
+                          bool *present);
+
+/* Non-secret ownership receipt.  It scopes owner records to this product
+ * installation and records the highest worker generation ever published, so
+ * a syntactically valid foreign/stale file cannot authorize cleanup. */
+typedef struct {
+    char token[33];
+    int high_water;
+} w2_dhcp_lineage_t;
+
+static bool w2_owner_file_trusted(const char *path)
 {
-    char line[512], copy[512], *tokens[8] = {0};
+    struct stat st;
+    if (path == NULL || stat(path, &st) != 0) return false;
+    return S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
+           (st.st_mode & 0777) == 0600;
+}
+
+static bool w2_lineage_token_ok(const char *token)
+{
+    if (token == NULL || strlen(token) != 32) return false;
+    for (const char *p = token; *p; p++)
+        if (!isxdigit((unsigned char)*p)) return false;
+    return true;
+}
+
+/* 1 = valid lineage, 0 = absent, -1 = unreadable/malformed. */
+static int w2_dhcp_lineage_load(w2_dhcp_lineage_t *l)
+{
+    char buf[256], copy[256], *tokens[6] = {0};
     int count = 0;
     char *save = NULL;
+    unsigned int high_water = 0;
+    if (l == NULL) return -1;
+    memset(l, 0, sizeof(*l));
+    if (access(WIFI1B_DHCP_LINEAGE, F_OK) != 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!w2_owner_file_trusted(WIFI1B_DHCP_LINEAGE)) return -1;
+    int n = read_file(WIFI1B_DHCP_LINEAGE, buf, sizeof(buf));
+    if (n <= 0) return -1;
+    snprintf(copy, sizeof(copy), "%s", buf);
+    for (char *tok = strtok_r(copy, " \t\r\n", &save); tok && count < 6;
+         tok = strtok_r(NULL, " \t\r\n", &save))
+        tokens[count++] = tok;
+    if (count != 4 || strcmp(tokens[0], "v1") != 0 ||
+        strcmp(tokens[1], "scope=wifi1b-dhcp") != 0 ||
+        strncmp(tokens[2], "lineage=", 8) != 0 ||
+        strncmp(tokens[3], "high_water=", 11) != 0)
+        return -1;
+    const char *token = tokens[2] + 8;
+    if (!w2_lineage_token_ok(token) ||
+        !w2_route_token_u32(tokens[3] + 11, &high_water) ||
+        high_water > 2147483647)
+        return -1;
+    snprintf(l->token, sizeof(l->token), "%s", token);
+    l->high_water = high_water;
+    return 1;
+}
 
-    if (text == NULL || route == NULL) return false;
+static bool w2_dhcp_lineage_random(char *out, size_t n)
+{
+    unsigned char raw[16];
+    if (out == NULL || n < sizeof(raw) * 2 + 1) return false;
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    size_t used = 0;
+    while (used < sizeof(raw)) {
+        ssize_t r = read(fd, raw + used, sizeof(raw) - used);
+        if (r <= 0) { close(fd); return false; }
+        used += (size_t)r;
+    }
+    close(fd);
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(raw); i++) {
+        out[i * 2] = hex[raw[i] >> 4];
+        out[i * 2 + 1] = hex[raw[i] & 0xf];
+    }
+    out[sizeof(raw) * 2] = 0;
+    return true;
+}
+
+/* REQUIRES: the caller holds the production radio flock before this
+ * read-modify-write.  All production writers are radio workers; fixture unit
+ * tests opt out explicitly, while the lock-contract test uses the real lock. */
+static bool w2_dhcp_lineage_ensure(int gen, w2_dhcp_lineage_t *out)
+{
+    w2_dhcp_lineage_t l;
+    if (gen < 0 || out == NULL) return false;
+#ifdef WIFI_TEST
+    if (!test_lineage_require_lock && test_command != NULL) {
+        /* fixture-injected writer: lock contract tested separately */
+    } else
+#endif
+    if (radio_fd < 0) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "lineage write requires the held radio lock");
+        return false;
+    }
+    int lr = w2_dhcp_lineage_load(&l);
+    if (lr < 0) return false;
+    if (lr == 0) {
+        if (!w2_dhcp_lineage_random(l.token, sizeof(l.token))) return false;
+        l.high_water = gen;
+    } else if (gen > l.high_water) {
+        l.high_water = gen;
+    } else {
+        *out = l;
+        return true; /* unchanged durable receipt */
+    }
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+             "v1 scope=wifi1b-dhcp lineage=%s high_water=%d\n",
+             l.token, l.high_water);
+    if (write_file_atomic(WIFI1B_DHCP_LINEAGE, buf, 0600) != 0)
+        return false;
+    if (!w2_owner_dir_sync(WIFI1B_DHCP_LINEAGE)) {
+        g_dhcp_owner_fs_unconfirmed = true;
+        return false;
+    }
+    *out = l;
+    return true;
+}
+
+static bool w2_ipv4_host_usable(uint32_t ip)
+{
+    unsigned int top = ip >> 24;
+    return ip != 0 && ip != 0xffffffffU && top != 0 && top != 127 &&
+           top < 224;
+}
+
+static uint32_t w2_prefix_mask(int prefix)
+{
+    if (prefix <= 0) return 0;
+    if (prefix >= 32) return 0xffffffffU;
+    return 0xffffffffU << (32 - prefix);
+}
+
+static bool w2_lease_address_usable(uint32_t ip, int prefix)
+{
+    if (prefix < 1 || prefix > 32 || !w2_ipv4_host_usable(ip)) return false;
+    if (prefix <= 30) {
+        uint32_t mask = w2_prefix_mask(prefix);
+        uint32_t network = ip & mask;
+        uint32_t broadcast = network | ~mask;
+        if (ip == network || ip == broadcast) return false;
+    }
+    return true;
+}
+
+static bool w2_lease_router_consistent(uint32_t ip, int prefix,
+                                       uint32_t router)
+{
+    if (prefix <= 0 || prefix > 32) return false;
+    /* A /32 routed lease has no separately verified on-link route here. */
+    if (prefix == 32) return false;
+    if (!w2_lease_address_usable(ip, prefix)) return false;
+    if (router == ip || !w2_lease_address_usable(router, prefix)) return false;
+    uint32_t mask = w2_prefix_mask(prefix);
+    return (router & mask) == (ip & mask);
+}
+
+static bool w2_router_usable(uint32_t router)
+{
+    return w2_ipv4_host_usable(router);
+}
+
+static bool w2_owner_iface_ok(const char *iface)
+{
+    if (iface == NULL || *iface == '\0' || strlen(iface) >= 16) return false;
+    for (const char *p = iface; *p; p++)
+        if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-' && *p != '.')
+            return false;
+#ifdef WIFI_TEST
+    if (!strcmp(iface, "lo")) return true;
+#endif
+    return !strcmp(iface, "wlan0");
+}
+
+static bool w2_route_scope_ok(const char *gateway, const char *iface,
+                              unsigned int metric, unsigned int proto)
+{
+    struct in_addr gw;
+    if (gateway == NULL || inet_pton(AF_INET, gateway, &gw) != 1) return false;
+    if (!w2_router_usable(ntohl(gw.s_addr))) return false;
+    if (!w2_owner_iface_ok(iface)) return false;
+    if (proto != WIFI1B_CLIENT_ROUTE_PROTO) return false;
+    return metric > 0 && metric < 0xffffffffU;
+}
+
+/* Parse a route spec line without trusting it.  Only a product-scoped,
+ * lineage-valid record can authorize cleanup. */
+/* The ledger has no prefix field.  This loader validates product scope and
+ * lineage only; lease-subnet/gateway consistency is enforced by the writer
+ * and by journal/lease-aware readiness checks when those records exist. */
+static int w2_owned_route_load(w2_owned_route_t *route)
+{
+    char buf[512], copy[512], *tokens[12] = {0};
+    int count = 0;
+    char *save = NULL;
+    w2_dhcp_lineage_t lineage;
+    int gen = 0, pid = 0;
+
+    if (route == NULL) return -1;
     memset(route, 0, sizeof(*route));
+    if (access(WIFI1B_CLIENT_ROUTE_LEDGER, F_OK) != 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!w2_owner_file_trusted(WIFI1B_CLIENT_ROUTE_LEDGER)) return -1;
+    int n = read_file(WIFI1B_CLIENT_ROUTE_LEDGER, buf, sizeof(buf));
+    if (n <= 0) return -1;
+    int lr = w2_dhcp_lineage_load(&lineage);
+    if (lr != 1) return -1;
+    snprintf(copy, sizeof(copy), "%s", buf);
+    for (char *tok = strtok_r(copy, " \t\r\n", &save); tok && count < 12;
+         tok = strtok_r(NULL, " \t\r\n", &save))
+        tokens[count++] = tok;
+    if (count != 9 || strcmp(tokens[0], "v2") != 0 ||
+        strcmp(tokens[1], "scope=wifi1b-dhcp-v1") != 0)
+        return -1;
+    if (strncmp(tokens[2], "lineage=", 8) != 0 ||
+        strcmp(tokens[2] + 8, lineage.token) != 0)
+        return -1;
+    unsigned int gen_u = 0, pid_u = 0;
+    if (strncmp(tokens[3], "gen=", 4) != 0 ||
+        !w2_route_token_u32(tokens[3] + 4, &gen_u) ||
+        gen_u > (unsigned int)lineage.high_water)
+        return -1;
+    if (strncmp(tokens[4], "pid=", 4) != 0 ||
+        !w2_route_token_u32(tokens[4] + 4, &pid_u) ||
+        pid_u == 0 || pid_u > 4194304)
+        return -1;
+    gen = (int)gen_u;
+    pid = (int)pid_u;
+    if (strncmp(tokens[5], "gw=", 3) != 0 ||
+        strncmp(tokens[6], "iface=", 6) != 0 ||
+        strncmp(tokens[7], "metric=", 7) != 0 ||
+        strncmp(tokens[8], "proto=", 6) != 0)
+        return -1;
+    /* token count above is nine: v2 scope lineage gen pid gw iface metric
+     * proto -- no trailing fields are accepted. */
+    if (!w2_route_token_u32(tokens[7] + 7, &route->metric)) return -1;
+    if (!w2_route_token_u32(tokens[8] + 6, &route->proto)) return -1;
+    if (!w2_route_scope_ok(tokens[5] + 3, tokens[6] + 6,
+                           route->metric, route->proto))
+        return -1;
+    snprintf(route->gateway, sizeof(route->gateway), "%s", tokens[5] + 3);
+    snprintf(route->iface, sizeof(route->iface), "%s", tokens[6] + 6);
+    return 1;
+}
+
+static bool w2_owned_route_parse(const char *text, w2_owned_route_t *route)
+{
+    char line[512];
+    if (text == NULL || route == NULL) return false;
     snprintf(line, sizeof(line), "%s", text);
     size_t len = strlen(line);
     while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r' ||
                        line[len - 1] == ' ' || line[len - 1] == '\t'))
         line[--len] = '\0';
+    /* Parser used by unit tests and diagnostics: reject anything that is
+     * not exactly one valid product/lineage record. */
+    if (line[0] == '\0') return false;
+    /* Validate the same nine fields without touching the current ledger. */
+    char copy[512], *tokens[12] = {0};
+    int count = 0;
+    char *save = NULL;
+    w2_dhcp_lineage_t lineage;
+    int gen = 0, pid = 0;
+    int lr = w2_dhcp_lineage_load(&lineage);
+    if (lr != 1) return false;
     snprintf(copy, sizeof(copy), "%s", line);
-    for (char *tok = strtok_r(copy, " \t", &save); tok && count < 8;
-         tok = strtok_r(NULL, " \t", &save))
+    for (char *tok = strtok_r(copy, " \t\r\n", &save); tok && count < 12;
+         tok = strtok_r(NULL, " \t\r\n", &save))
         tokens[count++] = tok;
-    if (count != 5 || strcmp(tokens[0], "v1") != 0) return false;
-    if (inet_pton(AF_INET, tokens[1], &(struct in_addr){0}) != 1) return false;
-    size_t iface_len = strlen(tokens[2]);
-    if (iface_len == 0 || iface_len >= sizeof(route->iface)) return false;
-    for (size_t i = 0; i < iface_len; i++) {
-        unsigned char c = (unsigned char)tokens[2][i];
-        if (!(isalnum(c) || c == '_' || c == '-' || c == '.')) return false;
-    }
-    if (!w2_route_token_u32(tokens[3], &route->metric) ||
-        !w2_route_token_u32(tokens[4], &route->proto))
+    if (count != 9 || strcmp(tokens[0], "v2") != 0 ||
+        strcmp(tokens[1], "scope=wifi1b-dhcp-v1") != 0)
         return false;
-    snprintf(route->gateway, sizeof(route->gateway), "%s", tokens[1]);
-    snprintf(route->iface, sizeof(route->iface), "%s", tokens[2]);
+    if (strncmp(tokens[2], "lineage=", 8) != 0 ||
+        strcmp(tokens[2] + 8, lineage.token) != 0)
+        return false;
+    unsigned int gen_u = 0, pid_u = 0;
+    if (strncmp(tokens[3], "gen=", 4) != 0 ||
+        !w2_route_token_u32(tokens[3] + 4, &gen_u) ||
+        gen_u > (unsigned int)lineage.high_water)
+        return false;
+    if (strncmp(tokens[4], "pid=", 4) != 0 ||
+        !w2_route_token_u32(tokens[4] + 4, &pid_u) ||
+        pid_u == 0 || pid_u > 4194304)
+        return false;
+    gen = (int)gen_u;
+    pid = (int)pid_u;
+    if (strncmp(tokens[5], "gw=", 3) != 0 ||
+        strncmp(tokens[6], "iface=", 6) != 0 ||
+        strncmp(tokens[7], "metric=", 7) != 0 ||
+        strncmp(tokens[8], "proto=", 6) != 0)
+        return false;
+    if (!w2_route_token_u32(tokens[7] + 7, &route->metric)) return false;
+    if (!w2_route_token_u32(tokens[8] + 6, &route->proto)) return false;
+    if (!w2_route_scope_ok(tokens[5] + 3, tokens[6] + 6,
+                           route->metric, route->proto))
+        return false;
+    snprintf(route->gateway, sizeof(route->gateway), "%s", tokens[5] + 3);
+    snprintf(route->iface, sizeof(route->iface), "%s", tokens[6] + 6);
     return true;
 }
 
@@ -1652,6 +2075,31 @@ static bool w2_route_exact_present(const char *gateway, const char *iface,
     return true;
 }
 
+static bool w2_route_ledger_clear_verified(const w2_owned_route_t *expected);
+static bool w2_route_ledger_publish(const char *gateway, const char *iface,
+                                    unsigned int metric, unsigned int proto);
+
+/* Atomic owner files are fsynced in their directory so a process/host kill
+ * cannot expose a renamed effect intent only in page cache. */
+static bool w2_owner_dir_sync(const char *path)
+{
+    char dir[512];
+    if (path == NULL) return false;
+#ifdef WIFI_TEST
+    if (test_owner_dir_sync_fail) return false;
+#endif
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash == NULL) return false;
+    if (slash == dir) slash[1] = '\0';
+    else *slash = '\0';
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return false;
+    int rc = fsync(fd);
+    close(fd);
+    return rc == 0;
+}
+
 /* Strictly higher metric than every existing default. No existing default
  * uses WIFI1B_CLIENT_DEFAULT_METRIC rather than metric 0. Malformed or
  * overflowing metrics fail closed instead of risking preference inversion. */
@@ -1701,16 +2149,35 @@ static bool w2_route_select_metric(unsigned int *metric)
     return true;
 }
 
+static bool w2_route_ledger_corroborated(const w2_owned_route_t *route)
+{
+    char gw[32];
+    if (route == NULL) return false;
+    if (!g_dhcp_lease.valid) return true; /* route-only recovery */
+    if (!g_dhcp_lease.route_ok || g_dhcp_lease.gateway == 0 ||
+        g_dhcp_lease.route_metric == 0 || g_dhcp_lease.route_proto == 0)
+        return false;
+    if (!w2_lease_router_consistent(g_dhcp_lease.ip, g_dhcp_lease.prefix,
+                                    g_dhcp_lease.gateway))
+        return false;
+    w2_ip4_str(g_dhcp_lease.gateway, gw, sizeof(gw));
+    return !strcmp(route->gateway, gw) &&
+           !strcmp(route->iface, g_dhcp_lease.iface) &&
+           route->metric == g_dhcp_lease.route_metric &&
+           route->proto == g_dhcp_lease.route_proto;
+}
+
 static bool w2_owned_route_cleanup(void)
 {
-    char ledger[1024];
-    if (access(WIFI1B_CLIENT_ROUTE_LEDGER, F_OK) != 0) return true;
-    int n = read_file(WIFI1B_CLIENT_ROUTE_LEDGER, ledger, sizeof(ledger));
-    if (n < 0) return false;
-    if (n == 0) return true;
     w2_owned_route_t route;
-    if (!w2_owned_route_parse(ledger, &route)) {
-        log_msg("dhcp client: refusing to act on malformed route ledger");
+    int rr = w2_owned_route_load(&route);
+    if (rr == 0) return true;
+    if (rr < 0) {
+        log_msg("dhcp client: refusing unverified/foreign route ledger");
+        return false;
+    }
+    if (!w2_route_ledger_corroborated(&route)) {
+        log_msg("dhcp client: route ledger contradicts captured owner");
         return false;
     }
     for (int attempt = 0; attempt < 4; attempt++) {
@@ -1723,35 +2190,465 @@ static bool w2_owned_route_cleanup(void)
                            route.gateway, route.iface, route.metric, route.proto))
             return false;
     }
-    /* Re-read: never unlink the ledger while our exact route is still there. */
+    /* Re-read and clear only this exact named product route after proven
+     * absence.  A different/foreign ledger is preserved untouched. */
     bool present = false;
     if (!w2_route_exact_present(route.gateway, route.iface, route.metric,
                                 route.proto, &present))
         return false;
     if (present) return false;
-    unlink(WIFI1B_CLIENT_ROUTE_LEDGER);
+    return w2_route_ledger_clear_verified(&route);
+}
+
+static int w2_dhcp_journal_load(w2_owner_journal_t *j)
+{
+    char buf[512], copy[512], *tokens[12] = {0};
+    int count = 0, gen = 0, pid = 0, prefix = 0;
+    char *save = NULL;
+    w2_dhcp_lineage_t lineage;
+
+    if (j == NULL) return -1;
+    memset(j, 0, sizeof(*j));
+    if (access(WIFI1B_DHCP_OWNER_JOURNAL, F_OK) != 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!w2_owner_file_trusted(WIFI1B_DHCP_OWNER_JOURNAL)) return -1;
+    int n = read_file(WIFI1B_DHCP_OWNER_JOURNAL, buf, sizeof(buf));
+    if (n <= 0) return -1;
+    if (w2_dhcp_lineage_load(&lineage) != 1) return -1;
+    snprintf(copy, sizeof(copy), "%s", buf);
+    for (char *tok = strtok_r(copy, " \t\r\n", &save); tok && count < 12;
+         tok = strtok_r(NULL, " \t\r\n", &save))
+        tokens[count++] = tok;
+    if (count != 9 || strcmp(tokens[0], "v2") != 0 ||
+        strcmp(tokens[1], "scope=wifi1b-dhcp-v1") != 0)
+        return -1;
+    if (strncmp(tokens[2], "lineage=", 8) != 0 ||
+        strcmp(tokens[2] + 8, lineage.token) != 0)
+        return -1;
+    if (strncmp(tokens[3], "state=", 6) != 0 ||
+        strncmp(tokens[4], "gen=", 4) != 0 ||
+        strncmp(tokens[5], "pid=", 4) != 0 ||
+        strncmp(tokens[6], "iface=", 6) != 0 ||
+        strncmp(tokens[7], "ip=", 3) != 0 ||
+        strncmp(tokens[8], "prefix=", 7) != 0)
+        return -1;
+    const char *state = tokens[3] + 6;
+    if (strcmp(state, "pending") && strcmp(state, "current")) return -1;
+    unsigned int gen_u = 0, pid_u = 0;
+    if (!w2_route_token_u32(tokens[4] + 4, &gen_u) ||
+        gen_u > (unsigned int)lineage.high_water)
+        return -1;
+    if (!w2_route_token_u32(tokens[5] + 4, &pid_u) ||
+        pid_u == 0 || pid_u > 4194304)
+        return -1;
+    gen = (int)gen_u;
+    pid = (int)pid_u;
+    const char *iface = tokens[6] + 6;
+    if (!w2_owner_iface_ok(iface)) return -1;
+    struct in_addr addr;
+    if (inet_pton(AF_INET, tokens[7] + 3, &addr) != 1) return -1;
+    uint32_t ip = ntohl(addr.s_addr);
+    unsigned int prefix_u = 0;
+    if (!w2_route_token_u32(tokens[8] + 7, &prefix_u) ||
+        prefix_u == 0 || prefix_u > 32)
+        return -1;
+    prefix = (int)prefix_u;
+    if (!w2_lease_address_usable(ip, prefix)) return -1;
+    snprintf(j->state, sizeof(j->state), "%s", state);
+    j->gen = gen;
+    j->pid = pid;
+    snprintf(j->iface, sizeof(j->iface), "%s", iface);
+    j->ip = ip;
+    j->prefix = prefix;
+    return 1;
+}
+
+static bool w2_dhcp_journal_write(const char *state, uint32_t ip, int prefix,
+                                  const char *iface)
+{
+    char ipbuf[32], buf[256], token[40];
+    w2_owner_journal_t existing;
+    w2_dhcp_lineage_t lineage;
+
+    if (state == NULL || !w2_owner_iface_ok(iface) ||
+        (strcmp(state, "pending") && strcmp(state, "current")))
+        return false;
+    if (!w2_lease_address_usable(ip, prefix)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "lease address is outside usable unicast host space");
+        return false;
+    }
+    int er = w2_dhcp_journal_load(&existing);
+    if (er < 0) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "refusing to overwrite unverified address journal");
+        return false;
+    }
+    if (er == 1 &&
+        (existing.ip != ip || existing.prefix != prefix ||
+         strcmp(existing.iface, iface))) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "refusing to overwrite a different exact address owner");
+        return false;
+    }
+#ifdef WIFI_TEST
+    if (test_owner_write_fail == 1) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "injected pre-publication journal failure");
+        return false;
+    }
+#endif
+    if (!w2_dhcp_lineage_ensure(g_apply_gen, &lineage)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot record ownership lineage");
+        return false;
+    }
+    snprintf(token, sizeof(token), "%s", lineage.token);
+    w2_ip4_str(ip, ipbuf, sizeof(ipbuf));
+    snprintf(buf, sizeof(buf),
+             "v2 scope=wifi1b-dhcp-v1 lineage=%s state=%s gen=%d pid=%d "
+             "iface=%s ip=%s prefix=%d\n",
+             token, state, g_apply_gen, (int)getpid(), iface, ipbuf, prefix);
+    if (write_file_atomic(WIFI1B_DHCP_OWNER_JOURNAL, buf, 0600) != 0) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot record exact address ownership");
+        return false;
+    }
+#ifdef WIFI_TEST
+    if (test_owner_write_fail == 2) {
+        g_dhcp_owner_fs_unconfirmed = true;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "injected file-publish journal failure");
+        return false;
+    }
+#endif
+    if (!w2_owner_dir_sync(WIFI1B_DHCP_OWNER_JOURNAL)) {
+        g_dhcp_owner_fs_unconfirmed = true;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot durably record exact address ownership");
+        return false;
+    }
+#ifdef WIFI_TEST
+    if (test_owner_write_fail == 3) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "injected post-publication journal failure");
+        return false;
+    }
+#endif
+    g_dhcp_owner_fs_unconfirmed = false;
     return true;
+}
+
+/* Clear only the exact owner this caller is allowed to retire, and only
+ * after its address is proven absent by live readback. */
+static bool w2_dhcp_journal_clear_verified(const char *iface, uint32_t ip,
+                                           int prefix)
+{
+    w2_owner_journal_t j;
+    char ipbuf[32];
+    bool present = false;
+    int jr = w2_dhcp_journal_load(&j);
+    if (jr == 0) return true;
+    if (jr < 0) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "refusing to clear unverified address journal");
+        return false;
+    }
+    if (j.ip != ip || j.prefix != prefix || strcmp(j.iface, iface)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "refusing to clear a different exact address owner");
+        return false;
+    }
+    w2_ip4_str(ip, ipbuf, sizeof(ipbuf));
+    if (!w2_addr_query(iface, ipbuf, prefix, &present)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot verify journal owner absence");
+        return false;
+    }
+    if (present) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "journal owner %s/%d is still present", ipbuf, prefix);
+        return false;
+    }
+    if (unlink(WIFI1B_DHCP_OWNER_JOURNAL) != 0) {
+        if (errno == ENOENT) return true;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot clear exact address journal: %s", strerror(errno));
+        return false;
+    }
+    if (!w2_owner_dir_sync(WIFI1B_DHCP_OWNER_JOURNAL)) {
+        g_dhcp_owner_fs_unconfirmed = true;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot durably clear exact address journal");
+        return false;
+    }
+    g_dhcp_owner_fs_unconfirmed = false;
+    return true;
+}
+
+/* Parent-side reconciliation of durable ownership.  It never deletes
+ * anything here; it only adopts exact owners so the bounded release worker
+ * can prove absence.  A malformed journal/ledger fails closed. */
+static bool w2_dhcp_reconcile_owned_state(void)
+{
+    bool dirty = false;
+    w2_owner_journal_t j;
+    w2_owned_route_t route;
+    int jr = w2_dhcp_journal_load(&j);
+    int rr = w2_owned_route_load(&route);
+
+    if (g_dhcp_owner_fs_unconfirmed) dirty = true;
+    if (jr < 0 || rr < 0) {
+        log_msg("dhcp client: unverified owner record; cleanup pending");
+        dirty = true;
+    }
+    if (jr == 1) {
+        char ipbuf[32], gw[32];
+        bool addr_present = false, route_present = false;
+        w2_ip4_str(j.ip, ipbuf, sizeof(ipbuf));
+        bool addr_read = w2_addr_query(j.iface, ipbuf, j.prefix,
+                                       &addr_present);
+        bool route_read = rr == 1 &&
+            w2_route_exact_present(route.gateway, route.iface,
+                                   route.metric, route.proto, &route_present);
+        bool file_match = g_dhcp_lease.valid &&
+                          !strcmp(j.state, "current") &&
+                          g_dhcp_lease.ip == j.ip &&
+                          g_dhcp_lease.prefix == j.prefix &&
+                          !strcmp(g_dhcp_lease.iface, j.iface) &&
+                          rr == 1 && g_dhcp_lease.route_ok &&
+                          g_dhcp_lease.route_metric == route.metric &&
+                          g_dhcp_lease.route_proto == route.proto &&
+                          !strcmp(g_dhcp_lease.iface, route.iface);
+        if (file_match) {
+            w2_ip4_str(g_dhcp_lease.gateway, gw, sizeof(gw));
+            file_match = !strcmp(route.gateway, gw) &&
+                w2_lease_router_consistent(g_dhcp_lease.ip,
+                                           g_dhcp_lease.prefix,
+                                           g_dhcp_lease.gateway);
+        }
+        bool live_addr = addr_read && addr_present;
+        bool live_route = route_read && route_present;
+        if (!file_match || !live_addr || !live_route) dirty = true;
+        if (g_dhcp_lease.ip == 0) {
+            g_dhcp_lease.ip = j.ip;
+            g_dhcp_lease.prefix = j.prefix;
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), j.iface);
+        }
+    } else if (jr == 0) {
+        if (rr == 1 || g_dhcp_lease.valid || g_dhcp_lease.ip != 0 ||
+            g_dhcp_lease.cleanup_pending) {
+            /* A file/route or captured owner without its exact address
+             * journal is not trusted. */
+            dirty = true;
+            if (g_dhcp_lease.iface[0] == '\0' && rr == 1)
+                str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface),
+                         route.iface);
+        }
+    }
+    if (dirty) {
+        g_dhcp_lease.valid = false;
+        g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.cleanup_pending = true;
+        g_dhcp_lease.updated = false;
+        if (g_dhcp_lease.iface[0] == '\0')
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), "wlan0");
+        g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+        g_dhcp_next_try_ms = 0;
+    }
+    return dirty;
+}
+
+static bool w2_route_ledger_clear_verified(const w2_owned_route_t *expected)
+{
+    w2_owned_route_t actual;
+    bool present = false;
+    if (expected == NULL) return false;
+    int rr = w2_owned_route_load(&actual);
+    if (rr == 0) return true;
+    if (rr < 0) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "refusing to clear unverified/foreign route ledger");
+        return false;
+    }
+    if (strcmp(actual.gateway, expected->gateway) ||
+        strcmp(actual.iface, expected->iface) ||
+        actual.metric != expected->metric || actual.proto != expected->proto) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "refusing to clear a different exact route owner");
+        return false;
+    }
+    if (!w2_route_exact_present(actual.gateway, actual.iface, actual.metric,
+                                actual.proto, &present)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot verify ledger route absence");
+        return false;
+    }
+    if (present) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "ledger route is still present");
+        return false;
+    }
+    if (unlink(WIFI1B_CLIENT_ROUTE_LEDGER) != 0) {
+        if (errno == ENOENT) return true;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot clear exact route ledger: %s", strerror(errno));
+        return false;
+    }
+    if (!w2_owner_dir_sync(WIFI1B_CLIENT_ROUTE_LEDGER)) {
+        g_dhcp_owner_fs_unconfirmed = true;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot durably clear exact route ledger");
+        return false;
+    }
+    g_dhcp_owner_fs_unconfirmed = false;
+    return true;
+}
+
+static bool w2_route_ledger_publish(const char *gateway, const char *iface,
+                                    unsigned int metric, unsigned int proto)
+{
+    char buf[512], gw[32];
+    w2_owned_route_t existing;
+    w2_dhcp_lineage_t lineage;
+    if (!w2_route_scope_ok(gateway, iface, metric, proto)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "route is outside product ownership scope");
+        return false;
+    }
+    struct in_addr gw_addr;
+    w2_owner_journal_t owner;
+    int jr = w2_dhcp_journal_load(&owner);
+    if (jr < 0) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "route writer cannot verify address owner");
+        return false;
+    }
+    if (jr == 1 &&
+        (inet_pton(AF_INET, gateway, &gw_addr) != 1 ||
+         !w2_lease_router_consistent(owner.ip, owner.prefix,
+                                     ntohl(gw_addr.s_addr)))) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "route gateway is inconsistent with the journaled lease");
+        return false;
+    }
+    int er = w2_owned_route_load(&existing);
+    if (er < 0) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "refusing to overwrite unverified/foreign route ledger");
+        return false;
+    }
+    if (er == 1 &&
+        (strcmp(existing.gateway, gateway) || strcmp(existing.iface, iface) ||
+         existing.metric != metric || existing.proto != proto)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "refusing to overwrite a different exact route owner");
+        return false;
+    }
+#ifdef WIFI_TEST
+    if (test_owner_write_fail == 1) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "injected pre-publication route-ledger failure");
+        return false;
+    }
+#endif
+    if (!w2_dhcp_lineage_ensure(g_apply_gen, &lineage)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot record route ownership lineage");
+        return false;
+    }
+    snprintf(gw, sizeof(gw), "%s", gateway);
+    snprintf(buf, sizeof(buf),
+             "v2 scope=wifi1b-dhcp-v1 lineage=%s gen=%d pid=%d gw=%s "
+             "iface=%s metric=%u proto=%u\n",
+             lineage.token, g_apply_gen, (int)getpid(), gw, iface,
+             metric, proto);
+    if (write_file_atomic(WIFI1B_CLIENT_ROUTE_LEDGER, buf, 0600) != 0) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot record exact route intent");
+        return false;
+    }
+#ifdef WIFI_TEST
+    if (test_owner_write_fail == 2) {
+        g_dhcp_owner_fs_unconfirmed = true;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "injected file-publish route-ledger failure");
+        return false;
+    }
+#endif
+    if (!w2_owner_dir_sync(WIFI1B_CLIENT_ROUTE_LEDGER)) {
+        g_dhcp_owner_fs_unconfirmed = true;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot durably record exact route intent");
+        return false;
+    }
+#ifdef WIFI_TEST
+    if (test_owner_write_fail == 3) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "injected post-publication route-ledger failure");
+        return false;
+    }
+#endif
+    g_dhcp_owner_fs_unconfirmed = false;
+    return true;
+}
+
+static bool w2_route_remove_exact(const char *gateway, const char *iface,
+                                  unsigned int metric, unsigned int proto)
+{
+    bool present = false;
+    if (!w2_route_exact_present(gateway, iface, metric, proto, &present))
+        return false;
+    if (!present) return true;
+    (void)w2_ip_command("route del default via %s dev %s metric %u proto %u",
+                        gateway, iface, metric, proto);
+    if (!w2_route_exact_present(gateway, iface, metric, proto, &present))
+        return false;
+    return !present;
 }
 
 static bool w2_owned_route_install(const char *gateway, const char *iface,
                                    unsigned int metric, unsigned int proto)
 {
-    char ledger[512];
-    if (gateway == NULL || iface == NULL) return false;
-    if (!w2_ip_command("route add default via %s dev %s metric %u proto %u",
-                       gateway, iface, metric, proto))
-        return false;
     bool present = false;
-    if (!w2_route_exact_present(gateway, iface, metric, proto, &present) || !present) {
-        w2_ip_command("route del default via %s dev %s metric %u proto %u",
-                      gateway, iface, metric, proto);
+    w2_owned_route_t owned;
+    if (gateway == NULL || iface == NULL) return false;
+    memset(&owned, 0, sizeof(owned));
+    snprintf(owned.gateway, sizeof(owned.gateway), "%s", gateway);
+    snprintf(owned.iface, sizeof(owned.iface), "%s", iface);
+    owned.metric = metric;
+    owned.proto = proto;
+    /* Intent is durable before the kernel mutation.  If it cannot be
+     * written, no route is added and no foreign ledger is replaced. */
+    if (!w2_route_ledger_publish(gateway, iface, metric, proto))
+        return false;
+    if (!w2_ip_command("route add default via %s dev %s metric %u proto %u",
+                       gateway, iface, metric, proto)) {
+        if (!w2_route_exact_present(gateway, iface, metric, proto, &present)) {
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "cannot verify route-add effect; exact ledger retained");
+            return false;
+        }
+        if (!present) {
+            (void)w2_route_ledger_clear_verified(&owned);
+            return false;
+        }
+        /* The command failed but the exact route exists; remove/verify it. */
+        if (!w2_route_remove_exact(gateway, iface, metric, proto) ||
+            !w2_route_ledger_clear_verified(&owned))
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "route add failed and exact rollback is pending");
         return false;
     }
-    snprintf(ledger, sizeof(ledger), "v1 %s %s %u %u\n",
-             gateway, iface, metric, proto);
-    if (write_file_atomic(WIFI1B_CLIENT_ROUTE_LEDGER, ledger, 0600) != 0) {
-        w2_ip_command("route del default via %s dev %s metric %u proto %u",
-                      gateway, iface, metric, proto);
+    if (!w2_route_exact_present(gateway, iface, metric, proto, &present)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot verify installed route; exact ledger retained");
+        return false;
+    }
+    if (!present) {
+        (void)w2_route_ledger_clear_verified(&owned);
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "installed route was not visible in exact readback");
         return false;
     }
     return true;
@@ -1792,6 +2689,7 @@ static bool w2_client_route_install(uint32_t gateway, const char *iface)
         return false;
     }
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.gateway = gateway;
     g_dhcp_lease.route_metric = metric;
     g_dhcp_lease.route_proto = WIFI1B_CLIENT_ROUTE_PROTO;
     return true;
@@ -1943,6 +2841,17 @@ static bool w2_dhcp_raw_receive(int fd, int ifindex, uint32_t xid,
 
 /* Poll the normal UDP socket and the raw fallback together. The test hook
  * can force raw-only RX so the namespace test proves that path. */
+static int64_t w2_dhcp_reply_deadline(int64_t requested_ms)
+{
+    int64_t now = now_ms();
+    if (g_txn_active) {
+        int64_t left = w2_txn_remaining_ms();
+        if (left <= 0) return now;
+        if (left < requested_ms) requested_ms = left;
+    }
+    return now + requested_ms;
+}
+
 static int w2_dhcp_wait_reply(int fd, int raw_fd, int raw_ifindex,
                               uint32_t xid, const uint8_t mac[6],
                               uint8_t *reply, size_t reply_cap,
@@ -2043,7 +2952,9 @@ static size_t w2_dhcp_build_client(struct w2_dhcp_packet *req, uint32_t xid,
                                sizeof(req->options) - off, type, mac,
                                requested, server, have_server);
     req->options[off++] = 255;
-    return offsetof(struct w2_dhcp_packet, options) + off;
+    size_t len = offsetof(struct w2_dhcp_packet, options) + off;
+    /* BOOTP/DHCP minimum; the packet was zeroed above, so padding is zeros. */
+    return len < 300 ? 300 : len;
 }
 
 static bool w2_dhcp_reply_identity(const struct w2_dhcp_packet *rep, size_t n,
@@ -2056,54 +2967,307 @@ static bool w2_dhcp_reply_identity(const struct w2_dhcp_packet *rep, size_t n,
            rep->options[2] == 83 && rep->options[3] == 99;
 }
 
-static void w2_dhcp_remove_own_address(const char *iface)
+static bool w2_dhcp_remove_own_address(const char *iface)
 {
-    char ip[32];
-    if (g_dhcp_lease.ip == 0 || g_dhcp_lease.prefix <= 0 ||
-        g_dhcp_lease.prefix > 32 || g_dhcp_lease.iface[0] == '\0' ||
-        strcmp(iface, g_dhcp_lease.iface) != 0)
-        return;
-    w2_ip4_str(g_dhcp_lease.ip, ip, sizeof(ip));
-    /* Exact owned address only; never a family flush. */
-    w2_ip_command("addr del %s/%d dev %s", ip, g_dhcp_lease.prefix, iface);
+    if (g_dhcp_lease.ip == 0)
+        return true;
+    if (g_dhcp_lease.prefix <= 0 || g_dhcp_lease.prefix > 32) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "owned address has invalid prefix %d", g_dhcp_lease.prefix);
+        return false;
+    }
+    if (g_dhcp_lease.iface[0] == '\0' ||
+        strcmp(iface, g_dhcp_lease.iface) != 0) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "owned address interface mismatch (%s vs %s)",
+                 iface ? iface : "", g_dhcp_lease.iface);
+        return false;
+    }
+    return w2_addr_remove_exact(iface, g_dhcp_lease.ip, g_dhcp_lease.prefix);
+}
+
+static bool w2_dhcp_cleanup_owned(const char *iface, bool remove_address)
+{
+    if (g_dhcp_owner_fs_unconfirmed) {
+        if (!w2_owner_dir_sync(WIFI1B_DHCP_OWNER_JOURNAL)) {
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "owner-file durability is unconfirmed");
+            return false;
+        }
+        g_dhcp_owner_fs_unconfirmed = false;
+    }
+    w2_owner_journal_t j;
+    w2_owned_route_t route_check;
+    int jr = w2_dhcp_journal_load(&j);
+    int rr = w2_owned_route_load(&route_check);
+    if (jr < 0 || rr < 0) {
+        /* Unknown/foreign ownership records authorize no mutation. */
+        g_dhcp_lease.valid = false;
+        g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.cleanup_pending = true;
+        g_dhcp_lease.updated = false;
+        if (g_dhcp_lease.iface[0] == '\0' && iface != NULL)
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), iface);
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "owner record is unverified; refusing destructive cleanup");
+        log_msg("dhcp client: lease cleanup blocked: %s", g_dhcp_error);
+        return false;
+    }
+    bool route_ok = w2_owned_route_cleanup();
+    bool addr_ok = true;
+    bool journal_ok = true;
+
+    if (jr < 0) {
+        /* A malformed journal is an unknown owner, not a clean result. */
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "exact address journal is malformed");
+        addr_ok = false;
+    } else if (jr == 1) {
+        if (!remove_address) {
+            addr_ok = false;
+        } else if (!w2_addr_remove_exact(j.iface, j.ip, j.prefix)) {
+            addr_ok = false;
+        }
+    }
+    if (remove_address && g_dhcp_lease.ip != 0 &&
+        (jr != 1 || j.ip != g_dhcp_lease.ip ||
+         j.prefix != g_dhcp_lease.prefix ||
+         strcmp(j.iface, g_dhcp_lease.iface))) {
+        if (!w2_dhcp_remove_own_address(iface)) addr_ok = false;
+    }
+    if (jr == 1)
+        journal_ok = w2_dhcp_journal_clear_verified(j.iface, j.ip, j.prefix);
+    bool clean = jr >= 0 && route_ok && addr_ok && journal_ok;
+
+    g_dhcp_lease.valid = false;
+    g_dhcp_lease.route_ok = false;
+    g_dhcp_lease.cleanup_pending = !clean;
+    g_dhcp_lease.updated = clean;
+    if (clean) {
+        g_dhcp_lease.ip = 0;
+        g_dhcp_lease.prefix = 0;
+        g_dhcp_lease.iface[0] = '\0';
+    } else {
+        /* Preserve every exact owner for the bounded retry. */
+        if (jr == 1 && g_dhcp_lease.ip == 0) {
+            g_dhcp_lease.ip = j.ip;
+            g_dhcp_lease.prefix = j.prefix;
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), j.iface);
+        }
+        if (g_dhcp_lease.iface[0] == '\0' && iface != NULL)
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), iface);
+        if (!route_ok && !g_dhcp_error[0])
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "owned default route is still present");
+        if (!journal_ok && !g_dhcp_error[0])
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "exact address journal could not be cleared safely");
+        log_msg("dhcp client: lease cleanup incomplete: %s",
+                g_dhcp_error[0] ? g_dhcp_error : "unknown");
+    }
+    return clean;
 }
 
 static void w2_dhcp_invalidate(const char *iface, bool remove_address)
 {
-    g_dhcp_lease.valid = false;
-    g_dhcp_lease.updated = true;
-    g_dhcp_lease.route_ok = false;
-    if (!w2_owned_route_cleanup())
-        log_msg("dhcp client: owned default route cleanup failed");
-    if (remove_address) w2_dhcp_remove_own_address(iface);
+    (void)w2_dhcp_cleanup_owned(iface, remove_address);
 }
 
 /* Apply an ACK and verify every claim before the lease is considered ready.
  * The gateway/metric come from the ACK and current route table, never from
  * configuration. */
-static bool w2_dhcp_apply_ack(const struct w2_dhcp_packet *rep, size_t n,
-                              const char *iface, uint32_t fallback_ip,
-                              uint32_t fallback_server, char *out_ip,
-                              size_t ip_n)
+static bool w2_dhcp_rollback_new_address(const char *iface, uint32_t ip,
+                                         int prefix, const char *why)
 {
-    uint32_t ip = ntohl(rep->yiaddr);
+    char detail[256];
+    snprintf(detail, sizeof(detail), "%s", g_dhcp_error);
+    bool removed = w2_addr_remove_exact(iface, ip, prefix);
+    bool route_ok = w2_owned_route_cleanup();
+    bool journal_ok = removed && route_ok &&
+        w2_dhcp_journal_clear_verified(iface, ip, prefix);
+    bool clean = removed && route_ok && journal_ok;
+
+    g_dhcp_lease.valid = false;
+    g_dhcp_lease.route_ok = false;
+    if (clean) {
+        g_dhcp_lease.cleanup_pending = false;
+        g_dhcp_lease.updated = true;
+        g_dhcp_lease.ip = 0;
+        g_dhcp_lease.prefix = 0;
+        g_dhcp_lease.iface[0] = '\0';
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "%s; new address rolled back", why);
+    } else {
+        /* Keep the exact address and any exact route ledger for retry. */
+        g_dhcp_lease.ip = ip;
+        g_dhcp_lease.prefix = prefix;
+        str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), iface);
+        g_dhcp_lease.cleanup_pending = true;
+        g_dhcp_lease.updated = false;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "%s; rollback pending (address=%s route=%s journal=%s): %s",
+                 why, removed ? "absent" : "present",
+                 route_ok ? "absent" : "present",
+                 journal_ok ? "clear" : "retained",
+                 detail[0] ? detail : "readback failed");
+    }
+    return false;
+}
+
+/* Every mutation must first establish that any existing durable owner is
+ * the captured parent owner; otherwise stop and preserve. */
+static bool w2_dhcp_apply_capture_ok(const char *iface)
+{
+    if (g_dhcp_owner_fs_unconfirmed) {
+        g_dhcp_lease.valid = false;
+        g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.cleanup_pending = true;
+        g_dhcp_lease.updated = false;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "owner-file durability is unconfirmed; cleanup required");
+        return false;
+    }
+    w2_owner_journal_t j;
+    w2_owned_route_t route;
+    int jr = w2_dhcp_journal_load(&j);
+    int rr = w2_owned_route_load(&route);
+    bool have_parent = g_dhcp_lease.ip != 0;
+
+    if (jr < 0 || rr < 0) {
+        g_dhcp_lease.valid = false;
+        g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.cleanup_pending = true;
+        g_dhcp_lease.updated = false;
+        if (g_dhcp_lease.iface[0] == '\0')
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), iface);
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "existing owner record is unverified; cleanup required");
+        return false;
+    }
+    if (jr == 1) {
+        bool match = have_parent && g_dhcp_lease.prefix == j.prefix &&
+                     g_dhcp_lease.ip == j.ip &&
+                     !strcmp(g_dhcp_lease.iface, j.iface);
+        if (!match) {
+            if (!have_parent) {
+                g_dhcp_lease.ip = j.ip;
+                g_dhcp_lease.prefix = j.prefix;
+                str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface),
+                         j.iface);
+            }
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "journal/parent owner mismatch; cleanup required");
+            return false;
+        }
+        if (!g_dhcp_lease.valid || g_dhcp_lease.cleanup_pending ||
+            strcmp(j.state, "current")) {
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "journal owner is not ready for mutation");
+            return false;
+        }
+    } else if (g_dhcp_lease.cleanup_pending) {
+        g_dhcp_lease.valid = false;
+        g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.cleanup_pending = true;
+        g_dhcp_lease.updated = false;
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "captured parent cleanup is pending");
+        return false;
+    } else if (rr == 1 && !g_dhcp_lease.valid) {
+        g_dhcp_lease.valid = false;
+        g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.cleanup_pending = true;
+        g_dhcp_lease.updated = false;
+        if (g_dhcp_lease.iface[0] == '\0')
+            str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface),
+                     route.iface);
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "route-only owner must be cleaned before mutation");
+        return false;
+    }
+    return true;
+}
+
+static bool w2_dhcp_apply_ack_ex(const struct w2_dhcp_packet *rep, size_t n,
+                                 const char *iface, uint32_t fallback_ip,
+                                 uint32_t fallback_server, char *out_ip,
+                                 size_t ip_n, bool acquire)
+{
+    uint32_t ack_ip = ntohl(rep->yiaddr);
+    uint32_t ip = ack_ip;
     uint32_t mask = 0, router = 0, server_id = 0;
     uint32_t lease_s = 3600, t1_s = 0, t2_s = 0;
     char ipbuf[32];
+    bool do_apply = getenv("WIFI1B_DHCP_TEST_NOAPPLY") == NULL;
 
-    if (ip == 0) ip = fallback_ip;
-    if (ip == 0) {
-        snprintf(g_dhcp_error, sizeof(g_dhcp_error), "ACK carried no usable address");
-        return false;
-    }
     if (!w2_dhcp_opt_u32(rep, n, 1, &mask) || mask == 0) mask = 0xffffff00U;
     int prefix = w2_mask_to_prefix(mask);
     if (prefix < 0 || prefix > 32) {
         snprintf(g_dhcp_error, sizeof(g_dhcp_error), "invalid subnet mask from DHCP server");
         return false;
     }
-    if (!w2_dhcp_opt_u32(rep, n, 3, &router) || router == 0)
-        router = fallback_server;
+    if (acquire) {
+        /* The ACK address must match the negotiated OFFER/requested address. */
+        if (fallback_ip != 0) {
+            if (ack_ip != fallback_ip) {
+                snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                         "ACK address differs from the negotiated OFFER");
+                return false;
+            }
+        } else if (ack_ip == 0) {
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "ACK carried no usable address");
+            return false;
+        }
+    } else {
+        /* Renewal may echo ciaddr or use yiaddr=0, but never a new/foreign IP. */
+        if (!g_dhcp_lease.valid || g_dhcp_lease.ip == 0) {
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "renewal ACK without an exact owned address");
+            return false;
+        }
+        if (ack_ip != 0 && ack_ip != g_dhcp_lease.ip) {
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "renewal ACK changed the owned address");
+            return false;
+        }
+        ip = g_dhcp_lease.ip;
+    }
+    if (!w2_lease_address_usable(ip, prefix)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "ACK address is not a usable unicast host address");
+        return false;
+    }
+    if (prefix == 32) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "DHCP /32 routed lease is unsupported without on-link proof");
+        return false;
+    }
+    /* The DHCP server identifier is not a router.  ACKs must carry an
+     * explicit usable option 3 before any interface mutation. */
+    if (!w2_dhcp_opt_u32(rep, n, 3, &router)) router = 0;
+    if (router != 0 && !w2_lease_router_consistent(ip, prefix, router)) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "DHCP router option is incompatible with the lease subnet");
+        return false;
+    }
+    if (do_apply && router == 0) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "DHCP ACK has no usable router option 3");
+        return false;
+    }
     if (!w2_dhcp_opt_u32(rep, n, 54, &server_id) || server_id == 0)
         server_id = fallback_server;
     if (!w2_dhcp_opt_u32(rep, n, 51, &lease_s) || lease_s == 0)
@@ -2118,44 +3282,123 @@ static bool w2_dhcp_apply_ack(const struct w2_dhcp_packet *rep, size_t n,
     if (t2_s <= t1_s) t2_s = lease_s > t1_s + 1 ? lease_s - 1 : t1_s + 1;
 
     w2_ip4_str(ip, ipbuf, sizeof(ipbuf));
-    if (!getenv("WIFI1B_DHCP_TEST_NOAPPLY")) {
-        if (g_dhcp_lease.ip &&
-            (g_dhcp_lease.ip != ip || g_dhcp_lease.prefix != prefix) &&
-            !strcmp(g_dhcp_lease.iface, iface))
-            w2_dhcp_remove_own_address(iface);
+    if (do_apply) {
+        if (w2_txn_expired()) {
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "DHCP transaction deadline exceeded before mutation");
+            return false;
+        }
+        if (!w2_dhcp_apply_capture_ok(iface)) return false;
+        /* The old owned default route must be gone before the address changes.
+         * If it cannot be removed, keep the old exact owner as cleanup-pending
+         * instead of mutating the new address and losing the ledger. */
+        if (!w2_owned_route_cleanup()) {
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            if (g_dhcp_lease.iface[0] == '\0')
+                str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), iface);
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "cannot remove previous owned route before new ACK");
+            return false;
+        }
+        bool old_changed = g_dhcp_lease.ip != 0 &&
+            (g_dhcp_lease.ip != ip || g_dhcp_lease.prefix != prefix ||
+             strcmp(g_dhcp_lease.iface, iface) != 0);
+        if (old_changed && strcmp(g_dhcp_lease.iface, iface) &&
+            g_dhcp_lease.iface[0] != '\0') {
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "previous address is on an unexpected interface");
+            return false;
+        }
+        if (old_changed && !w2_dhcp_remove_own_address(iface)) {
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "cannot remove previous address before new ACK");
+            return false;
+        }
+        if (old_changed && !w2_dhcp_journal_clear_verified(
+                g_dhcp_lease.iface, g_dhcp_lease.ip,
+                g_dhcp_lease.prefix)) {
+            /* The old address is proven absent but its exact journal could
+             * not be cleared safely; retry instead of overwriting it. */
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            return false;
+        }
+        /* Record the exact new address before the first kernel mutation. */
+        if (!w2_dhcp_journal_write("pending", ip, prefix, iface)) {
+            /* Missing/failed journal is not proof of no owner.  Preserve the
+             * exact captured parent, or adopt a newly published record. */
+            w2_owner_journal_t j;
+            int jr = w2_dhcp_journal_load(&j);
+            g_dhcp_lease.valid = false;
+            g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+            if (g_dhcp_lease.ip == 0 && jr == 1) {
+                g_dhcp_lease.ip = j.ip;
+                g_dhcp_lease.prefix = j.prefix;
+                str_copy(g_dhcp_lease.iface,
+                         sizeof(g_dhcp_lease.iface), j.iface);
+            } else if (g_dhcp_lease.ip == 0 && g_dhcp_lease.iface[0] == '\0') {
+                str_copy(g_dhcp_lease.iface,
+                         sizeof(g_dhcp_lease.iface), iface);
+            }
+            return false;
+        }
+        g_dhcp_lease.ip = ip;
+        g_dhcp_lease.prefix = prefix;
+        str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), iface);
+        g_dhcp_lease.valid = false;
+        g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.cleanup_pending = false;
+        g_dhcp_lease.updated = false;
+
         if (!w2_ip_command("addr replace %s/%d dev %s", ipbuf, prefix, iface) &&
             !w2_ip_command("addr add %s/%d dev %s", ipbuf, prefix, iface)) {
             snprintf(g_dhcp_error, sizeof(g_dhcp_error),
                      "cannot apply %s/%d on %s", ipbuf, prefix, iface);
-            return false;
+            return w2_dhcp_rollback_new_address(iface, ip, prefix,
+                                                "cannot apply new address");
         }
         if (!w2_ip_command("link set %s up", iface)) {
-            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
-                     "cannot bring %s up", iface);
-            return false;
+            return w2_dhcp_rollback_new_address(iface, ip, prefix,
+                                                "cannot bring interface up");
         }
         if (!w2_addr_present(iface, ipbuf, prefix)) {
-            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
-                     "address %s/%d is not visible on %s", ipbuf, prefix, iface);
-            return false;
+            return w2_dhcp_rollback_new_address(iface, ip, prefix,
+                                                "new address not visible");
         }
         if (!w2_connected_route_present(iface, ipbuf, mask, prefix)) {
-            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
-                     "connected route for %s/%d is not visible on %s",
-                     ipbuf, prefix, iface);
-            return false;
+            return w2_dhcp_rollback_new_address(iface, ip, prefix,
+                                                "connected route not visible");
         }
-        if (router == 0) {
-            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
-                     "DHCP lease has no router/gateway option");
-            return false;
+        if (!w2_client_route_install(router, iface)) {
+            return w2_dhcp_rollback_new_address(iface, ip, prefix,
+                                                "owned default route failed");
         }
-        if (!w2_client_route_install(router, iface)) return false;
+        /* Only a complete, readback-verified owner becomes durable current. */
+        if (!w2_dhcp_journal_write("current", ip, prefix, iface)) {
+            return w2_dhcp_rollback_new_address(
+                iface, ip, prefix, "cannot record final address ownership");
+        }
     }
 
     g_dhcp_lease.valid = true;
     g_dhcp_lease.updated = true;
-    g_dhcp_lease.route_ok = !getenv("WIFI1B_DHCP_TEST_NOAPPLY");
+    g_dhcp_lease.route_ok = do_apply;
+    g_dhcp_lease.cleanup_pending = false;
     g_dhcp_lease.ip = ip;
     g_dhcp_lease.server = server_id;
     g_dhcp_lease.mask = mask;
@@ -2169,6 +3412,15 @@ static bool w2_dhcp_apply_ack(const struct w2_dhcp_packet *rep, size_t n,
     return true;
 }
 
+static bool w2_dhcp_apply_ack(const struct w2_dhcp_packet *rep, size_t n,
+                              const char *iface, uint32_t fallback_ip,
+                              uint32_t fallback_server, char *out_ip,
+                              size_t ip_n)
+{
+    return w2_dhcp_apply_ack_ex(rep, n, iface, fallback_ip, fallback_server,
+                                out_ip, ip_n, true);
+}
+
 static bool w2_dhcp_client_run(w2_dhcp_step_t step, const char *iface_in,
                                char *out_ip, size_t ip_n)
 {
@@ -2178,25 +3430,37 @@ static bool w2_dhcp_client_run(w2_dhcp_step_t step, const char *iface_in,
         if (t && *t) iface = t;
     }
     if (out_ip && ip_n) out_ip[0] = 0;
+    if (step == W2_DHCP_RELEASE) {
+        /* Expiry-level cleanup: exact owned address and ledged route only.
+         * Completion requires both readbacks, not just a successful command. */
+        bool cleanup_ok = w2_dhcp_cleanup_owned(iface, true);
+        if (!cleanup_ok)
+            log_msg("dhcp client: release cleanup incomplete: %s",
+                    g_dhcp_error[0] ? g_dhcp_error : "unknown");
+        return cleanup_ok;
+    }
     if (step == W2_DHCP_ACQUIRE) {
-        /* Re-acquisition replaces only our old exact address/route. */
-        if (!w2_owned_route_cleanup()) {
-            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
-                     "cannot remove previous owned default route");
-            w2_dhcp_remove_own_address(iface);
-            g_dhcp_lease.valid = false;
-            g_dhcp_lease.route_ok = false;
-            g_dhcp_lease.updated = true;
+        /* Re-acquisition cleans every exact previously owned address/route,
+         * including a journal entry whose parent state was lost. */
+        g_dhcp_error[0] = 0;
+        if (!w2_dhcp_cleanup_owned(iface, true)) {
+            log_msg("dhcp client: reacquire cleanup pending: %s",
+                    g_dhcp_error[0] ? g_dhcp_error : "unknown");
             return false;
         }
-        w2_dhcp_remove_own_address(iface);
-        g_dhcp_lease.valid = false;
-        g_dhcp_lease.route_ok = false;
-    } else if (!g_dhcp_lease.valid || g_dhcp_lease.ip == 0) {
-        snprintf(g_dhcp_error, sizeof(g_dhcp_error), "no active lease to renew");
-        return false;
+        /* All old owned objects are proven absent; tell the parent to clear
+         * the old lease while this acquisition proceeds. */
+        memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+        g_dhcp_lease.updated = true;
+    } else {
+        if (!g_dhcp_lease.valid || g_dhcp_lease.ip == 0) {
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error), "no active lease to renew");
+            return false;
+        }
+        g_dhcp_error[0] = 0;
+        g_dhcp_lease.cleanup_pending = false;
+        g_dhcp_lease.updated = false;
     }
-    g_dhcp_lease.updated = step == W2_DHCP_ACQUIRE;
 
     uint8_t mac[6];
     if (!w2_read_iface_mac(iface, mac)) {
@@ -2238,6 +3502,7 @@ static bool w2_dhcp_client_run(w2_dhcp_step_t step, const char *iface_in,
     }
 
     bool ok = false;
+    bool terminal_reply = false;
     struct w2_dhcp_packet req;
     uint8_t reply[1500];
     size_t reply_len = 0;
@@ -2262,6 +3527,11 @@ static bool w2_dhcp_client_run(w2_dhcp_step_t step, const char *iface_in,
     if (step == W2_DHCP_ACQUIRE) {
         reqlen = w2_dhcp_build_client(&req, xid, mac, 1, 0, 0, 0, false);
         for (int attempt = 0; attempt < 4 && !offered && !g_stop; attempt++) {
+            if (w2_txn_expired()) {
+                snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                         "DHCP transaction deadline exceeded during DISCOVER");
+                break;
+            }
             g_dhcp_attempts = attempt + 1;
             w2_read_bssid(g_dhcp_bssid, sizeof(g_dhcp_bssid));
             if (sendto(fd, &req, reqlen, 0, (struct sockaddr *)&to, sizeof(to)) < 0) {
@@ -2271,7 +3541,7 @@ static bool w2_dhcp_client_run(w2_dhcp_step_t step, const char *iface_in,
             g_dhcp_tx++;
             int got = w2_dhcp_wait_reply(fd, raw_fd, raw_ifindex, xid, mac,
                                          reply, sizeof(reply), &reply_len,
-                                         now_ms() + 3000);
+                                         w2_dhcp_reply_deadline(3000));
             if (got > 0) {
                 struct w2_dhcp_packet *rep = (struct w2_dhcp_packet *)reply;
                 if (w2_dhcp_reply_identity(rep, reply_len, xid, mac) &&
@@ -2317,6 +3587,11 @@ static bool w2_dhcp_client_run(w2_dhcp_step_t step, const char *iface_in,
     }
 
     for (int attempt = 0; attempt < 3 && !ok && !g_stop; attempt++) {
+        if (w2_txn_expired()) {
+            snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                     "DHCP transaction deadline exceeded during REQUEST");
+            break;
+        }
         if (sendto(fd, &req, reqlen, 0, (struct sockaddr *)&to, sizeof(to)) < 0) {
             snprintf(g_dhcp_error, sizeof(g_dhcp_error), "REQUEST sendto: %s", strerror(errno));
             break;
@@ -2324,7 +3599,7 @@ static bool w2_dhcp_client_run(w2_dhcp_step_t step, const char *iface_in,
         g_dhcp_tx++;
         int got = w2_dhcp_wait_reply(fd, raw_fd, raw_ifindex, xid, mac,
                                      reply, sizeof(reply), &reply_len,
-                                     now_ms() + 3000);
+                                     w2_dhcp_reply_deadline(3000));
         if (got > 0) {
             struct w2_dhcp_packet *rep = (struct w2_dhcp_packet *)reply;
             if (w2_dhcp_reply_identity(rep, reply_len, xid, mac)) {
@@ -2335,18 +3610,24 @@ static bool w2_dhcp_client_run(w2_dhcp_step_t step, const char *iface_in,
                         ? offered : g_dhcp_lease.ip;
                     uint32_t fallback_server = step == W2_DHCP_ACQUIRE
                         ? server : g_dhcp_lease.server;
-                    if (w2_dhcp_apply_ack(rep, reply_len, iface, fallback_ip,
-                                          fallback_server, out_ip, ip_n)) {
+                    if (w2_dhcp_apply_ack_ex(rep, reply_len, iface, fallback_ip,
+                                             fallback_server, out_ip, ip_n,
+                                             step == W2_DHCP_ACQUIRE)) {
                         ok = true;
                         break;
                     }
-                    w2_dhcp_invalidate(iface, true);
+                    log_msg("dhcp client: ACK rejected: %s", g_dhcp_error);
+                    /* apply_ack already rolled back or retained the exact
+                     * new owner; do not overwrite it with an old-address
+                     * invalidate. */
+                    terminal_reply = true;
                     break;
                 }
                 if (t == 6) {
                     snprintf(g_dhcp_error, sizeof(g_dhcp_error),
                              "NAK from server (bssid %s)", g_dhcp_bssid);
                     w2_dhcp_invalidate(iface, true);
+                    terminal_reply = true;
                     break;
                 }
             }
@@ -2361,7 +3642,7 @@ static bool w2_dhcp_client_run(w2_dhcp_step_t step, const char *iface_in,
     if (!ok && !g_dhcp_error[0])
         snprintf(g_dhcp_error, sizeof(g_dhcp_error),
                  "no ACK after 3 attempts (bssid %s)", g_dhcp_bssid);
-    if (!ok && step == W2_DHCP_ACQUIRE)
+    if (!ok && step == W2_DHCP_ACQUIRE && !terminal_reply)
         w2_dhcp_invalidate(iface, true);
 
 done:
@@ -2383,18 +3664,17 @@ static bool w2_dhcp_client_renew(w2_dhcp_step_t step)
 
 static bool client_disconnect(void)
 {
-    if (!w2_owned_route_cleanup())
-        log_msg("client: owned default route cleanup failed during disconnect");
-    w2_dhcp_remove_own_address("wlan0");
-    g_dhcp_lease.valid = false;
-    g_dhcp_lease.route_ok = false;
-    g_dhcp_lease.updated = true;
+    bool cleanup_ok = w2_dhcp_cleanup_owned("wlan0", true);
+    if (!cleanup_ok)
+        log_msg("client: owned lease cleanup failed during disconnect: %s",
+                g_dhcp_error[0] ? g_dhcp_error : "unknown");
     if (wpa_process_alive()) {
         sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 disconnect 2>/dev/null");
         sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 remove_network all 2>/dev/null");
     }
-    w2_iface_flush();
-    return true;
+    /* Never use a family-wide flush as a substitute for exact cleanup. */
+    if (cleanup_ok) w2_iface_flush();
+    return cleanup_ok;
 }
 
 static bool client_service_ready(const char *service, const char *ip)
@@ -2432,16 +3712,11 @@ static bool client_connect(void)
         return false;
     }
     /* A new association must not inherit a stale default route/address. */
-    if (!w2_owned_route_cleanup()) {
-        set_msg("client: previous owned default route could not be removed");
-        g_dhcp_lease.valid = false;
-        g_dhcp_lease.route_ok = false;
-        g_dhcp_lease.updated = true;
+    if (!w2_dhcp_cleanup_owned("wlan0", true)) {
+        set_msg("client: previous owned lease cleanup could not be confirmed");
         return false;
     }
-    w2_dhcp_remove_own_address("wlan0");
-    g_dhcp_lease.valid = false;
-    g_dhcp_lease.route_ok = false;
+    memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.updated = true;
     if (!ensure_wifi_ready()) return false;
     ap_stop();
@@ -2648,42 +3923,59 @@ static void intent_write(bool active)
         unlink(WIFI1B_INTENT);
 }
 
-static void stop_all(void)
+static bool stop_all(void)
 {
     g_carplay_ie = false;
     ssh_stop();
-    ap_stop();
-    client_disconnect();
+    /* Exact client cleanup first when we hold any client owner.  A failed
+     * exact cleanup must not be masked by ap_stop's family-wide flush; stop
+     * AP services without touching the pending address for retry. */
+    bool client_owned = g_dhcp_lease.cleanup_pending ||
+                        g_dhcp_lease.ip != 0 ||
+                        g_dhcp_lease.iface[0] != '\0' ||
+                        access(WIFI1B_DHCP_OWNER_JOURNAL, F_OK) == 0 ||
+                        access(WIFI1B_CLIENT_ROUTE_LEDGER, F_OK) == 0;
+    bool lease_clean = client_owned ? client_disconnect() : true;
+    if (lease_clean) {
+        ap_stop();
+    } else {
+        stop_dhcpd();
+        ap_fw_close();
+        carplay_fw_close();
+        stop_wpa_supplicant();
+    }
     stop_wpa_supplicant();
-    w2_iface_down_clean();
+    if (lease_clean) w2_iface_down_clean();
+    return lease_clean;
 }
 
-/* Stock USB handoff is a mutation of the OEM WiFi manager. Only do it while
- * we hold the shared radio reservation, or when the record proves the radio
- * is idle. A peer-owned wlan0 is never evicted by a main-thread preference
- * change. */
-static bool carplay_stock_handoff(bool owned)
+/* Return: 1 = restored, 0 = deferred because a peer owns wlan0 (safe),
+ * -1 = attempted and not confirmed. */
+static int carplay_stock_handoff(bool owned)
 {
     char owner[32] = "";
 
     if (!owned && radio_record_name(owner, sizeof(owner)) &&
         strcmp(owner, "wifi1b_daemon")) {
         log_msg("CarPlay stock handoff deferred: wlan0 reserved by %s", owner);
-        return false;
+        return 0;
     }
     int unmask_rc = sh("systemctl unmask supplicantmanager.path supplicantmanager.service 2>/dev/null");
     int start_rc = sh("systemctl start supplicantmanager.path 2>/dev/null");
-    bool ok = start_rc == 0;
+    bool ok = unmask_rc == 0 && start_rc == 0;
     if (unmask_rc != 0)
         log_msg("CarPlay stock handoff: supplicantmanager unmask returned %d", unmask_rc);
     log_msg("CarPlay stock handoff: OEM supplicant manager %s%s",
             ok ? "restored" : "could not be confirmed",
             owned ? "" : " (radio idle)");
-    return ok;
+    return ok ? 1 : -1;
 }
 
 static bool apply_mode_work(bool pair)
 {
+    /* Adopt any durable exact owner left by an interrupted worker before
+     * deciding whether this transition can claim clean. */
+    (void)w2_dhcp_reconcile_owned_state();
     /* Stock USB handoff is authoritative: never start the wireless AP. */
     if (g_cfg.carplay_control && g_cfg.mode == MODE_CARPLAY) {
         g_cfg.mode = MODE_OFF;
@@ -2692,28 +3984,46 @@ static bool apply_mode_work(bool pair)
     bool active = g_cfg.wlan_on && g_cfg.mode != MODE_OFF;
     int ownership = radio_begin("wifi1b_daemon", active);
     if (ownership <= 0) {
+        bool route_cleanup_ok = true;
+        bool handoff_ok = true;
         /* No reservation means no wlan0 mutation. Stock handoff is only safe
          * when the owner record is empty (or ours, but radio_begin would
-         * then have returned 1). */
+         * then have returned 1). A peer reservation defers it without any
+         * OEM-manager command. */
         if (ownership == 0 && !active && g_cfg.carplay_control &&
-            !wpa_process_alive() && !ssh_running() && !dhcpd_running())
-            carplay_stock_handoff(false);
+            !wpa_process_alive() && !ssh_running() && !dhcpd_running()) {
+            int hs = carplay_stock_handoff(false);
+            handoff_ok = hs >= 0; /* 0 = safe peer deferral */
+        }
         if (ownership == 0 && !active) {
             /* No reservation means no interface mutation, but removing our
              * exact ledger route is safe and prevents a stale fallback. */
-            (void)w2_owned_route_cleanup();
+            route_cleanup_ok = w2_owned_route_cleanup();
             g_dhcp_lease.valid = false;
             g_dhcp_lease.route_ok = false;
-            g_dhcp_lease.updated = true;
+            /* ANY exact address/journal/ledger owner keeps cleanup pending,
+             * even when there is no radio reservation to delete it yet. */
+            if (!route_cleanup_ok || g_dhcp_lease.ip != 0 ||
+                g_dhcp_lease.prefix != 0)
+                g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = !g_dhcp_lease.cleanup_pending;
         }
-        set_msg("%s", ownership == 0 ? "WLAN off; radio left untouched" :
+        bool lease_pending = g_dhcp_lease.cleanup_pending ||
+                             g_dhcp_lease.ip != 0 ||
+                             g_dhcp_lease.prefix != 0;
+        bool cleanup_ok = route_cleanup_ok && handoff_ok && !lease_pending;
+        set_msg("%s", ownership == 0 ?
+                (cleanup_ok ? "WLAN off; radio left untouched" :
+                 !route_cleanup_ok ? "WLAN off; owned route cleanup could not be confirmed" :
+                 !handoff_ok ? "WLAN off; Stock USB handoff could not be confirmed" :
+                 "WLAN off; owned lease cleanup pending") :
                 "Radio busy/reserved; turn the owning WiFi app Off first");
-        return ownership == 0;
+        return ownership == 0 && cleanup_ok;
     }
     if (!g_cfg.wlan_on || g_cfg.mode == MODE_OFF) {
         /* Reached only with our reservation, including interrupted scans.
          * The earlier ownership guard keeps idle/peer-Off hands-off. */
-        stop_all();
+        bool lease_clean = stop_all();
         bt_pair_stop();
         /* Wireless CarPlay is not active: clear the vendor flag so the stock
          * USB CarPlay path is not left disabled by a previous session. */
@@ -2728,10 +4038,16 @@ static bool apply_mode_work(bool pair)
             unsigned long value = strtoul(flags, &end, 0);
             down = end != flags && !(*trim(end)) && !(value & 1); /* IFF_UP */
         }
-        bool off = down && !wpa_process_alive() && !ssh_running() && !dhcpd_running();
+        bool route_ok = w2_owned_route_cleanup();
+        if (!route_ok) {
+            g_dhcp_lease.cleanup_pending = true;
+            g_dhcp_lease.updated = false;
+        }
+        bool off = lease_clean && route_ok && !g_dhcp_lease.cleanup_pending &&
+                   down && !wpa_process_alive() && !ssh_running() && !dhcpd_running();
         bool handoff_ok = true;
         if (off && g_cfg.carplay_control)
-            handoff_ok = carplay_stock_handoff(true);
+            handoff_ok = carplay_stock_handoff(true) == 1;
         intent_write(false);
         set_msg("%s", off ? (g_cfg.carplay_control && !handoff_ok ?
                              "WLAN off; Stock USB handoff could not be confirmed" :
@@ -2763,20 +4079,14 @@ static bool apply_mode_work(bool pair)
         vbt_set_wireless_carplay(false, &vbt_off);
         restart_vbtd_if_needed(vbt_off);
         if (!ensure_wifi_ready()) {
-            (void)w2_owned_route_cleanup();
-            g_dhcp_lease.valid = false;
-            g_dhcp_lease.route_ok = false;
-            g_dhcp_lease.updated = true;
+            (void)w2_dhcp_cleanup_owned("wlan0", true);
             ssh_stop();
             return false;
         }
         if (!client_connect()) {
             char why[256];
             str_copy(why, sizeof(why), g_last_msg);
-            (void)w2_owned_route_cleanup();
-            g_dhcp_lease.valid = false;
-            g_dhcp_lease.route_ok = false;
-            g_dhcp_lease.updated = true;
+            (void)w2_dhcp_cleanup_owned("wlan0", true);
             ssh_stop();
             set_msg("client mode failed: %s", why);
             return false;
@@ -2787,17 +4097,12 @@ static bool apply_mode_work(bool pair)
         return true;
     }
 
-    /* Leaving client mode: remove only the exact ledged default route. */
-    if (!w2_owned_route_cleanup()) {
-        g_dhcp_lease.valid = false;
-        g_dhcp_lease.route_ok = false;
-        g_dhcp_lease.updated = true;
-        set_msg("client: owned default route cleanup failed; CarPlay not started");
+    /* Leaving client mode requires both the exact ledged route and the
+     * owned address to be absent before CarPlay starts. */
+    if (!w2_dhcp_cleanup_owned("wlan0", true)) {
+        set_msg("client: owned lease cleanup could not be confirmed; CarPlay not started");
         return false;
     }
-    g_dhcp_lease.valid = false;
-    g_dhcp_lease.route_ok = false;
-    g_dhcp_lease.updated = true;
 
     if (g_ap_restart_requested) {
         ssh_stop();
