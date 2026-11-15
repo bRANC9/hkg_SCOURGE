@@ -297,6 +297,8 @@ static void clear_offer(cp_bootstrap *session)
 {
     session->offer_active = false;
     session->offer_deadline_ms = 0u;
+    session->offer_held = false;
+    session->offer_hold_generation = 0u;
 }
 
 static void reflect_invalidated_state(cp_bootstrap *session)
@@ -608,6 +610,8 @@ static cp_boot_result attempt_start(cp_bootstrap *session, uint64_t now_ms,
     }
     clear_pending(session);
     session->offer_active = true;
+    session->offer_held = false;
+    session->offer_hold_generation = 0u;
     session->offer_deadline_ms = deadline_after(now_ms, session->ap_wait_ms);
     session->state = CP_BOOT_STATE_AWAITING_RECEIVER;
     return make_result(session, CP_BOOT_EV_START_SENT, CP_BOOT_OK, out_len);
@@ -1005,6 +1009,13 @@ static cp_boot_result handle_availability(cp_bootstrap *session,
                            CP_BOOT_ERR_ORDER, 0u);
     }
 
+    if (session->offer_held &&
+        session->offer_hold_generation != session->generation) {
+        /* Defensive: a generation change always clears the hold, but never let
+         * a stale hold retire a newer offer's deadline. */
+        session->offer_held = false;
+    }
+
     /* Conservative availability policy: the wireless side must be present and
      * explicitly available.  A missing optional field is not assumed true. */
     if (!availability.wireless.present ||
@@ -1043,7 +1054,12 @@ static cp_boot_result handle_availability(cp_bootstrap *session,
                          availability.wired.transport_id)) {
                 return error_result(session, CP_BOOT_ERR_WIRE);
             }
-            if (session->pending_start || session->offer_active) {
+            /* While a trusted hold is in place, propagate the new wired id
+             * before evaluating policy: the USB callback must see the id it is
+             * deciding about.  A non-held offer keeps the conservative
+             * credential-change refusal. */
+            if ((session->pending_start || session->offer_active) &&
+                !session->offer_held) {
                 invalidate_offer(session);
                 return make_result(session, CP_BOOT_EV_START_REFUSED,
                                    CP_BOOT_ERR_IDENTITY, 0u);
@@ -1056,6 +1072,47 @@ static cp_boot_result handle_availability(cp_bootstrap *session,
             }
             session->have_phone_usb_id = true;
         }
+    }
+
+    if (session->offer_held && session->offer_active) {
+        consent = query_consent(session, now_ms);
+        /* A trusted observation retires only the deadline.  It does not hide
+         * policy or identity changes: availability has already been decoded
+         * and the ids above updated, so the USB callback decides with the id
+         * the phone just reported.  USB/consent are re-queried here, before a
+         * duplicate is returned, instead of waiting for the next bounded
+         * re-check. */
+        if (session->state == CP_BOOT_STATE_FAILED ||
+            session->auth_state != CP_BOOT_AUTH_SUCCEEDED) {
+            invalidate_offer(session);
+            return make_result(session, CP_BOOT_EV_START_REFUSED,
+                               CP_BOOT_ERR_ORDER, 0u);
+        }
+        if (session->wireless_update_known &&
+            !session->wireless_update_available) {
+            invalidate_offer(session);
+            return make_result(session, CP_BOOT_EV_START_REFUSED,
+                               CP_BOOT_ERR_POLICY, 0u);
+        }
+        if (availability.wired.present && availability.wired.available_known &&
+            availability.wired.available && session->usb_active == NULL) {
+            invalidate_offer(session);
+            return make_result(session, CP_BOOT_EV_USB_ACTIVE,
+                               CP_BOOT_ERR_POLICY, 0u);
+        }
+        if (query_usb_active(session)) {
+            invalidate_offer(session);
+            return make_result(session, CP_BOOT_EV_USB_ACTIVE,
+                               CP_BOOT_ERR_POLICY, 0u);
+        }
+        if (consent != CP_BOOT_CONSENT_GRANTED &&
+            consent != CP_BOOT_CONSENT_PENDING) {
+            invalidate_offer(session);
+            return make_result(session, CP_BOOT_EV_CONSENT_DENIED,
+                               CP_BOOT_ERR_POLICY, 0u);
+        }
+        return make_result(session, CP_BOOT_EV_START_DUPLICATE, CP_BOOT_OK,
+                           0u);
     }
 
     if (session->offer_active && now_ms >= session->offer_deadline_ms) {
@@ -1211,6 +1268,36 @@ cp_boot_result cp_bootstrap_tick(cp_bootstrap *session, uint64_t now_ms,
     if (session->offer_active) {
         cp_boot_consent consent;
 
+        if (session->offer_held &&
+            session->offer_hold_generation != session->generation)
+            session->offer_held = false;
+        if (session->offer_held) {
+            if (session->state == CP_BOOT_STATE_FAILED ||
+                session->auth_state != CP_BOOT_AUTH_SUCCEEDED) {
+                invalidate_offer(session);
+                return make_result(session, CP_BOOT_EV_START_REFUSED,
+                                   CP_BOOT_ERR_ORDER, 0u);
+            }
+            if (session->wireless_update_known &&
+                !session->wireless_update_available) {
+                invalidate_offer(session);
+                return make_result(session, CP_BOOT_EV_START_REFUSED,
+                                   CP_BOOT_ERR_POLICY, 0u);
+            }
+            consent = query_consent(session, now_ms);
+            if (consent != CP_BOOT_CONSENT_GRANTED &&
+                consent != CP_BOOT_CONSENT_PENDING) {
+                invalidate_offer(session);
+                return make_result(session, CP_BOOT_EV_CONSENT_DENIED,
+                                   CP_BOOT_ERR_POLICY, 0u);
+            }
+            if (query_usb_active(session)) {
+                invalidate_offer(session);
+                return make_result(session, CP_BOOT_EV_USB_ACTIVE,
+                                   CP_BOOT_ERR_POLICY, 0u);
+            }
+            return make_result(session, CP_BOOT_EV_NONE, CP_BOOT_OK, 0u);
+        }
         if (now_ms >= session->offer_deadline_ms) {
             invalidate_offer(session);
             return make_result(session, CP_BOOT_EV_START_TIMEOUT,
@@ -1246,6 +1333,51 @@ cp_boot_result cp_bootstrap_tick(cp_bootstrap *session, uint64_t now_ms,
     return make_result(session, CP_BOOT_EV_NONE, CP_BOOT_OK, 0u);
 }
 
+
+cp_boot_result cp_bootstrap_hold_offer(cp_bootstrap *session,
+                                       uint64_t generation, uint64_t now_ms)
+{
+    if (session == NULL) {
+        return make_result(session, CP_BOOT_EV_ERROR, CP_BOOT_ERR_ARGUMENT,
+                           0u);
+    }
+    if (!accept_time(session, now_ms)) {
+        return error_result(session, CP_BOOT_ERR_ARGUMENT);
+    }
+    if (generation != session->generation || !session->offer_active ||
+        session->state != CP_BOOT_STATE_AWAITING_RECEIVER ||
+        session->auth_state != CP_BOOT_AUTH_SUCCEEDED ||
+        !session->identified) {
+        return make_result(session, CP_BOOT_EV_START_REFUSED,
+                           CP_BOOT_ERR_ORDER, 0u);
+    }
+    session->offer_held = true;
+    session->offer_hold_generation = session->generation;
+    return make_result(session, CP_BOOT_EV_NONE, CP_BOOT_OK, 0u);
+}
+
+cp_boot_result cp_bootstrap_release_offer_hold(cp_bootstrap *session,
+                                               uint64_t now_ms)
+{
+    if (session == NULL) {
+        return make_result(session, CP_BOOT_EV_ERROR, CP_BOOT_ERR_ARGUMENT,
+                           0u);
+    }
+    if (!accept_time(session, now_ms)) {
+        return error_result(session, CP_BOOT_ERR_ARGUMENT);
+    }
+    session->offer_held = false;
+    session->offer_hold_generation = 0u;
+    return make_result(session, CP_BOOT_EV_NONE, CP_BOOT_OK, 0u);
+}
+
+bool cp_bootstrap_offer_held(const cp_bootstrap *session)
+{
+    return session != NULL && session->offer_active &&
+           session->offer_held &&
+           session->offer_hold_generation == session->generation;
+}
+
 cp_boot_result cp_bootstrap_set_ap_readback(cp_bootstrap *session,
                                             const cp_boot_ap_readback *readback,
                                             uint64_t now_ms, uint8_t *out,
@@ -1262,6 +1394,11 @@ cp_boot_result cp_bootstrap_set_ap_readback(cp_bootstrap *session,
         return error_result(session, CP_BOOT_ERR_ARGUMENT);
     }
     if (!readback->on_air) {
+        /* AP-scope invalidation: the trusted offer hold cannot outlive the AP
+         * configuration it was granted for, but the bounded offer itself is
+         * left to its normal deadline/cancel path. */
+        session->offer_held = false;
+        session->offer_hold_generation = 0u;
         session->ap_state = CP_BOOT_AP_NOT_READY;
         session->readback_valid = false;
         session->readback_ssid[0] = '\0';
@@ -1287,6 +1424,23 @@ cp_boot_result cp_bootstrap_set_ap_readback(cp_bootstrap *session,
         if (copy_text(link_local, sizeof(link_local), readback->link_local,
                       1u, CP_WIRE_MAX_LINK_LOCAL) != CP_BOOT_OK) {
             return error_result(session, CP_BOOT_ERR_CONFIG);
+        }
+    }
+    {
+        /* A valid but different on-air readback is a new AP scope, exactly
+         * like an off-air readback.  The hold was granted for the old scope
+         * and must not survive the change; the bounded offer, its original
+         * deadline and the generation are deliberately left untouched. */
+        bool ap_scope_changed =
+            !session->readback_valid ||
+            session->readback_channel != readback->channel ||
+            session->readback_security != readback->security ||
+            strcmp(session->readback_ssid, ssid) != 0 ||
+            strcmp(session->readback_link_local, link_local) != 0;
+
+        if (ap_scope_changed) {
+            session->offer_held = false;
+            session->offer_hold_generation = 0u;
         }
     }
     memcpy(session->readback_ssid, ssid, sizeof(ssid));

@@ -292,6 +292,12 @@ static void rx_drop_all(cp_session_t *session)
 static void clear_receiver(cp_session_t *session, bool notify)
 {
     session->receiver_policy_deadline_ms = 0u;
+    session->receiver_policy_armed = false;
+    /* Drop the bootstrap offer hold at the same boundary as the wrapper
+     * observation.  The offer itself keeps its ordinary bounded deadline;
+     * releasing the hold never bumps a generation or drops a queued reply. */
+    (void)cp_bootstrap_release_offer_hold(&session->boot,
+                                          session->last_now_ms);
     if (!session->receiver_active)
         return;
     session->receiver_active = false;
@@ -310,6 +316,7 @@ static bool receiver_inputs_valid(const cp_session_t *session)
            cp_bootstrap_state(&session->boot) !=
                CP_BOOT_STATE_DISCONNECTED &&
            cp_bootstrap_ap_state(&session->boot) == CP_BOOT_AP_READY &&
+           cp_bootstrap_offer_held(&session->boot) &&
            session->receiver_generation == cp_link_generation(&session->link) &&
            session->receiver_ap_generation ==
                session->ap_readback_generation;
@@ -447,10 +454,17 @@ static void set_state_from_boot(cp_session_t *session,
             break;
         case CP_BOOT_STATE_DISCONNECTED:
             if (session->started &&
-                cp_link_state(&session->link) != CP_LINK_STATE_DEAD)
+                cp_link_state(&session->link) != CP_LINK_STATE_DEAD) {
                 state = CP_SESSION_STATE_STARTING;
-            else
+            } else if (session->state == CP_SESSION_STATE_IDLE ||
+                       session->state == CP_SESSION_STATE_CANCELLED ||
+                       session->state == CP_SESSION_STATE_FAILED) {
+                /* Publishing AP readback is not a transport transition. Keep
+                 * inactive/cancelled/failed lifecycle states intact. */
+                state = session->state;
+            } else {
                 state = CP_SESSION_STATE_DISCONNECTED;
+            }
             break;
         default:
             state = session->state;
@@ -725,6 +739,7 @@ static cp_session_error_t receiver_policy_check(cp_session_t *session,
     if (cause == CP_BOOT_EV_NONE) {
         session->receiver_policy_deadline_ms =
             add_ms(now_ms, CP_SESSION_POLICY_RECHECK_MS);
+        session->receiver_policy_armed = true;
         return CP_SESSION_OK;
     }
 
@@ -937,8 +952,7 @@ static cp_session_error_t service_after_link(cp_session_t *session,
             return err;
     }
 
-    if (session->receiver_active &&
-        session->receiver_policy_deadline_ms != 0u &&
+    if (session->receiver_active && session->receiver_policy_armed &&
         now_ms >= session->receiver_policy_deadline_ms) {
         err = receiver_policy_check(session, now_ms);
         if (err != CP_SESSION_OK)
@@ -960,11 +974,9 @@ static void session_link_callback(void *user, const cp_link_event_t *event)
             session->stats.unsupported_session_payloads++;
             return;
         }
-        if ((size_t)event->data_len > sizeof(session->rx_buf) ||
-            session->rx_len + (size_t)event->data_len >
-                sizeof(session->rx_buf)) {
+        if (session->rx_len + (size_t)event->data_len >
+            sizeof(session->rx_buf)) {
             session->cb_rx_overflow = true;
-            session->stats.csm_rx_overflows++;
             return;
         }
         if (session->rx_len == 0u)
@@ -1095,6 +1107,7 @@ cp_session_error_t cp_session_start(cp_session_t *session,
         clear_receiver(session, true);
     session->receiver_generation = 0u;
     session->receiver_policy_deadline_ms = 0u;
+    session->receiver_policy_armed = false;
     session->stats.csm_stale_replies_dropped += tx_drop_all(session, NULL);
     rx_drop_all(session);
     session->cb_rx_overflow = false;
@@ -1125,23 +1138,45 @@ cp_session_error_t cp_session_start(cp_session_t *session,
 cp_session_error_t cp_session_feed(cp_session_t *session, const void *data,
                                    size_t len, uint64_t now_ms)
 {
-    int result;
-    cp_session_error_t err;
+    const uint8_t *bytes = (const uint8_t *)data;
+    cp_session_error_t err = CP_SESSION_OK;
+    size_t i;
 
     if (session == NULL || !session->initialized ||
         (data == NULL && len != 0u))
         return CP_SESSION_ERR_ARGUMENT;
     if (!clock_accept(session, now_ms))
         return CP_SESSION_ERR_CLOCK_ROLLBACK;
-    if (cp_link_state(&session->link) == CP_LINK_STATE_IDLE)
+    if (cp_link_state(&session->link) == CP_LINK_STATE_IDLE ||
+        cp_link_state(&session->link) == CP_LINK_STATE_DEAD)
         return CP_SESSION_ERR_STATE;
 
-    result = cp_link_feed(&session->link, data, len, now_ms);
-    if (result != CP_LINK_OK)
-        return map_link_result(result);
+    /* Feed one byte at a time. A single byte completes at most one link frame,
+     * so ordinary frames are serviced between bytes and caller input size is
+     * not a buffer bound. A gap-closing frame can still invoke callbacks for
+     * the current frame plus all CP_LINK_MAX_REORDER contiguous reordered
+     * frames in one cp_link_feed call; CP_SESSION_RX_BUFFER is sized for that
+     * bounded burst (one partial CSM plus MAX_REORDER+1 maximum payloads).
+     * The loop is linear in the caller's byte count; each iteration consumes
+     * one byte. */
+    for (i = 0; i < len; i++) {
+        int result = cp_link_feed(&session->link, bytes + i, 1u, now_ms);
 
-    err = service_after_link(session, now_ms, true);
-    return err;
+        if (result != CP_LINK_OK) {
+            err = map_link_result(result);
+            break;
+        }
+        err = service_after_link(session, now_ms, false);
+        if (err != CP_SESSION_OK)
+            break;
+        if (cp_link_state(&session->link) == CP_LINK_STATE_DEAD)
+            break;
+    }
+    if (err != CP_SESSION_OK)
+        return err;
+
+    /* Bootstrap tick is deliberately once per public feed, not per byte. */
+    return service_after_link(session, now_ms, true);
 }
 
 cp_session_error_t cp_session_tick(cp_session_t *session, uint64_t now_ms)
@@ -1177,7 +1212,7 @@ uint64_t cp_session_next_deadline(const cp_session_t *session)
         session->boot.pending_deadline_ms < deadline)
         deadline = session->boot.pending_deadline_ms;
     if (session->receiver_active) {
-        if (session->receiver_policy_deadline_ms != 0u &&
+        if (session->receiver_policy_armed &&
             session->receiver_policy_deadline_ms < deadline)
             deadline = session->receiver_policy_deadline_ms;
     } else if (session->boot.offer_active &&
@@ -1215,8 +1250,10 @@ cp_session_error_t cp_session_set_policy(cp_session_t *session,
     session->policy_consent = consent;
     session->policy_usb_active = usb_active;
     session->policy_context = context;
-    if (session->receiver_active)
+    if (session->receiver_active) {
         session->receiver_policy_deadline_ms = session->last_now_ms;
+        session->receiver_policy_armed = true;
+    }
     return CP_SESSION_OK;
 }
 
@@ -1359,6 +1396,7 @@ cp_session_error_t cp_session_set_receiver_active(cp_session_t *session,
         }
         session->receiver_policy_deadline_ms =
             add_ms(now_ms, CP_SESSION_POLICY_RECHECK_MS);
+        session->receiver_policy_armed = true;
         {
             cp_session_error_t err = receiver_policy_check(session, now_ms);
 
@@ -1383,12 +1421,23 @@ cp_session_error_t cp_session_set_receiver_active(cp_session_t *session,
         emit_error(session, CP_SESSION_ERR_POLICY);
         return CP_SESSION_ERR_POLICY;
     }
+    {
+        cp_boot_result hold = cp_bootstrap_hold_offer(
+            &session->boot, cp_bootstrap_generation(&session->boot), now_ms);
+
+        if (hold.error != CP_BOOT_OK) {
+            session->stats.receiver_rejections++;
+            emit_error(session, CP_SESSION_ERR_RECEIVER_STATE);
+            return CP_SESSION_ERR_RECEIVER_STATE;
+        }
+    }
 
     session->receiver_active = true;
     session->receiver_generation = generation;
     session->receiver_ap_generation = session->ap_readback_generation;
     session->receiver_policy_deadline_ms =
         add_ms(now_ms, CP_SESSION_POLICY_RECHECK_MS);
+    session->receiver_policy_armed = true;
     session->last_error = CP_SESSION_OK;
     session->stats.receiver_observations++;
     emit_receiver(session);
