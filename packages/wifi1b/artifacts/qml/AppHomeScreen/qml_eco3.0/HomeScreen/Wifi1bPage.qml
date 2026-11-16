@@ -156,6 +156,7 @@ Item {
     property int sshPort: 2224
     property bool sshPortFallback: false
     property bool sshFwOpen: false
+    property bool sshUsbFwOpen: false
     property bool vendorSsh22: false
     property int secureConsole: -1
     property bool debugConsole: false
@@ -216,6 +217,7 @@ Item {
         sshPort = d.ssh_port
         sshPortFallback = d.ssh_port_fallback
         sshFwOpen = d.ssh_fw_open === true
+        sshUsbFwOpen = d.ssh_usb_fw_open === true
         vendorSsh22 = d.vendor_ssh_22
         secureConsole = d.secure_console
         debugConsole = d.debug_console
@@ -1374,11 +1376,13 @@ Item {
                     x: 24
                     y: 44
                     width: 1120
-                    text: "SSH is only reachable over the head unit's WLAN. In CarPlay AP mode "
-                          + "the address is normally 10.42.0.1. In client mode use the IP shown "
-                          + "on the Status tab. The app adds a firewall rule for wlan0 and the "
-                          + "selected port. Dropbear is static and does not depend on the "
-                          + "head unit's glibc."
+                    text: "SSH is reachable over the head unit's WLAN. With an Orange Pi "
+                          + "ECM gadget connected it is also reachable over the USB link at "
+                          + "10.55.0.2, even when WiFi is Off. In CarPlay AP mode the WLAN "
+                          + "address is normally 10.42.0.1. In client mode use the IP shown "
+                          + "on the Status tab. The app adds the selected port to wlan0 and, "
+                          + "when present, usb0. Dropbear is static and does not depend on "
+                          + "the head unit's glibc."
                     font.pixelSize: 20
                     color: "#B0B0B0"
                     wrapMode: Text.WordWrap
@@ -1410,11 +1414,13 @@ Item {
                     text: "Authorized keys: " + (root.sshActive ? "loaded" : "not loaded")
                           + "   \u00b7   Firewall: "
                           + (!root.observationsFresh ? "checking"
-                             : (root.sshFwOpen ? "open on port " + root.sshPort
+                             : ((root.sshFwOpen || root.sshUsbFwOpen)
+                                ? "open on port " + root.sshPort
                                 : "rule missing"))
                     font.pixelSize: 18
                     color: (!root.observationsFresh ? "#7A7A7A"
-                            : (root.sshFwOpen ? "#4CAF50" : "#FFB300"))
+                            : ((root.sshFwOpen || root.sshUsbFwOpen)
+                               ? "#4CAF50" : "#FFB300"))
                 }
             }
         }

@@ -29,7 +29,7 @@ fi
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/scourge-flat.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/tree"
-# Standalone V20: Battery + Tweaks/Reboot + Wifi1b only.  No WiFi reinstall and
+# Standalone V23: Battery + Tweaks/Reboot + Wifi1b only.  No WiFi reinstall and
 # no one-way migration stage; compose marks the bundle combo/standalone.
 SCOURGE_STANDALONE=1 sh "$HERE/compose.sh" "$STAGE/tree" battery,tweaks,wifi1b
 if [ ! -f "$STAGE/tree/combo/standalone" ] ||
@@ -82,8 +82,10 @@ fi
 sh -n "$STAGE/run_stuff.sh"
 cp -f "$STAGE/appcombo.tar.gz" "$STAGE/run_stuff.sh" "$OUT/"
 cat > "$OUT/README.txt" <<'EOF'
-SCOURGE standalone flat combo — Battery, Tweaks/Reboot and Wifi1b
-=================================================================
+SCOURGE AppComboFlatV23MicomStandalone — Battery, Tweaks/Reboot and Wifi1b
+=========================================================================
+Version: V23 candidate (final integration review and release gates pending)
+See docs/wireless-carplay/V23.md in the source repository for the gate ledger.
 This bundle does NOT install the WiFi app, does NOT reinstall WiFi, and has
 NO one-way migration stage. It installs Battery, Tweaks/Reboot and Wifi1b on
 the canonical standalone Battery/Tweaks base. Wifi1b also works beside an
@@ -91,6 +93,24 @@ existing WiFi app; if WiFi is still installed, this bundle leaves it untouched
 and only adds Wifi1b.
 No manual WiFi Off step is needed: the installer preflight stops only its own
 radio daemons before backing up or changing files.
+V23 networking:
+- WiFi client remains active and SSH works, but while the telematics modem
+  (rmnet_usb0/rmnet_usb1) has an IPv4 address Wifi1b installs NO WiFi default
+  route. WiFi is an SSH-only link in that state, exactly as requested.
+- Unverified legacy wlan0 defaults and ownership records are preserved.
+  Wifi1b refuses route changes rather than guessing ownership from a format.
+- If the modem data call has no IPv4 address, Wifi1b installs a bounded
+  high-metric proto-66 fallback so WiFi can still carry traffic.
+- A 30 s audit re-checks the intent: modem data present removes the WiFi
+  fallback; modem data gone restores it. Routes on other interfaces are never touched.
+- The Orange Pi ECM link is usb0 at 10.55.0.2/24 with no default route. Its
+  SSH port follows the configured Wifi1b SSH port and stays available when
+  WiFi is switched Off, so USB-SSH remains the out-of-band channel.
+- ConnMan is kept away from rmnet_usb0/1 and usb0; the drop-in is upgraded
+  from the known V21 hash without overwriting an unknown owner override.
+Advanced owners can set `client_route_policy=fallback` in
+/rw_data/wifi1b/config.conf if they need a WiFi default while the modem is
+up; the default `modem_safe` is the BlueLink-safe setting.
 OFFLINE-TESTED / WORK IN PROGRESS; not car-validated. No firmware/update stick
 present, and no vehicle deployment is authorized by this bundle.
 Copy BOTH files to the stick root: run_stuff.sh and appcombo.tar.gz. The
@@ -108,17 +128,19 @@ SCOURGE_WIFI1B_TXT/SCOURGE_WIFI_TXT or SCOURGE_AUTHORIZED_KEYS inputs.
 Treat the pair as private, store and dispose of it accordingly, and keep it
 out of any shared location. Optional iphone_wifi.txt (or wifi.txt) and
 authorized_keys at the stick root override packed inputs.
-Wifi1b SSH: user wifi1b, UID 0, key-only, port 2224, bind-all. This is a
-deliberate product default account, not a hidden credential, and it is NOT
-car-validated. Change owner keys deliberately; existing owner keys in
-/rw_data/wifi1b are preserved unless you supply a replacement.
+Wifi1b SSH: user wifi1b, UID 0, key-only, configured port (default 2224),
+bind-all. The same port is opened on the Orange Pi usb0 link, and SSH stays
+up over usb0 when WiFi is Off. This is a deliberate product default account,
+not a hidden credential, and it is NOT car-validated. Change owner keys
+deliberately; existing owner keys in /rw_data/wifi1b are preserved unless you
+supply a replacement.
 CarPlay control: the Wifi1b page's CarPlay tab switches between "Wifi1b
 wireless" and "Stock USB". Wifi1b clears the vendor wireless flag whenever
 the AP is not running, so stock USB CarPlay is restored when wireless is
 idle; the switch also stops the AP.
-BlueLink/nav: Wifi1b installs a hash-gated ConnMan drop-in that keeps ConnMan
-off rmnet_usb0 (the primary telematics data route). The modem route and
-stock USB behavior are preserved.
+BlueLink/nav: the modem default route is never replaced. The hash-gated
+ConnMan drop-in keeps ConnMan off rmnet_usb0/1 (the telematics data routes)
+and usb0 (the Orange Pi management link); stock USB behavior is preserved.
 Icons are best-effort; critical files and readback checks still fail closed.
 Beeps: 1 start, 2 per failed stage, 5 success, 3 finished with failures.
 Read wrapper_result.txt, run_stuff_result.txt and *_result.txt.

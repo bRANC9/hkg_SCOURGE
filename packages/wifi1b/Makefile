@@ -13,6 +13,7 @@ test: payload test-carplay
 	python3 tests/test_qml1b.py
 	python3 tests/test_qmlpatch.py
 	python3 tests/test_daemon1b.py
+	python3 tests/test_usb0_ssh.py
 	python3 tests/test_bt_readback.py
 	sh tests/test_apconfig.sh
 	python3 tests/test_dhcp.py

@@ -200,6 +200,72 @@ def ctest_json(binary: Path, *args: str, check: bool = True) -> dict:
         return {"ok": False, "raw": result.stdout, "stderr": result.stderr}
 
 
+def test_modem_safe(ctest: Path) -> None:
+    """modem_safe suppresses the WiFi default while rmnet has IPv4 and
+    restores the high-metric fallback when the modem data call is gone."""
+    subprocess.run(["ip", "-4", "route", "del", "default", "dev", "modem0"],
+                   check=False, capture_output=True)
+    subprocess.run(["ip", "link", "add", "rmnet_usb0", "type", "dummy"],
+                   check=False, capture_output=True)
+    subprocess.run(["ip", "link", "set", "rmnet_usb0", "up"],
+                   check=False, capture_output=True)
+    run(["ip", "-4", "addr", "replace", "198.51.100.135/28",
+         "dev", "rmnet_usb0"])
+    run(["ip", "-4", "route", "add", "default", "via", "198.51.100.136",
+         "dev", "rmnet_usb0", "metric", "0"])
+
+    result = ctest_json(ctest, "--route-install", "10.42.0.1", "lo")
+    assert result["ok"] is True and result["modem"] is True, result
+    assert result["wifi_default"] is False and result["route_ok"] is True, result
+    assert result["metric"] == 0 and result["proto"] == 0, result
+    assert not owned_route_lines()
+    assert any("rmnet_usb0" in line for line in route_lines())
+
+    run(["ip", "-4", "addr", "del", "198.51.100.135/28", "dev", "rmnet_usb0"])
+    # Deleting the address may already remove its default route.
+    subprocess.run(["ip", "-4", "route", "del", "default",
+                    "via", "198.51.100.136", "dev", "rmnet_usb0",
+                    "metric", "0"], check=False, capture_output=True)
+    result = ctest_json(ctest, "--route-install", "10.42.0.1", "lo")
+    assert result["ok"] is True and result["modem"] is False, result
+    assert result["wifi_default"] is True and result["metric"] == 1000, result
+    owned = owned_route_lines()
+    assert len(owned) == 1 and "proto 66" in owned[0], owned
+    assert ctest_json(ctest, "--route-cleanup")["ok"] is True
+    subprocess.run(["ip", "link", "del", "rmnet_usb0"],
+                   check=False, capture_output=True)
+    setup_modem_default(100)
+    print("PASS: modem_safe suppresses/restores the WiFi default by modem state")
+
+
+def test_route_audit_no_flap(ctest: Path, app: Path) -> None:
+    """The 30 s audit must recognise its own dev-qualified wlan0 route and
+    not delete/re-add it.  The target iproute2 omits `dev wlan0` from a
+    filtered query, so this uses a real dummy wlan0 and the unfiltered table."""
+    subprocess.run(["ip", "link", "add", "wlan0", "type", "dummy"],
+                   check=False, capture_output=True)
+    subprocess.run(["ip", "link", "set", "wlan0", "up"],
+                   check=False, capture_output=True)
+    run(["ip", "-4", "addr", "replace", "10.42.0.2/24", "dev", "wlan0"])
+    try:
+        result = ctest_json(ctest, "--route-install", "10.42.0.1", "wlan0")
+        assert result["ok"] is True and result["wifi_default"] is True, result
+        ledger = app / "client.route"
+        before = ledger.stat().st_ino
+        first = ctest_json(ctest, "--route-audit")
+        second = ctest_json(ctest, "--route-audit")
+        assert first["ok"] is True and second["ok"] is True
+        assert first["wifi_default"] is True and second["wifi_default"] is True
+        assert ledger.stat().st_ino == before, (
+            "audit rewrote the owned route/ledger; dev-qualified matching failed")
+        assert any("proto 66" in line for line in owned_route_lines())
+        assert ctest_json(ctest, "--route-cleanup")["ok"] is True
+    finally:
+        subprocess.run(["ip", "link", "del", "wlan0"],
+                       check=False, capture_output=True)
+    print("PASS: route audit recognises its own wlan0 default without flapping")
+
+
 def test_client_apply(binary: Path, ctest: Path, env: dict) -> None:
     apply_env = dict(env)
     apply_env.pop("WIFI1B_DHCP_TEST_NOAPPLY", None)
@@ -849,6 +915,8 @@ def inner(isolated: bool) -> int:
             test_client_apply(binary, ctest, env)
             test_route_policy(ctest)
             test_nak_destination_netns(binary, env)
+            test_modem_safe(ctest)
+            test_route_audit_no_flap(ctest, app)
             test_raw_client(ctest, env, tmp_path)
         else:
             print("SKIP apply/readback/route/raw checks: requires the network namespace")

@@ -849,9 +849,22 @@ EOF
 cat <<'EOF'
 Optional inputs: iphone_wifi.txt (or wifi.txt) and authorized_keys at the
 stick ROOT. They are imported without activating WLAN, a mode or SSH.
-Wifi1b SSH: user wifi1b, UID 0, key-only, port 2224, bind-all. This is a
-deliberate product default account and is NOT car-validated. Owner keys
-already present in /rw_data/wifi1b are preserved unless replaced here.
+Wifi1b SSH: user wifi1b, UID 0, key-only, configured port (default 2224),
+bind-all. This is a deliberate product default account and is NOT
+car-validated. Owner keys already present in /rw_data/wifi1b are preserved
+unless replaced here.
+
+V23 BlueLink/Pi networking:
+- While rmnet_usb0/rmnet_usb1 has an IPv4 address, Wifi1b installs no WiFi
+  default route. WiFi remains an SSH-only link; the modem default and the
+  vendor per-server host routes stay authoritative.
+- Unverified legacy wlan0 defaults/records are preserved and route changes
+  refused rather than treating a familiar format as ownership proof.
+  A 30 s audit restores/removes the bounded proto-66 fallback as modem data
+  appears/disappears. Routes on other interfaces are never touched.
+- The Orange Pi ECM link is usb0 at 10.55.0.2/24 with no default route. SSH
+  follows the configured port and stays available over usb0 when WiFi is
+  switched Off. ConnMan is kept off usb0/rmnet_usb0..7.
 EOF
 else
 cat <<'EOF'

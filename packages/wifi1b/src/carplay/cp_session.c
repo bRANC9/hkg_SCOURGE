@@ -416,6 +416,7 @@ static void set_state_from_boot(cp_session_t *session,
         break;
     case CP_BOOT_EV_AUTH_CERT_SENT:
     case CP_BOOT_EV_AUTH_RESPONSE_SENT:
+    case CP_BOOT_EV_AUTH_PENDING:
         state = CP_SESSION_STATE_AUTHENTICATING;
         break;
     case CP_BOOT_EV_AUTHENTICATED:
@@ -447,7 +448,11 @@ static void set_state_from_boot(cp_session_t *session,
             state = CP_SESSION_STATE_AUTHENTICATED;
             break;
         case CP_BOOT_STATE_IDENTIFIED:
-            state = CP_SESSION_STATE_IDENTIFIED;
+            state = ((session->boot.auth_request.op != CP_BOOT_AUTH_OP_NONE &&
+                      session->boot.auth_request.generation == session->boot.generation) ||
+                     session->boot.auth_state == CP_BOOT_AUTH_CERT_SENT ||
+                     session->boot.auth_state == CP_BOOT_AUTH_RESPONSE_SENT) ?
+                    CP_SESSION_STATE_AUTHENTICATING : CP_SESSION_STATE_IDENTIFIED;
             break;
         case CP_BOOT_STATE_IDENTIFYING:
             state = CP_SESSION_STATE_IDENTIFYING;
@@ -485,7 +490,11 @@ static cp_session_state_t state_from_current_boot(const cp_session_t *session)
     case CP_BOOT_STATE_AUTHENTICATED:
         return CP_SESSION_STATE_AUTHENTICATED;
     case CP_BOOT_STATE_IDENTIFIED:
-        return CP_SESSION_STATE_IDENTIFIED;
+        return ((session->boot.auth_request.op != CP_BOOT_AUTH_OP_NONE &&
+                 session->boot.auth_request.generation == session->boot.generation) ||
+                session->boot.auth_state == CP_BOOT_AUTH_CERT_SENT ||
+                session->boot.auth_state == CP_BOOT_AUTH_RESPONSE_SENT) ?
+               CP_SESSION_STATE_AUTHENTICATING : CP_SESSION_STATE_IDENTIFIED;
     case CP_BOOT_STATE_IDENTIFYING:
         return CP_SESSION_STATE_IDENTIFYING;
     case CP_BOOT_STATE_DISCONNECTED:
@@ -1207,6 +1216,10 @@ uint64_t cp_session_next_deadline(const cp_session_t *session)
         return UINT64_MAX;
 
     deadline = cp_link_next_deadline(&session->link);
+    if (session->boot.auth_request.op != CP_BOOT_AUTH_OP_NONE &&
+        session->boot.auth_request.generation == session->boot.generation &&
+        session->boot.auth_request.deadline_ms < deadline)
+        deadline = session->boot.auth_request.deadline_ms;
     if (session->boot.pending_start &&
         session->boot.pending_deadline_ms != 0u &&
         session->boot.pending_deadline_ms < deadline)
@@ -1232,6 +1245,49 @@ cp_session_error_t cp_session_set_auth_provider(
         return CP_SESSION_ERR_ARGUMENT;
     error = cp_bootstrap_set_auth_provider(&session->boot, provider);
     return error == CP_BOOT_OK ? CP_SESSION_OK : CP_SESSION_ERR_ARGUMENT;
+}
+
+cp_session_error_t cp_session_set_async_auth(cp_session_t *session, bool enabled)
+{
+    if (session == NULL || !session->initialized)
+        return CP_SESSION_ERR_ARGUMENT;
+    return cp_bootstrap_set_async_auth(&session->boot, enabled) == CP_BOOT_OK ?
+        CP_SESSION_OK : CP_SESSION_ERR_STATE;
+}
+
+bool cp_session_auth_request(const cp_session_t *session,
+                             cp_boot_auth_request *request)
+{
+    return session != NULL && session->initialized &&
+           cp_bootstrap_auth_request(&session->boot, request);
+}
+
+cp_session_error_t cp_session_auth_complete(
+    cp_session_t *session, const cp_boot_auth_request *request, bool success,
+    const uint8_t *blob, size_t blob_len, uint64_t now_ms)
+{
+    cp_boot_auth_request pending;
+    uint8_t out[CP_WIRE_MAX_FRAME];
+    cp_boot_result result;
+    cp_session_error_t err;
+    uint64_t generation;
+    if (request == NULL || !cp_session_auth_request(session, &pending))
+        return CP_SESSION_ERR_STATE;
+    if (request->generation != pending.generation ||
+        request->token != pending.token || request->op != pending.op)
+        return CP_SESSION_ERR_GENERATION_MISMATCH;
+    if (!clock_accept(session, now_ms))
+        return CP_SESSION_ERR_CLOCK_ROLLBACK;
+    generation = session->boot.generation;
+    result = cp_bootstrap_auth_complete(&session->boot, request->generation,
+        request->token, request->op, success, blob, blob_len, now_ms,
+        out, sizeof(out));
+    err = handle_boot_result(session, result, generation, out, result.out_len,
+                             now_ms);
+    if (err != CP_SESSION_OK) return err;
+    err = flush_tx(session, now_ms);
+    refresh_link_stats(session);
+    return err != CP_SESSION_OK ? err : map_boot_error(result.error);
 }
 
 cp_session_error_t cp_session_set_policy(cp_session_t *session,

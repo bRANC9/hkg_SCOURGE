@@ -125,7 +125,8 @@ for _dir in "$QML_DIR" "$QML_DIR/HomeScreen" "$QML_DIR/component" \
              "$(dirname /etc/passwd)" "$(dirname /tmp/shells)" \
              "$RW_DIR" "$RW_DIR/backup" "$RW_DIR/bin" "$RW_DIR/ssh" \
              "$RW_DIR/home" "$RW_DIR/home/.ssh" "$RW_DIR/backup/accounts" \
-             "$USB_DIR/qml_before" "$RUN_DIR/wifi1b" "$RUN_DIR/wifi" \
+              "$USB_DIR/qml_before" "$RUN_DIR/wifi1b" "$RUN_DIR/wifi" \
+              "$RUN_DIR/udev" "$RUN_DIR/udev/rules.d" \
              "$USB_DIR/qml_before/HomeScreen" "$USB_DIR/qml_before/component" \
              /app/data/vbt /rw_data/app_data/vbt; do
     runtime_cleanup_safe_dir_path "$_dir" ||
@@ -164,12 +165,15 @@ for _leaf in "$RW_DIR/wifi1b_daemon" "$RW_DIR/status.json" "$RW_DIR/config.conf"
              "$RW_DIR/wpa_supplicant.pid" "$RW_DIR/dhcp.leases" \
              "$RW_DIR/dhcpd.pid" "$RW_DIR/dhcpd.log" \
              "$RW_DIR/client.route" "$RW_DIR/client.owner" \
-             "$RW_DIR/client.lineage" "$RW_DIR/scan.json" \
+              "$RW_DIR/client.lineage" "$RW_DIR/scan.json" \
+              "$RW_DIR/usb0.owner" \
              "$RW_DIR/bt.state" "$RW_DIR/ssh.bound" "$RW_DIR/home.json" \
              "$RW_DIR/apply.result" "$RW_DIR/ap.station-ip" \
              "$RW_DIR/sigterm-ready" "$RW_DIR/ssh.log" "$RW_DIR/daemon.lock" \
              "$RW_DIR/bin/wifi1b_qmlpatch" \
-             "$RW_DIR/bin/dropbearmulti" \
+              "$RW_DIR/bin/dropbearmulti" \
+              "$RW_DIR/bin/opi-usb0-up.sh" \
+              "$RUN_DIR/udev/rules.d/99-opi-usb0.rules" \
              "$RW_DIR/ssh/authorized_keys" \
              "$RW_DIR/ssh/dropbear.pid" \
              "$RW_DIR/ssh/dropbear_ed25519_host_key" \
@@ -194,11 +198,14 @@ for _atomic in "$RW_DIR/config.conf" "$RW_DIR/wifi.txt" \
                "$RW_DIR/status.json" "$RW_DIR/wpa_supplicant.conf" \
                "$RW_DIR/wpa_supplicant.pid" "$RW_DIR/dhcp.leases" \
                "$RW_DIR/dhcpd.pid" "$RW_DIR/client.route" \
-               "$RW_DIR/client.owner" "$RW_DIR/client.lineage" \
+                "$RW_DIR/client.owner" "$RW_DIR/client.lineage" \
+                "$RW_DIR/usb0.owner" \
                "$RW_DIR/scan.json" "$RW_DIR/bt.state" \
                "$RW_DIR/ssh.bound" "$RW_DIR/home.json" \
                "$RW_DIR/apply.result" "$RW_DIR/ap.station-ip" \
-               "$RW_DIR/sigterm-ready" "$RW_DIR/ssh/authorized_keys" \
+                "$RW_DIR/sigterm-ready" "$RW_DIR/ssh/authorized_keys" \
+                "$RW_DIR/bin/opi-usb0-up.sh" \
+                "$RUN_DIR/udev/rules.d/99-opi-usb0.rules" \
                "$RUN_DIR/wifi1b/active"; do
     for _tmp in "$_atomic".tmp.*; do
         [ -e "$_tmp" ] || [ -L "$_tmp" ] || continue
@@ -321,6 +328,8 @@ else
     log "kept independently changed/foreign wifi1b service; not stopping or disabling it"
 fi
 if [ "$service_may_stop" = 1 ]; then
+    [ "$restore_errors" -eq 0 ] && [ "$service_restore_error" -eq 0 ] ||
+        fail "restore prerequisites failed; preserve USB ownership proof and runtime"
     if [ -x "$RW_DIR/wifi1b_daemon" ]; then
         "$RW_DIR/wifi1b_daemon" --mode off >> "$LOG" 2>&1 || fail "Wifi1b network cleanup failed; retain daemon for recovery"
     fi
@@ -351,8 +360,18 @@ if [ "$service_may_stop" = 1 ]; then
         sleep 1
     done
     if owned_wifi1b_pids; then
-        restore_failed "owned Wifi1b process survived SIGTERM"
+        fail "owned Wifi1b process survived SIGTERM; retain runtime for recovery"
     fi
+    # Use this verified payload's cleanup implementation: an older installed
+    # daemon may not understand the new option and would start its normal loop.
+    # Retain runtime/backup if exact USB ownership or absence is not confirmed.
+    [ "$restore_errors" -eq 0 ] && [ "$service_restore_error" -eq 0 ] ||
+        fail "restore prerequisites failed; preserve USB ownership proof and runtime"
+    runtime_cleanup_safe_regular_path "$PAYLOAD/bin/wifi1b_daemon" &&
+        [ -x "$PAYLOAD/bin/wifi1b_daemon" ] ||
+        fail "usb0 cleanup unavailable; retain backup/runtime for recovery"
+    "$PAYLOAD/bin/wifi1b_daemon" --usb0-cleanup >> "$LOG" 2>&1 ||
+        fail "usb0 cleanup failed; retain backup/runtime for recovery"
 else
     log "kept foreign-modified service process; not stopping or cleaning its network state"
 fi

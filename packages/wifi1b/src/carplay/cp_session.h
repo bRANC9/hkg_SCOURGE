@@ -48,7 +48,11 @@
  * pure wrapper cannot offload that work or guarantee SPP/link ACK/output
  * deadlines while a provider runs. A broker must offload authentication or
  * otherwise keep servicing link output and ACKs around the blocking call;
- * this module alone makes no realtime guarantee. The wrapper does not observe
+ * this module alone makes no realtime guarantee. Opt-in deferred mode
+ * (cp_session_set_async_auth) instead exposes bounded generation/token-bound
+ * requests and accepts explicit completions; it never calls these synchronous
+ * providers. cp_auth_broker services the nonblocking helper and link deadlines
+ * in that mode. The wrapper does not observe
  * elapsed time during a callback; the next call must supply fresh monotonic
  * milliseconds.
  *
@@ -291,6 +295,12 @@ uint64_t cp_session_next_deadline(const cp_session_t *session);
 
 cp_session_error_t cp_session_set_auth_provider(
     cp_session_t *session, const cp_boot_auth_provider *provider);
+cp_session_error_t cp_session_set_async_auth(cp_session_t *session, bool enabled);
+bool cp_session_auth_request(const cp_session_t *session,
+                             cp_boot_auth_request *request);
+cp_session_error_t cp_session_auth_complete(
+    cp_session_t *session, const cp_boot_auth_request *request, bool success,
+    const uint8_t *blob, size_t blob_len, uint64_t now_ms);
 cp_session_error_t cp_session_set_policy(cp_session_t *session,
                                          cp_boot_consent_fn consent,
                                          cp_boot_usb_active_fn usb_active,

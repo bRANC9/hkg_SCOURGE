@@ -286,6 +286,29 @@ cp_boot_error cp_bootstrap_set_policy(cp_bootstrap *session,
     return CP_BOOT_OK;
 }
 
+cp_boot_error cp_bootstrap_set_async_auth(cp_bootstrap *session, bool enabled)
+{
+    if (session == NULL) return CP_BOOT_ERR_ARGUMENT;
+    if (session->identification_sent || session->identified ||
+        session->auth_state != CP_BOOT_AUTH_NONE)
+        return CP_BOOT_ERR_ORDER;
+    session->async_auth = enabled;
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    return CP_BOOT_OK;
+}
+
+bool cp_bootstrap_auth_request(const cp_bootstrap *session,
+                               cp_boot_auth_request *request)
+{
+    if (session == NULL || request == NULL || !session->async_auth ||
+        session->auth_request.op == CP_BOOT_AUTH_OP_NONE ||
+        session->auth_request.generation != session->generation ||
+        !session->identified || session->state == CP_BOOT_STATE_FAILED)
+        return false;
+    *request = session->auth_request;
+    return true;
+}
+
 static void clear_pending(cp_bootstrap *session)
 {
     session->pending_start = false;
@@ -314,6 +337,7 @@ static void reflect_invalidated_state(cp_bootstrap *session)
 
 static void invalidate_offer(cp_bootstrap *session)
 {
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
     clear_pending(session);
     clear_offer(session);
     session->generation++;
@@ -331,6 +355,7 @@ static void fail_identification(cp_bootstrap *session, cp_boot_event event,
     session->identified = false;
     session->auth_state = CP_BOOT_AUTH_NONE;
     session->auth_exchanges = 0u;
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
     clear_pending(session);
     clear_offer(session);
     session->generation++;
@@ -342,10 +367,85 @@ static void fail_authentication(cp_bootstrap *session, cp_boot_event event,
 {
     session->auth_state = CP_BOOT_AUTH_FAILED;
     session->state = CP_BOOT_STATE_FAILED;
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
     clear_pending(session);
     clear_offer(session);
     session->generation++;
     *result = make_result(session, event, error, 0u);
+}
+
+static cp_boot_result begin_async_auth(cp_bootstrap *session,
+                                      cp_boot_auth_op op,
+                                      const uint8_t *challenge, size_t len)
+{
+    cp_boot_result result;
+    if (session->auth_request.op != CP_BOOT_AUTH_OP_NONE &&
+        session->auth_request.generation == session->generation) {
+        if (session->auth_request.op == op &&
+            session->auth_request.challenge_len == len &&
+            (len == 0u || !memcmp(session->auth_request.challenge, challenge, len)))
+            return make_result(session, CP_BOOT_EV_AUTH_PENDING, CP_BOOT_OK, 0u);
+        fail_authentication(session, CP_BOOT_EV_AUTH_FAILED, CP_BOOT_ERR_ORDER,
+                            &result);
+        return result;
+    }
+    if (len > sizeof(session->auth_request.challenge) ||
+        session->next_auth_token == UINT64_MAX ||
+        session->last_now_ms > UINT64_MAX - CP_BOOT_ASYNC_AUTH_TIMEOUT_MS) {
+        fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
+                            CP_BOOT_ERR_AUTH_PROVIDER, &result);
+        return result;
+    }
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    session->auth_request.op = op;
+    session->auth_request.generation = session->generation;
+    session->auth_request.token = ++session->next_auth_token;
+    session->auth_request.deadline_ms = session->last_now_ms +
+                                       CP_BOOT_ASYNC_AUTH_TIMEOUT_MS;
+    session->auth_request.challenge_len = len;
+    if (len) memcpy(session->auth_request.challenge, challenge, len);
+    session->auth_exchanges++;
+    return make_result(session, CP_BOOT_EV_AUTH_PENDING, CP_BOOT_OK, 0u);
+}
+
+cp_boot_result cp_bootstrap_auth_complete(
+    cp_bootstrap *session, uint64_t generation, uint64_t token,
+    cp_boot_auth_op op, bool success, const uint8_t *blob, size_t blob_len,
+    uint64_t now_ms, uint8_t *out, size_t out_cap)
+{
+    cp_boot_auth_request request;
+    cp_boot_result result;
+    size_t out_len = 0u;
+    cp_wire_status status;
+    if (!cp_bootstrap_auth_request(session, &request) ||
+        generation != request.generation || token != request.token ||
+        op != request.op)
+        return make_result(session, CP_BOOT_EV_ERROR, CP_BOOT_ERR_ORDER, 0u);
+    if (!accept_time(session, now_ms))
+        return error_result(session, CP_BOOT_ERR_ARGUMENT);
+    if (now_ms >= request.deadline_ms || !success || blob == NULL ||
+        blob_len == 0u || blob_len > CP_BOOT_MAX_AUTH_BLOB) {
+        fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
+                            now_ms >= request.deadline_ms ? CP_BOOT_ERR_TIMEOUT :
+                            CP_BOOT_ERR_AUTH_PROVIDER, &result);
+        return result;
+    }
+    status = op == CP_BOOT_AUTH_OP_CERTIFICATE ?
+        cp_wire_encode_auth_certificate(blob, blob_len, out, out_cap, &out_len) :
+        cp_wire_encode_auth_response(blob, blob_len, out, out_cap, &out_len);
+    if (status == CP_WIRE_ERR_BUFFER || status == CP_WIRE_ERR_ARGUMENT)
+        return error_result(session, CP_BOOT_ERR_BUFFER);
+    if (status != CP_WIRE_OK) {
+        fail_authentication(session, CP_BOOT_EV_AUTH_FAILED, CP_BOOT_ERR_WIRE,
+                            &result);
+        return result;
+    }
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
+    session->auth_state = op == CP_BOOT_AUTH_OP_CERTIFICATE ?
+        CP_BOOT_AUTH_CERT_SENT : CP_BOOT_AUTH_RESPONSE_SENT;
+    return make_result(session, op == CP_BOOT_AUTH_OP_CERTIFICATE ?
+                       CP_BOOT_EV_AUTH_CERT_SENT : CP_BOOT_EV_AUTH_RESPONSE_SENT,
+                       CP_BOOT_OK, out_len);
 }
 
 static bool id_equal_ci(const char *a, const char *b)
@@ -749,6 +849,8 @@ static cp_boot_result handle_auth_certificate_request(
                             CP_BOOT_ERR_AUTH_FAILED, &result);
         return result;
     }
+    if (session->async_auth)
+        return begin_async_auth(session, CP_BOOT_AUTH_OP_CERTIFICATE, NULL, 0u);
     if (session->auth_provider.certificate == NULL) {
         fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
                             CP_BOOT_ERR_AUTH_PROVIDER, &result);
@@ -819,6 +921,9 @@ static cp_boot_result handle_auth_challenge_request(cp_bootstrap *session,
                             CP_BOOT_ERR_AUTH_FAILED, &result);
         return result;
     }
+    if (session->async_auth)
+        return begin_async_auth(session, CP_BOOT_AUTH_OP_SIGNATURE,
+                                challenge, challenge_len);
     if (session->auth_provider.signature == NULL) {
         fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
                             CP_BOOT_ERR_AUTH_PROVIDER, &result);
@@ -1246,6 +1351,15 @@ cp_boot_result cp_bootstrap_tick(cp_bootstrap *session, uint64_t now_ms,
     if (!accept_time(session, now_ms)) {
         return error_result(session, CP_BOOT_ERR_ARGUMENT);
     }
+    if (session->auth_request.op != CP_BOOT_AUTH_OP_NONE) {
+        if (session->auth_request.generation != session->generation) {
+            memset(&session->auth_request, 0, sizeof(session->auth_request));
+        } else if (now_ms >= session->auth_request.deadline_ms) {
+            fail_authentication(session, CP_BOOT_EV_AUTH_FAILED,
+                                CP_BOOT_ERR_TIMEOUT, &result);
+            return result;
+        }
+    }
     if (session->pending_start) {
         if (session->pending_generation != session->generation) {
             clear_pending(session);
@@ -1465,6 +1579,7 @@ cp_boot_result cp_bootstrap_cancel(cp_bootstrap *session, uint64_t now_ms)
     if (!accept_time(session, now_ms)) {
         return error_result(session, CP_BOOT_ERR_ARGUMENT);
     }
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
     clear_pending(session);
     clear_offer(session);
     session->generation++;
@@ -1484,6 +1599,7 @@ cp_boot_result cp_bootstrap_transport_reset(cp_bootstrap *session,
     if (!accept_time(session, now_ms)) {
         return error_result(session, CP_BOOT_ERR_ARGUMENT);
     }
+    memset(&session->auth_request, 0, sizeof(session->auth_request));
     clear_pending(session);
     clear_offer(session);
     session->generation++;

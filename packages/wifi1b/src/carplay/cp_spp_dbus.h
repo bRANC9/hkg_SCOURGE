@@ -11,6 +11,7 @@
  * The caller owns the event loop: cp_spp_dbus_tick() performs only
  * zero-timeout libdbus I/O/dispatch.  There are no blocking method calls in
  * this module.  All pending operations are fixed-bound and carry deadlines.
+ * Single-threaded use: callbacks must not re-enter or close this engine.
  *
  * State:
  *   OPEN -> VALIDATING -> LISTENING -> CONNECTED
@@ -164,6 +165,9 @@ int cp_spp_dbus_adapter_validated(const cp_spp_dbus *engine);
 int cp_spp_dbus_listener_owned(const cp_spp_dbus *engine);
 size_t cp_spp_dbus_tx_queued(const cp_spp_dbus *engine);
 const char *cp_spp_dbus_error(const cp_spp_dbus *engine);
+/* Copy the peer bound by the validated CommonAPI service/object identity.
+ * No hook datagram is allowed to choose this identity. Requires cap >= 18. */
+int cp_spp_dbus_peer(const cp_spp_dbus *engine, char *peer, size_t cap);
 
 /* Best-effort StopListenSPP only if owned, then close the private connection.
  * This never blocks and never tears down a listener it did not create. */

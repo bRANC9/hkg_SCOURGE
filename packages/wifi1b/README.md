@@ -27,6 +27,20 @@ vehicle without explicit owner authorization.
 - Daemon starts idle; importing credentials never activates anything
 - Restore puts back the original shared QML and the original
   service file/enabled/active state from the install transaction
+- V23 BlueLink-safe client routing: while `rmnet_usb0`/`rmnet_usb1` has an
+  IPv4 address, no WiFi default route is installed. WiFi remains an SSH-only
+  link. Unverified legacy wlan0 defaults and ownership records are preserved;
+  route changes fail closed rather than assuming ownership. A 30 s audit
+  restores/removes the bounded proto-66 fallback as the
+  modem data state changes; routes on other interfaces are never touched.
+- V23 Orange Pi USB-SSH: the ECM link is `usb0` at `10.55.0.2/24` with no
+  default route. The generated udev rule and helper follow the configured
+  Wifi1b SSH port, and dropbear stays available over `usb0` when WiFi is Off.
+  ConnMan is kept off `usb0` so it cannot overwrite the static link.
+- `client_route_policy=modem_safe` is the default; `fallback` is available in
+  `config.conf` for owners who need a WiFi default while the modem is up.
+- The ConnMan drop-in accepts the exact known V21 file for an over-the-top
+  upgrade; unknown owner overrides are still refused.
 
 The `wifi1b` account is a deliberate product default with UID 0, not a hidden
 credential. Owner keys already present in `/rw_data/wifi1b` are preserved

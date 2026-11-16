@@ -119,6 +119,13 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--import-file")) return 1;   /* import failure */
         if (!strcmp(argv[i], "--mode")) return 0;          /* one-shot mode */
+        if (!strcmp(argv[i], "--usb0-cleanup")) {
+            const char *called = getenv("WIFI1B_STUB_USB0_CALLED_FILE");
+            if (called) { FILE *f = fopen(called, "w"); if (f) { fputs("called\n", f); fclose(f); } }
+            const char *fail = getenv("WIFI1B_STUB_USB0_FAIL");
+            printf("WIFI1B_USB0_CLEANUP\nstatus=%s\n", fail ? "FAIL" : "OK");
+            return fail ? 1 : 0;
+        }
         if (!strcmp(argv[i], "--status")) return 0;
         if (!strcmp(argv[i], "--choose-port")) { printf("{\"ok\":true,\"port\":2224}\n"); return 0; }
     }
@@ -152,6 +159,11 @@ with (root / 'commands.log').open('a') as f:
     f.write(name + ' ' + repr(args) + '\n')
 def save():
     statefile.write_text(json.dumps(state))
+if name == 'md5sum':
+    if len(args) == 1 and args[0].endswith('/lib/systemd/system/connman.service'):
+        print('58f77230485566943fc8b7a38175034a  ' + args[0])
+        sys.exit(0)
+    os.execv('/usr/bin/md5sum', ['md5sum', *args])
 if name in ('sleep', 'mount', 'sync', 'chown', 'setfattr', 'iptables', 'ip6tables'):
     sys.exit(0)
 if name == 'date':
@@ -251,11 +263,16 @@ class Fixture:
         fake.write_text(FAKE)
         fake.chmod(0o755)
         for name in ("systemctl", "sleep", "mount", "sync", "chown", "date", "getfattr",
-                     "setfattr", "chsmack", "cp", "pidof", "dbus-send", "iptables", "ip6tables"):
+                     "setfattr", "chsmack", "cp", "pidof", "dbus-send", "iptables",
+                     "ip6tables", "md5sum"):
             (self.bin / name).symlink_to(fake)
-        for directory in ("etc/systemd/system", "tmp", "proc", "run/wifi1b", "home",
-                          "rw_data/wifi1b", "rw_data/wifi", "root/cache", "app/share/AppHomeScreen"):
+        for directory in ("etc/systemd/system", "etc/systemd/system/connman.service.d",
+                          "lib/systemd/system", "tmp", "proc", "run/wifi1b", "home",
+                          "rw_data/wifi1b", "rw_data/wifi", "root/cache",
+                          "app/share/AppHomeScreen"):
             (self.root / directory).mkdir(parents=True, exist_ok=True)
+        (self.root / "lib/systemd/system/connman.service").write_text(
+            "# fixture vendor connman unit\n[Service]\nExecStart=/bin/true\n")
         (self.root / "proc/mounts").write_text(f'device {self.root} ext4 rw 0 0\n')
         (self.root / "tmp/shells").write_text("")
         (self.root / "etc/passwd").write_text("root:x:0:0:root:/root:/bin/sh\ncar:x:0:0:Car User:/rw_data/wifi/home:/bin/sh\n")
@@ -343,7 +360,10 @@ class Fixture:
                         WIFI1B_RW_DIR=str(self.rw2),
                         WIFI1B_QML_ROOT=str(self.qml.parent),
                         CLEANUP_PROC_ROOT=str(self.root / "proc"),
-                        WIFI1B_SERVICE=str(self.root / "etc/systemd/system/wifi1b-daemon.service"))
+                        WIFI1B_SERVICE=str(self.root / "etc/systemd/system/wifi1b-daemon.service"),
+                        WIFI1B_CONNMAN_UNIT=str(self.root / "lib/systemd/system/connman.service"),
+                        WIFI1B_CONNMAN_DROPIN=str(
+                            self.root / "etc/systemd/system/connman.service.d/60-scourge-nodevice.conf"))
         state = {"active": {}, "enabled": {"wifi-daemon.service": "enabled"},
                  "home_pid": 1000, "serial": 1000}
         (self.root / "state.json").write_text(json.dumps(state))
@@ -896,6 +916,34 @@ def exercise_service_restore() -> None:
 exercise_service_restore()
 print("PASS: pre-existing service bytes and enabled/disabled/masked/active state restored; restore failure reported; foreign-modified service preserves runtime and FAILs")
 
+V21_CONNMAN = """# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+# SCOURGE_CONNMAN_NODEVICE=1
+# Keep ConnMan away from the telematics modem interfaces.  The vendor unit
+# already excludes rmnet_usb1..7 and ncm0; rmnet_usb0 carries the primary
+# BlueLink/nav data route and must not be reconfigured by ConnMan when the
+# WiFi app starts it for client or AP mode.
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/connmand -n --nodnsproxy --nobacktrace --nodevice=rmnet_usb0,rmnet_usb1,rmnet_usb2,rmnet_usb3,rmnet_usb4,rmnet_usb5,rmnet_usb6,rmnet_usb7,wwan0,usb0,dbg0,dbg1,dbg2,can0,eth1,eth2,ncmF0,usb1,eth0,tem0,br0,br0:0,ncm0
+"""
+
+with tempfile.TemporaryDirectory(prefix="wifi1b-connman-", dir="/tmp/opencode") as directory:
+    fixture = Fixture(Path(directory), tweaks=True)
+    dropin = (fixture.root /
+              "etc/systemd/system/connman.service.d/60-scourge-nodevice.conf")
+    payload_dropin = fixture.usb / "payload/systemd/60-connman-nodevice.conf"
+    report = fixture.run(fixture.install)
+    assert "status=OK" in report or "status=REBOOT_REQUIRED" in report, report
+    assert dropin.read_bytes() == payload_dropin.read_bytes()
+    dropin.write_text(V21_CONNMAN)
+    report = fixture.run(fixture.install)
+    assert "status=OK" in report or "status=REBOOT_REQUIRED" in report, report
+    assert dropin.read_bytes() == payload_dropin.read_bytes(), "known V21 drop-in not upgraded"
+    dropin.write_text("# owner changed this after install\n[Service]\nExecStart=/bin/true\n")
+    fixture.run(fixture.install, expect_fail=True)
+print("PASS: known V21 ConnMan drop-in upgrades; unknown owner override still refused")
+
 for prior in ('identical', 'unknown'):
     with tempfile.TemporaryDirectory(prefix='wifi1b-mdns-', dir='/tmp/opencode') as directory:
         fixture = Fixture(Path(directory), tweaks=True)
@@ -971,12 +1019,18 @@ def exercise_install_leaf_destinations() -> None:
 
     for rel in ("daemon.log", "wpa_supplicant.log", "wpa_supplicant.pid",
                 "dhcp.leases", "dhcpd.pid", "dhcpd.log", "client.route",
-                "client.owner", "client.lineage", "scan.json", "bt.state",
+                "client.owner", "client.lineage", "usb0.owner", "scan.json", "bt.state",
                 "ssh.bound", "home.json", "apply.result", "ap.station-ip",
                 "ssh.log", "daemon.lock", "ssh/dropbear.pid",
                 "ssh/dropbear_ed25519_host_key",
                 "ssh/dropbear_rsa_host_key"):
         cases.append((rel.replace("/", "-").replace(".", "-"), _leaf_link(rel)))
+    cases.append(("usb0-helper", _leaf_link("bin/opi-usb0-up.sh")))
+    def rule_link(f, v):
+        rule = f.root / "run/udev/rules.d/99-opi-usb0.rules"
+        rule.parent.mkdir(parents=True)
+        rule.symlink_to(v)
+    cases.append(("usb0-rule", rule_link))
     for label, prepare in cases:
         _install_refused_leaf(prepare, label)
 
@@ -1546,6 +1600,7 @@ def exercise_directory_and_special_leaves() -> None:
     """Every file-leaf class refuses dirs/FIFOs/sockets/hardlink aliases."""
     cases = []
     rw = ("config.conf", "daemon.log", "wpa_supplicant.conf", "dhcp.leases",
+          "bin/opi-usb0-up.sh", "usb0.owner",
           "client.owner", "status.json", "ssh/authorized_keys")
     for rel in rw:
         cases.append((f"rw-{rel}", lambda f, rel=rel: f.rw2 / rel))
@@ -1564,6 +1619,7 @@ def exercise_directory_and_special_leaves() -> None:
     cases.append(("tmp-shells", lambda f: f.root / "tmp/shells"))
     cases.append(("install-log", lambda f: f.rw2 / "install.log"))
     cases.append(("rw-result", lambda f: f.rw2 / "result.txt"))
+    cases.append(("usb0-rule", lambda f: f.root / "run/udev/rules.d/99-opi-usb0.rules"))
 
     for label, locate in cases:
         safe_label = label.replace("/", "-")
@@ -1620,6 +1676,8 @@ def exercise_restore_wrong_type_leaves() -> None:
     """Restore refuses directory leaves for runtime/VBT/qml_before targets."""
     cases = []
     cases.append(("daemon-log", lambda f: f.rw2 / "daemon.log"))
+    cases.append(("usb0-helper", lambda f: f.rw2 / "bin/opi-usb0-up.sh"))
+    cases.append(("usb0-rule", lambda f: f.root / "run/udev/rules.d/99-opi-usb0.rules"))
     cases.append(("run-active", lambda f: f.root / "run/wifi1b/active"))
     cases.append(("vbt", lambda f: f.root / "app/data/vbt/VBTConfig.json"))
     cases.append(("qml-before", lambda f: f.usb / "qml_before/HomeScreen/QHMI_HomeScreenMain_Advanced.qml"))
@@ -1800,3 +1858,95 @@ def _make_report_symlink(fixture):
 
 exercise_early_report_guard()
 print("PASS: earliest report guard fails to stderr only for unsafe USB/report paths")
+
+
+def exercise_usb0_cleanup_failure() -> None:
+    """Restore cannot delete recovery data after explicit USB cleanup failure."""
+    with tempfile.TemporaryDirectory(prefix="wifi1b-usb0-restore-fail-",
+                                     dir="/tmp/opencode") as directory:
+        fixture = Fixture(Path(directory), tweaks=True)
+        fixture.run(fixture.install)
+        helper = fixture.rw2 / "bin/opi-usb0-up.sh"
+        rule = fixture.root / "run/udev/rules.d/99-opi-usb0.rules"
+        owner = fixture.rw2 / "usb0.owner"
+        rule.parent.mkdir(parents=True)
+        before = {helper: b"owner helper\n", rule: b"owner rule\n",
+                  owner: b"owner record\n"}
+        for path, contents in before.items():
+            path.write_bytes(contents)
+        fixture.env["WIFI1B_STUB_USB0_FAIL"] = "1"
+        report = fixture.run(fixture.restore, expect_fail=True)
+        assert "usb0 cleanup failed" in report and "status=FAIL" in report, report
+        assert (fixture.rw2 / "wifi1b_daemon").is_file()
+        assert (fixture.rw2 / "backup/latest").is_dir()
+        for path, contents in before.items():
+            assert path.read_bytes() == contents, path
+
+
+exercise_usb0_cleanup_failure()
+print("PASS: explicit USB cleanup failure preserves helper/rule/owner and recovery runtime")
+
+with tempfile.TemporaryDirectory(prefix="wifi1b-usb0-legacy-cli-",
+                                 dir="/tmp/opencode") as directory:
+    fixture = Fixture(Path(directory), tweaks=True)
+    fixture.run(fixture.install)
+    marker = fixture.path / "wrong-cleanup-binary"
+    installed = fixture.rw2 / "wifi1b_daemon"
+    installed.write_text(
+        "#!/bin/sh\n"
+        f"case \"$*\" in *--usb0-cleanup*) printf 'WRONG\\n' > '{marker}'; exit 1;; esac\n"
+        "exit 0\n")
+    installed.chmod(0o755)
+    report = fixture.run(fixture.restore)
+    assert "status=OK" in report or "status=REBOOT_REQUIRED" in report, report
+    assert not marker.exists(), "new cleanup option was sent to an older installed daemon"
+print("PASS: restore uses verified current payload for the new USB cleanup CLI")
+
+
+def exercise_usb0_cleanup_prerequisites() -> None:
+    """Earlier stop/active-marker failures must preserve all USB proof."""
+    for kind in ("stop", "active"):
+        with tempfile.TemporaryDirectory(prefix=f"wifi1b-usb0-prereq-{kind}-",
+                                         dir="/tmp/opencode") as directory:
+            fixture = Fixture(Path(directory), tweaks=True)
+            fixture.run(fixture.install)
+            helper = fixture.rw2 / "bin/opi-usb0-up.sh"
+            rule = fixture.root / "run/udev/rules.d/99-opi-usb0.rules"
+            owner = fixture.rw2 / "usb0.owner"
+            rule.parent.mkdir(parents=True)
+            proof = {helper: b"owner helper\n", rule: b"owner rule\n",
+                     owner: b"owner record\n"}
+            for path, data in proof.items():
+                path.write_bytes(data)
+            active = fixture.root / "run/wifi1b/active"
+            active.write_text("owner active\n")
+            called = fixture.path / "cleanup-called"
+            fixture.env["WIFI1B_STUB_USB0_CALLED_FILE"] = str(called)
+            fault = fixture.path / "prereq-fault"
+            fault.mkdir()
+            if kind == "stop":
+                command = fault / "systemctl"
+                command.write_text(
+                    "#!/bin/sh\n"
+                    "if [ \"$1\" = stop ] && [ \"$2\" = wifi1b-daemon.service ]; then exit 1; fi\n"
+                    f"exec '{fixture.bin / 'systemctl'}' \"$@\"\n")
+            else:
+                command = fault / "rm"
+                command.write_text(
+                    "#!/bin/sh\n"
+                    f"case \"$*\" in *'{active}'*) exit 1;; esac\n"
+                    f"exec '{shutil.which('rm')}' \"$@\"\n")
+            command.chmod(0o755)
+            fixture.env["WIFI1B_PATH"] = str(fault) + ":" + fixture.env["WIFI1B_PATH"]
+            report = fixture.run(fixture.restore, expect_fail=True)
+            assert "restore prerequisites failed" in report, (kind, report)
+            assert not called.exists(), "USB cleanup ran after a failed prerequisite"
+            assert active.read_text() == "owner active\n"
+            assert (fixture.rw2 / "wifi1b_daemon").is_file()
+            assert (fixture.rw2 / "backup/latest").is_dir()
+            for path, data in proof.items():
+                assert path.read_bytes() == data, (kind, path)
+
+
+exercise_usb0_cleanup_prerequisites()
+print("PASS: failed stop/active removal blocks USB cleanup and retains ownership proof")

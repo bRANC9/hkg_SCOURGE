@@ -74,6 +74,7 @@ extern "C" {
 #define CP_BOOT_MAX_LANGUAGES CP_WIRE_MAX_LANGUAGES
 #define CP_BOOT_MAX_AUTH_BLOB CP_WIRE_MAX_AUTH_BLOB
 #define CP_BOOT_MAX_TRANSPORT_ID CP_WIRE_MAX_TRANSPORT_ID
+#define CP_BOOT_ASYNC_AUTH_TIMEOUT_MS 5000u
 
 typedef enum {
     CP_BOOT_STATE_DISCONNECTED = 0,
@@ -131,7 +132,8 @@ typedef enum {
     CP_BOOT_EV_AP_NOT_READY,
     CP_BOOT_EV_CANCELLED,
     CP_BOOT_EV_TRANSPORT_RESET,
-    CP_BOOT_EV_ERROR
+    CP_BOOT_EV_ERROR,
+    CP_BOOT_EV_AUTH_PENDING
 } cp_boot_event;
 
 typedef enum {
@@ -167,6 +169,24 @@ typedef struct {
                      size_t challenge_len, uint8_t *out, size_t cap,
                      size_t *out_len);
 } cp_boot_auth_provider;
+
+/* Opt-in deferred provider interface. A request is not authentication success.
+ * The serialized caller starts a nonblocking helper operation, then supplies a
+ * completion bound to both generation and monotonically increasing token. */
+typedef enum {
+    CP_BOOT_AUTH_OP_NONE = 0,
+    CP_BOOT_AUTH_OP_CERTIFICATE,
+    CP_BOOT_AUTH_OP_SIGNATURE
+} cp_boot_auth_op;
+
+typedef struct {
+    cp_boot_auth_op op;
+    uint64_t generation;
+    uint64_t token;
+    uint64_t deadline_ms;
+    size_t challenge_len;
+    uint8_t challenge[CP_BOOT_MAX_AUTH_BLOB];
+} cp_boot_auth_request;
 
 /* Return granted/denied/pending for the current offer.  A missing callback is
  * treated as denied: the owner must explicitly opt in to projection.  The
@@ -299,6 +319,9 @@ typedef struct {
 
     uint8_t auth_scratch[CP_BOOT_MAX_AUTH_BLOB];
     unsigned auth_exchanges;
+    bool async_auth;
+    cp_boot_auth_request auth_request;
+    uint64_t next_auth_token;
     bool projection_active; /* invariant: false */
 } cp_bootstrap;
 
@@ -306,6 +329,15 @@ cp_boot_error cp_bootstrap_init(cp_bootstrap *session,
                                 const cp_boot_config *config);
 cp_boot_error cp_bootstrap_set_auth_provider(
     cp_bootstrap *session, const cp_boot_auth_provider *provider);
+/* Select only before identification starts; synchronous providers are never
+ * called in deferred mode. Stale request/completion identities are refused. */
+cp_boot_error cp_bootstrap_set_async_auth(cp_bootstrap *session, bool enabled);
+bool cp_bootstrap_auth_request(const cp_bootstrap *session,
+                               cp_boot_auth_request *request);
+cp_boot_result cp_bootstrap_auth_complete(
+    cp_bootstrap *session, uint64_t generation, uint64_t token,
+    cp_boot_auth_op op, bool success, const uint8_t *blob, size_t blob_len,
+    uint64_t now_ms, uint8_t *out, size_t out_cap);
 cp_boot_error cp_bootstrap_set_policy(cp_bootstrap *session,
                                       cp_boot_consent_fn consent,
                                       cp_boot_usb_active_fn usb_active,

@@ -2,7 +2,10 @@
 
 ## Resume here
 
-Branch: `wireless-carplay-integration`.
+Current branch: `wireless-carplay-confirmed-fixes`.
+V23 integration and release gates: [V23.md](V23.md).
+Reviewed defect checkpoints: [CONFIRMED-FIXES.md](CONFIRMED-FIXES.md).
+The original `wireless-carplay-integration` branch is preserved as history.
 
 Goal: complete a wireless bootstrap compatible with the pinned LIVI reference,
 while retaining the OEM projection/media engine and unchanged wired CarPlay.
@@ -25,12 +28,12 @@ pinned); remove the previous two-model requirement. GLM was unavailable
 | Checkpoint | Work | Status |
 |---|---|---|
 | C0 | Preserve existing WIP; update review policy; dedicated branch | Complete: `4279a70` |
-| C1 | Bounded wire codec, identification and bootstrap state-machine tests | Independent Flash-Max PASS: reviewed tree `bd674f4e`; offline-only checkpoint |
-| C2 | AP IPv6/readiness/firewall and current-network snapshot | Pending |
+| C1 | Bounded wire codec, identification and bootstrap state-machine tests | Offline independent PASS: original `6e4d7f1`; auth/session/link follow-ups `cc18b9d`, `8287120`, `3815f5f`. No phone validation |
+| C2 | AP IPv6/readiness/firewall and current-network snapshot | Offline/namespace independent PASS at `8014e6c`; V23 modem-policy integration and target behavior require separate gates |
 | C3 | Recover and verify OEM Bluetooth RX/TX/listener and MFi/identity ABI | Static research complete for SPP; live bus/transport proof still pending |
-| C4 | Integrate wireless transport and authenticated bootstrap | Pending |
-| C5 | Connect existing OEM discovery/receiver and lifecycle observations | Pending |
-| C6 | Installer/restore, regression gates, reviewed experimental V20 pair | Pending |
+| C4 | Integrate wireless transport and authenticated bootstrap | Deferred auth, SPP transport and serialized runtime broker independently reviewed offline. All remain unactivated; trusted target receiver integration and live phone/OEM validation still gated |
+| C5 | Connect existing OEM discovery/receiver and lifecycle observations | Offline passive-probe/pin follow-up PASS at `dd970f3`; trusted live receiver mapping and lifecycle integration pending |
+| C6 | Installer/restore, regression gates, experimental release pair | Historical offline independent PASS at `4114142` (28 side-by-side groups); V23 compatibility/build/artifact gates are separate and pending |
 | C7 | Parked vehicle/iPhone validation, explicitly owner-authorized | Not authorized |
 
 At each checkpoint record: exact commit/tree, commands and results, incomplete
@@ -42,7 +45,7 @@ validation. Update this document before ending a work session.
 - Country GB; preserve owner credentials/keys and station-network priority.
 - Preserve stock USB, modem routing, shared micom helper, Battery, charge door,
   cluster, Tweaks and approved Reboot behavior.
-- Standalone V20 must not reinstall WiFi or require migration. Retain existing
+- New standalone V23 must not reinstall WiFi or require migration. Retain existing
   released bundles; do not publish an experimental build as a verified fix.
 - First-action bounded cleanup remains first. Stop owned radios in installers.
 - Firmware-specific binary modifications require exact hash and byte gates.
@@ -133,7 +136,11 @@ is not automatically mandatory. Never synthesize successful authentication.
 7. Reconnect, long session, ignition restart, USB insertion/removal, calls/Siri,
    credential redaction and bounded disk/log growth.
 
-## C1 worktree verification
+## Historical C1 worktree verification
+
+The tree hashes and review chronology below describe the original checkpoint,
+not the complete current branch. Use the milestone table and linked V23 ledger
+for subsequent reviewed changes and remaining gates.
 
 New source modules: `packages/wifi1b/src/carplay/cp_wire.*`, `cp_bootstrap.*`,
 and `cp_link.*`. They are not activated by the installer or existing daemon.
@@ -199,7 +206,12 @@ with parameter tables. An outer wrapper must retire the receiver-wait deadline
 on a trusted active observation while retaining consent/USB checks. Timeout
 alone does not establish that the OEM receiver failed or stopped.
 
-## Later worktree components (outside the C1 reviewed index)
+## Historical later components (outside the original C1 reviewed index)
+
+The pending-review statements in this historical section record that earlier
+index only. SPP cleanup, auth, receiver-pin, session, link, network and installer
+follow-ups have since landed; their exact commits and limitations are recorded
+in CONFIRMED-FIXES.md. They do not establish working wireless CarPlay.
 
 `cp_spp_socket.*` adds an unactivated, root-only Unix datagram receiver for the
 build-only Bluetooth RX hook. It checks kernel sender credentials, complete

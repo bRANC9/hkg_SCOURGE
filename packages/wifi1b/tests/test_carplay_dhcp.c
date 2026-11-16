@@ -25,6 +25,7 @@ static int fast_usleep(useconds_t);
 static int fast_usleep(useconds_t us) { (void)us; return 0; }
 
 static char g_route_defaults[2048];
+static char g_wlan_defaults[2048];
 static char g_route_after_add[2048];
 static char g_route_after_del[2048];
 static bool g_fail_route_add;
@@ -38,14 +39,19 @@ static int64_t g_fake_now_ms;
 static int64_t g_advance_on_addr_apply;
 static char g_addr_state[512];
 static char g_connected_state[512];
+static bool g_modem_ipv4;
+static bool g_modem_unknown;
 static char g_cmds[64][512];
 static int g_cmd_count;
 
 static int fixture_command(char *out, size_t n, const char *cmd);
+static void wait_for_path(const char *path);
+static void reap_until_idle(void);
 
 static void fixture_reset(void)
 {
     g_route_defaults[0] = 0;
+    g_wlan_defaults[0] = 0;
     g_route_after_add[0] = 0;
     g_route_after_del[0] = 0;
     g_fail_route_add = false;
@@ -59,6 +65,10 @@ static void fixture_reset(void)
     g_advance_on_addr_apply = 0;
     g_addr_state[0] = 0;
     g_connected_state[0] = 0;
+    g_modem_ipv4 = false;
+    g_modem_unknown = false;
+    g_client_modem_ipv4 = false;
+    g_client_modem_unknown = false;
     g_cmd_count = 0;
     test_command = fixture_command;
     test_owner_write_fail = 0;
@@ -93,7 +103,39 @@ static int fixture_command(char *out, size_t n, const char *cmd)
         if (g_route_query_fail_after >= 0 &&
             g_route_query_count++ >= g_route_query_fail_after)
             return 1;
-        snprintf(out, n, "%s", g_route_defaults);
+        /* The target iproute2 omits `dev wlan0` when the query is filtered;
+         * the daemon deliberately queries the unfiltered table. */
+        snprintf(out, n, "%s%s", g_route_defaults, g_wlan_defaults);
+        return 0;
+    }
+    if (strstr(cmd, "ip -o -4 addr show dev rmnet_usb0") ||
+        strstr(cmd, "ip -o -4 addr show dev rmnet_usb1")) {
+        if (g_modem_unknown) return 1;
+        if (g_modem_ipv4)
+            snprintf(out, n, "5: rmnet_usb0    inet 198.51.100.135/28 brd 198.51.100.143 scope global rmnet_usb0\n");
+        return 0;
+    }
+    if (strstr(cmd, "ifconfig rmnet_usb0") ||
+        strstr(cmd, "ifconfig rmnet_usb1")) {
+        if (g_modem_unknown) return 1;
+        if (g_modem_ipv4 && out && n)
+            snprintf(out, n, "rmnet_usb0: flags=4163<UP>  inet 198.51.100.135  netmask 255.255.255.240\n");
+        return 0;
+    }
+    if (strstr(cmd, "ip link show dev rmnet_usb0") ||
+        strstr(cmd, "ip link show dev rmnet_usb1")) {
+        return g_modem_unknown ? 1 : 0;
+    }
+    if (strstr(cmd, "ip link show") != NULL) {
+        if ((g_modem_ipv4 || g_modem_unknown) && out && n)
+            snprintf(out, n, "5: rmnet_usb0: <UP> mtu 1500\n");
+        return 0;
+    }
+    if (strstr(cmd, "route del default") && strstr(cmd, "dev wlan0")) {
+        if (g_route_after_del[0])
+            snprintf(g_route_defaults, sizeof(g_route_defaults), "%s", g_route_after_del);
+        else
+            g_wlan_defaults[0] = 0;
         return 0;
     }
     if (strstr(cmd, "route add default")) {
@@ -330,6 +372,181 @@ static void test_route_install_cleanup(void)
     unlink(WIFI1B_CLIENT_ROUTE_LEDGER);
 }
 
+static void test_legacy_cleanup(void)
+{
+    fixture_reset();
+    snprintf(g_wlan_defaults, sizeof(g_wlan_defaults),
+             "default via 198.51.100.1 dev wlan0\n");
+    g_cmd_count = 0;
+    assert(!w2_legacy_wlan_default_cleanup());
+    assert(strstr(g_wlan_defaults, "198.51.100.1") != NULL);
+    assert(!command_seen("route del default"));
+    assert(!command_seen("route add default"));
+}
+
+static void test_modem_safe_route_policy(void)
+{
+    fixture_reset();
+    config_defaults();
+    g_cfg.client_route_policy = CLIENT_ROUTE_MODEM_SAFE;
+    g_modem_ipv4 = true;
+    snprintf(g_route_defaults, sizeof(g_route_defaults),
+             "default via 192.0.2.1 dev modem0 proto static\n");
+    g_cmd_count = 0;
+    assert(w2_client_route_install(w2_ip4("10.42.0.1"), "lo"));
+    assert(g_dhcp_lease.route_ok);
+    assert(!g_dhcp_lease.wifi_default);
+    assert(g_dhcp_lease.route_metric == 0 && g_dhcp_lease.route_proto == 0);
+    assert(g_client_modem_ipv4);
+    assert(!command_seen("route add default"));
+
+    /* An unverified V21/foreign wlan0 default is preserved, not deleted. */
+    fixture_reset();
+    g_cfg.client_route_policy = CLIENT_ROUTE_MODEM_SAFE;
+    g_modem_ipv4 = true;
+    snprintf(g_wlan_defaults, sizeof(g_wlan_defaults),
+             "default via 198.51.100.1 dev wlan0\n");
+    snprintf(g_route_defaults, sizeof(g_route_defaults),
+             "default via 192.0.2.1 dev modem0 proto static\n");
+    g_cmd_count = 0;
+    assert(!w2_client_route_install(w2_ip4("10.42.0.1"), "lo"));
+    assert(strstr(g_wlan_defaults, "198.51.100.1") != NULL);
+    assert(!command_seen("route del default"));
+    assert(!g_dhcp_lease.wifi_default);
+
+    /* Explicit fallback policy still installs below the modem default. */
+    fixture_reset();
+    g_cfg.client_route_policy = CLIENT_ROUTE_FALLBACK;
+    g_modem_ipv4 = true;
+    snprintf(g_route_defaults, sizeof(g_route_defaults),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n");
+    snprintf(g_route_after_add, sizeof(g_route_after_add),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n"
+             "default via 10.42.0.1 dev lo proto 66 metric 101\n");
+    snprintf(g_route_after_del, sizeof(g_route_after_del),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n");
+    assert(w2_client_route_install(w2_ip4("10.42.0.1"), "lo"));
+    assert(g_dhcp_lease.route_ok && g_dhcp_lease.wifi_default);
+    assert(g_dhcp_lease.route_metric == 101);
+    assert(w2_owned_route_cleanup());
+    assert(access(WIFI1B_CLIENT_ROUTE_LEDGER, F_OK) != 0);
+
+    /* Unknown modem readback is not "modem down": no fallback is added and
+     * no owned/foreign route is deleted. */
+    fixture_reset();
+    g_cfg.client_route_policy = CLIENT_ROUTE_MODEM_SAFE;
+    g_modem_unknown = true;
+    snprintf(g_route_defaults, sizeof(g_route_defaults),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n");
+    g_cmd_count = 0;
+    assert(!w2_client_route_install(w2_ip4("10.42.0.1"), "lo"));
+    assert(!command_seen("route add default"));
+    assert(!command_seen("route del default"));
+    assert(g_client_modem_unknown);
+    g_modem_unknown = false;
+    g_cfg.client_route_policy = CLIENT_ROUTE_MODEM_SAFE;
+}
+
+static void test_route_audit(void)
+{
+    fixture_reset();
+    config_defaults();
+    memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+    g_dhcp_lease.valid = true;
+    g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
+    g_dhcp_lease.ip = w2_ip4("10.42.0.10");
+    g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
+    g_dhcp_lease.route_metric = 101;
+    g_dhcp_lease.route_proto = 66;
+    g_dhcp_lease.prefix = 24;
+    str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), "lo");
+    write_test_route_ledger("10.42.0.1", "lo", 101, 66);
+
+    g_cfg.client_route_policy = CLIENT_ROUTE_FALLBACK;
+    g_modem_ipv4 = true;
+    snprintf(g_route_defaults, sizeof(g_route_defaults),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n"
+             "default via 10.42.0.1 dev lo proto 66 metric 101\n");
+    assert(w2_client_route_audit());
+    assert(g_dhcp_lease.wifi_default && g_dhcp_lease.route_metric == 101);
+
+    /* A foreign route that outranks the owned fallback forces a safe bump. */
+    snprintf(g_route_defaults, sizeof(g_route_defaults),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n"
+             "default via 192.0.2.9 dev modem1 proto static metric 500\n"
+             "default via 10.42.0.1 dev lo proto 66 metric 101\n");
+    snprintf(g_route_after_del, sizeof(g_route_after_del),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n"
+             "default via 192.0.2.9 dev modem1 proto static metric 500\n");
+    snprintf(g_route_after_add, sizeof(g_route_after_add),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n"
+             "default via 192.0.2.9 dev modem1 proto static metric 500\n"
+             "default via 10.42.0.1 dev lo proto 66 metric 501\n");
+    assert(w2_client_route_audit());
+    assert(g_dhcp_lease.wifi_default && g_dhcp_lease.route_metric == 501);
+
+    /* An unverified foreign wlan0 default is preserved and audit fails
+     * closed; only an exact ledged route may ever be deleted. */
+    snprintf(g_wlan_defaults, sizeof(g_wlan_defaults),
+             "default via 198.51.100.200 dev wlan0 metric 0\n");
+    assert(!w2_client_route_audit());
+    assert(strstr(g_wlan_defaults, "198.51.100.200") != NULL);
+    assert(!command_seen("route del default via 198.51.100.200 dev wlan0 metric 0"));
+    g_wlan_defaults[0] = 0;
+
+    /* modem_safe removes the owned route as soon as modem data is present. */
+    g_cfg.client_route_policy = CLIENT_ROUTE_MODEM_SAFE;
+    g_modem_ipv4 = true;
+    snprintf(g_route_defaults, sizeof(g_route_defaults),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n"
+             "default via 10.42.0.1 dev lo proto 66 metric 501\n");
+    snprintf(g_route_after_del, sizeof(g_route_after_del),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n");
+    assert(w2_client_route_audit());
+    assert(!g_dhcp_lease.wifi_default);
+    assert(g_dhcp_lease.route_metric == 0 && g_dhcp_lease.route_proto == 0);
+    assert(access(WIFI1B_CLIENT_ROUTE_LEDGER, F_OK) != 0);
+
+    /* No modem data -> a missing fallback is reinstated. */
+    g_modem_ipv4 = false;
+    snprintf(g_route_defaults, sizeof(g_route_defaults),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n");
+    snprintf(g_route_after_add, sizeof(g_route_after_add),
+             "default via 192.0.2.1 dev modem0 proto static metric 100\n"
+             "default via 10.42.0.1 dev lo proto 66 metric 101\n");
+    assert(w2_client_route_audit());
+    assert(g_dhcp_lease.wifi_default && g_dhcp_lease.route_metric == 101);
+    assert(w2_owned_route_cleanup());
+    memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+    g_cfg.client_route_policy = CLIENT_ROUTE_MODEM_SAFE;
+
+    /* The audit refuses to add/delete anything when modem state is unknown. */
+    fixture_reset();
+    memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+    g_dhcp_lease.valid = true;
+    g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
+    g_dhcp_lease.ip = w2_ip4("10.42.0.10");
+    g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
+    g_dhcp_lease.route_metric = 101;
+    g_dhcp_lease.route_proto = 66;
+    g_dhcp_lease.prefix = 24;
+    str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), "lo");
+    write_test_route_ledger("10.42.0.1", "lo", 101, 66);
+    g_cfg.client_route_policy = CLIENT_ROUTE_FALLBACK;
+    g_modem_unknown = true;
+    g_cmd_count = 0;
+    assert(!w2_client_route_audit());
+    assert(!command_seen("route add default"));
+    assert(!command_seen("route del default"));
+    assert(g_client_modem_unknown);
+    g_modem_unknown = false;
+    g_cfg.client_route_policy = CLIENT_ROUTE_MODEM_SAFE;
+    unlink(WIFI1B_CLIENT_ROUTE_LEDGER);
+    memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+}
+
 static uint16_t checksum_finish(uint32_t sum)
 {
     while (sum >> 16) sum = (sum & 0xffffU) + (sum >> 16);
@@ -522,25 +739,250 @@ static void test_accept_lease_result(void)
              "41 1\nstale\nclient_lease_updated=1\nclient_lease_valid=1\n");
     assert(!accept_apply_result(stale));
 
+    /* modem-safe suppression: route_ok true, no WiFi default, but the
+     * lease router must still be a usable on-subnet gateway. */
     g_apply_gen = 43;
+    memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     snprintf(buf, sizeof(buf),
-             "43 1\nbad lease\nclient_lease_updated=1\nclient_lease_valid=1\n");
+             "43 1\nModem route preserved\n"
+             "client_lease_updated=1\nclient_lease_valid=1\n"
+             "client_lease_ip=10.42.0.10\nclient_lease_gateway=10.42.0.1\n"
+             "client_lease_prefix=24\nclient_lease_lease_s=3600\n"
+             "client_lease_t1_s=1800\nclient_lease_t2_s=3150\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_modem_ipv4=1\nclient_legacy_route_removed=0\n"
+             "client_route_metric=0\nclient_route_proto=0\n"
+             "client_lease_iface=wlan0\n");
+    assert(accept_apply_result(buf));
+    assert(g_dhcp_lease.valid && g_dhcp_lease.route_ok);
+    assert(!g_dhcp_lease.wifi_default && g_client_modem_ipv4);
+    assert(g_client_legacy_routes_removed == 0);
+    assert(g_dhcp_lease.gateway == w2_ip4("10.42.0.1"));
+
+    /* A suppressed route is not a missing router: empty, zero, unusable or
+     * off-subnet gateways are not ready leases. */
+    g_apply_gen = 46;
+    g_dhcp_lease.valid = true;
+    g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = false;
+    g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
+    snprintf(buf, sizeof(buf),
+             "46 1\nmissing router\n"
+             "client_lease_updated=1\nclient_lease_valid=1\n"
+             "client_lease_ip=10.42.0.10\nclient_lease_gateway=\n"
+             "client_lease_prefix=24\nclient_lease_lease_s=3600\n"
+             "client_lease_t1_s=1800\nclient_lease_t2_s=3150\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_modem_ipv4=1\nclient_route_metric=0\n"
+             "client_route_proto=0\nclient_lease_iface=wlan0\n");
+    assert(!accept_apply_result(buf));
+    snprintf(buf, sizeof(buf),
+             "46 1\noff-subnet router\n"
+             "client_lease_updated=1\nclient_lease_valid=1\n"
+             "client_lease_ip=10.42.0.10\nclient_lease_gateway=192.0.2.9\n"
+             "client_lease_prefix=24\nclient_lease_lease_s=3600\n"
+             "client_lease_t1_s=1800\nclient_lease_t2_s=3150\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_modem_ipv4=1\nclient_route_metric=0\n"
+             "client_route_proto=0\nclient_lease_iface=wlan0\n");
+    assert(!accept_apply_result(buf));
+    snprintf(buf, sizeof(buf),
+             "46 1\nzero router\n"
+             "client_lease_updated=1\nclient_lease_valid=1\n"
+             "client_lease_ip=10.42.0.10\nclient_lease_gateway=0.0.0.0\n"
+             "client_lease_prefix=24\nclient_lease_lease_s=3600\n"
+             "client_lease_t1_s=1800\nclient_lease_t2_s=3150\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_modem_ipv4=1\nclient_route_metric=0\n"
+             "client_route_proto=0\nclient_lease_iface=wlan0\n");
+    assert(!accept_apply_result(buf));
+    snprintf(buf, sizeof(buf),
+             "46 1\nunknown modem ready\n"
+             "client_lease_updated=1\nclient_lease_valid=1\n"
+             "client_lease_ip=10.42.0.10\nclient_lease_gateway=10.42.0.1\n"
+             "client_lease_prefix=24\nclient_lease_lease_s=3600\n"
+             "client_lease_t1_s=1800\nclient_lease_t2_s=3150\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_modem_ipv4=0\nclient_modem_unknown=1\n"
+             "client_route_metric=0\nclient_route_proto=0\n"
+             "client_lease_iface=wlan0\n");
+    assert(!accept_apply_result(buf));
+    /* A nonzero legacy-removal claim is not accepted as proof. */
+    snprintf(buf, sizeof(buf),
+             "46 1\nfabricated legacy proof\n"
+             "client_lease_updated=1\nclient_lease_valid=1\n"
+             "client_lease_ip=10.42.0.10\nclient_lease_gateway=10.42.0.1\n"
+             "client_lease_prefix=24\nclient_lease_lease_s=3600\n"
+             "client_lease_t1_s=1800\nclient_lease_t2_s=3150\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_modem_ipv4=1\nclient_legacy_route_removed=1\n"
+             "client_route_metric=0\nclient_route_proto=0\n"
+             "client_lease_iface=wlan0\n");
+    assert(accept_apply_result(buf));
+    assert(g_client_legacy_routes_removed == 0);
+
+    g_apply_gen = 44;
+    snprintf(buf, sizeof(buf),
+             "44 1\nbad lease\nclient_lease_updated=1\nclient_lease_valid=1\n");
+    assert(!accept_apply_result(buf));
+    assert(g_dhcp_lease.valid); /* malformed ready lease preserves the old one */
+
+    snprintf(buf, sizeof(buf),
+             "44 1\nclean failure\nclient_lease_updated=1\n"
+             "client_lease_valid=0\n");
     assert(accept_apply_result(buf));
     assert(!g_dhcp_lease.valid && !g_dhcp_lease.route_ok);
     assert(g_client_expiry_at_ms == 0);
 
     /* A timeout result (updated=0) leaves the current clock untouched. */
-    g_apply_gen = 44;
+    g_apply_gen = 45;
     g_dhcp_lease.valid = true;
     g_client_t1_at_ms = 1234;
     g_client_t2_at_ms = 5678;
     g_client_expiry_at_ms = 9999;
     snprintf(buf, sizeof(buf),
-             "44 0\ntimeout\nclient_lease_updated=0\n");
+             "45 0\ntimeout\nclient_lease_updated=0\n");
     assert(accept_apply_result(buf));
     assert(g_dhcp_lease.valid);
     assert(g_client_t1_at_ms == 1234 && g_client_t2_at_ms == 5678 &&
            g_client_expiry_at_ms == 9999);
+    memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+    g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+}
+
+static void test_route_audit_result_merge(void)
+{
+    fixture_reset();
+    config_defaults();
+    g_fake_now_ms = 5000000;
+    test_now_ms = fake_now_ms;
+    g_apply_gen = 60;
+    memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+    g_dhcp_lease.valid = true;
+    g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
+    g_dhcp_lease.ip = w2_ip4("10.42.0.10");
+    g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
+    g_dhcp_lease.prefix = 24;
+    g_dhcp_lease.route_metric = 100;
+    g_dhcp_lease.route_proto = 66;
+    str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), "wlan0");
+    g_client_t1_at_ms = g_fake_now_ms + 1000;
+    g_client_t2_at_ms = g_fake_now_ms + 2000;
+    g_client_expiry_at_ms = g_fake_now_ms + 100000;
+
+    char buf[1024];
+    snprintf(buf, sizeof(buf),
+             "60 1\naudit\nclient_route_audit=1\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_route_metric=0\nclient_route_proto=0\n"
+             "client_modem_ipv4=1\nclient_modem_unknown=0\n"
+             "client_legacy_route_removed=0\n");
+    assert(accept_route_audit_result(buf));
+    assert(g_dhcp_lease.valid && g_dhcp_lease.route_ok);
+    assert(!g_dhcp_lease.wifi_default);
+    assert(g_dhcp_lease.route_metric == 0 && g_dhcp_lease.route_proto == 0);
+    assert(g_client_t1_at_ms == g_fake_now_ms + 1000);
+    assert(g_client_t2_at_ms == g_fake_now_ms + 2000);
+    assert(g_client_expiry_at_ms == g_fake_now_ms + 100000);
+
+    snprintf(buf, sizeof(buf),
+             "60 1\naudit fallback\nclient_route_audit=1\n"
+             "client_lease_route_ok=1\nclient_wifi_default=1\n"
+             "client_route_metric=101\nclient_route_proto=66\n"
+             "client_modem_ipv4=0\nclient_modem_unknown=0\n"
+             "client_legacy_route_removed=0\n");
+    assert(accept_route_audit_result(buf));
+    assert(g_dhcp_lease.wifi_default && g_dhcp_lease.route_metric == 101);
+    assert(g_client_expiry_at_ms == g_fake_now_ms + 100000);
+
+    snprintf(buf, sizeof(buf),
+             "60 1\nnot an audit\nclient_route_audit=0\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_route_metric=0\nclient_route_proto=0\n");
+    assert(!accept_route_audit_result(buf));
+    snprintf(buf, sizeof(buf),
+             "60 1\nbad route readback\nclient_route_audit=1\n"
+             "client_lease_route_ok=0\nclient_wifi_default=0\n"
+             "client_route_metric=0\nclient_route_proto=0\n");
+    assert(!accept_route_audit_result(buf));
+    snprintf(buf, sizeof(buf),
+             "60 1\nunknown modem\nclient_route_audit=1\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_route_metric=0\nclient_route_proto=0\n"
+             "client_modem_unknown=1\n");
+    assert(!accept_route_audit_result(buf));
+
+    g_client_expiry_at_ms = g_fake_now_ms - 1;
+    snprintf(buf, sizeof(buf),
+             "60 1\nexpired\nclient_route_audit=1\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_route_metric=0\nclient_route_proto=0\n");
+    assert(!accept_route_audit_result(buf));
+    g_client_expiry_at_ms = g_fake_now_ms + 100000;
+
+    g_dhcp_lease.gateway = 0;
+    snprintf(buf, sizeof(buf),
+             "60 1\nmissing parent router\nclient_route_audit=1\n"
+             "client_lease_route_ok=1\nclient_wifi_default=0\n"
+             "client_route_metric=0\nclient_route_proto=0\n");
+    assert(!accept_route_audit_result(buf));
+    test_now_ms = NULL;
+    memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+    g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
+}
+
+static bool route_audit_work(work_t kind, bool pair)
+{
+    (void)pair;
+    if (kind != WORK_ROUTE_AUDIT) return false;
+    g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = false;
+    g_dhcp_lease.route_metric = 0;
+    g_dhcp_lease.route_proto = 0;
+    g_client_modem_ipv4 = true;
+    write_text(APP_DIR "/audit-ran", "ran\n");
+    return true;
+}
+
+static void test_route_audit_worker(void)
+{
+    fixture_reset();
+    config_defaults();
+    unlink(APP_DIR "/audit-ran");
+    g_fake_now_ms = 6000000;
+    test_now_ms = fake_now_ms;
+    g_cfg.mode = MODE_CLIENT;
+    g_cfg.wlan_on = true;
+    g_apply_pid = 0;
+    g_work_pending = false;
+    memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+    g_dhcp_lease.valid = true;
+    g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
+    g_dhcp_lease.ip = w2_ip4("10.42.0.10");
+    g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
+    g_dhcp_lease.prefix = 24;
+    g_dhcp_lease.route_metric = 100;
+    g_dhcp_lease.route_proto = 66;
+    str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), "wlan0");
+    g_client_t1_at_ms = g_fake_now_ms + 1000;
+    g_client_t2_at_ms = g_fake_now_ms + 2000;
+    g_client_expiry_at_ms = g_fake_now_ms + 100000;
+    test_work = route_audit_work;
+    route_audit_tick();
+    assert(g_apply_pid > 0 || g_work_pending);
+    wait_for_path(APP_DIR "/audit-ran");
+    reap_until_idle();
+    assert(g_dhcp_lease.valid && g_dhcp_lease.route_ok);
+    assert(!g_dhcp_lease.wifi_default);
+    assert(g_dhcp_lease.route_metric == 0 && g_dhcp_lease.route_proto == 0);
+    assert(g_client_t1_at_ms == g_fake_now_ms + 1000);
+    assert(g_client_t2_at_ms == g_fake_now_ms + 2000);
+    assert(g_client_expiry_at_ms == g_fake_now_ms + 100000);
+    assert(access(APP_DIR "/audit-ran", F_OK) == 0);
+    test_work = NULL;
+    test_now_ms = NULL;
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_client_t1_at_ms = g_client_t2_at_ms = g_client_expiry_at_ms = 0;
 }
@@ -554,6 +996,7 @@ static void test_client_status_expiry(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.valid = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.10");
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
     g_dhcp_lease.prefix = 24;
@@ -630,6 +1073,7 @@ static void test_release_cleanup(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.valid = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.10");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
@@ -879,6 +1323,7 @@ static void test_ack_address_validation(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.valid = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.10");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
@@ -1008,7 +1453,7 @@ static void test_apply_ack_rollback(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     snprintf(g_route_after_add, sizeof(g_route_after_add),
              "default via 10.42.0.1 dev wlan0 proto 66 metric 1000\n");
-    g_route_query_fail_after = 1; /* metric query succeeds, install readback fails */
+    g_route_query_fail_after = 2; /* legacy check + metric query succeed, install readback fails */
     n = build_test_ack(&rep, true);
     assert(!w2_dhcp_apply_ack(&rep, n, "wlan0", 0, 0, out_ip, sizeof(out_ip)));
     assert(g_dhcp_lease.cleanup_pending);
@@ -1189,6 +1634,7 @@ static bool successful_apply_work(work_t kind, bool pair)
     g_dhcp_lease.valid = true;
     g_dhcp_lease.updated = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.20");
     g_dhcp_lease.server = w2_ip4("10.42.0.1");
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
@@ -1198,6 +1644,8 @@ static bool successful_apply_work(work_t kind, bool pair)
     g_dhcp_lease.t2_s = 3150;
     g_dhcp_lease.route_metric = 101;
     g_dhcp_lease.route_proto = 66;
+    g_client_modem_ipv4 = true;
+    g_client_modem_unknown = false;
     str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), "wlan0");
     return true;
 }
@@ -1432,6 +1880,7 @@ static void test_router_consistency_matrix(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.valid = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.10");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
@@ -1669,6 +2118,7 @@ static bool deadline_work(work_t kind, bool pair)
     g_dhcp_lease.valid = true;
     g_dhcp_lease.updated = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.20");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.lease_s = 3600;
@@ -1738,6 +2188,7 @@ static bool blocking_mode_work(work_t kind, bool pair)
     g_dhcp_lease.valid = true;
     g_dhcp_lease.updated = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.20");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.lease_s = 3600;
@@ -2139,6 +2590,7 @@ static void test_reconcile_requires_live_kernel(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.valid = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.20");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
@@ -2158,6 +2610,7 @@ static void test_reconcile_requires_live_kernel(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.valid = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.20");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
@@ -2174,6 +2627,7 @@ static void test_reconcile_requires_live_kernel(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.valid = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.20");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
@@ -2190,6 +2644,7 @@ static void test_reconcile_requires_live_kernel(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.valid = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.20");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
@@ -2207,6 +2662,7 @@ static void test_reconcile_requires_live_kernel(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.valid = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.20");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
@@ -2220,6 +2676,7 @@ static void test_reconcile_requires_live_kernel(void)
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
     g_dhcp_lease.valid = true;
     g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.ip = w2_ip4("10.42.0.20");
     g_dhcp_lease.prefix = 24;
     g_dhcp_lease.gateway = w2_ip4("10.42.0.1");
@@ -2350,9 +2807,44 @@ int main(int argc, char **argv)
         if (radio_begin("wifi1b_daemon", true) != 1) return 1;
         bool ok = w2_client_route_install(w2_ip4(argv[2]), argv[3]);
         radio_release();
-        printf("{\"ok\":%s,\"metric\":%u,\"proto\":%u,\"error\":\"%s\"}\n",
+        printf("{\"ok\":%s,\"metric\":%u,\"proto\":%u,"
+               "\"wifi_default\":%s,\"modem\":%s,\"legacy_removed\":%d,"
+               "\"route_ok\":%s,\"error\":\"%s\"}\n",
                ok ? "true" : "false", g_dhcp_lease.route_metric,
-               g_dhcp_lease.route_proto, g_dhcp_error);
+               g_dhcp_lease.route_proto,
+               g_dhcp_lease.wifi_default ? "true" : "false",
+               g_client_modem_ipv4 ? "true" : "false",
+               g_client_legacy_routes_removed,
+               g_dhcp_lease.route_ok ? "true" : "false",
+               g_dhcp_error);
+        return ok ? 0 : 1;
+    }
+    if (argc > 1 && !strcmp(argv[1], "--route-audit")) {
+        config_defaults();
+        char ledger[1024];
+        w2_owned_route_t own;
+        struct in_addr gw_addr;
+        if (read_file(WIFI1B_CLIENT_ROUTE_LEDGER, ledger, sizeof(ledger)) <= 0 ||
+            !w2_owned_route_parse(ledger, &own) ||
+            inet_pton(AF_INET, own.gateway, &gw_addr) != 1)
+            return 2;
+        memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
+        g_dhcp_lease.valid = true;
+        g_dhcp_lease.route_ok = true;
+        g_dhcp_lease.wifi_default = true;
+        g_dhcp_lease.ip = w2_ip4("10.42.0.10");
+        g_dhcp_lease.gateway = ntohl(gw_addr.s_addr);
+        g_dhcp_lease.prefix = 24;
+        g_dhcp_lease.route_metric = own.metric;
+        g_dhcp_lease.route_proto = own.proto;
+        str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), own.iface);
+        bool ok = w2_client_route_audit();
+        printf("{\"ok\":%s,\"wifi_default\":%s,\"metric\":%u,"
+               "\"proto\":%u,\"legacy_removed\":%d}\n",
+               ok ? "true" : "false",
+               g_dhcp_lease.wifi_default ? "true" : "false",
+               g_dhcp_lease.route_metric, g_dhcp_lease.route_proto,
+               g_client_legacy_routes_removed);
         return ok ? 0 : 1;
     }
     if (argc > 1 && !strcmp(argv[1], "--route-cleanup")) {
@@ -2464,8 +2956,13 @@ int main(int argc, char **argv)
     test_current_dhcp_result_accepted();
     test_superseded_dhcp_result();
     test_superseded_mode_client();
+    test_legacy_cleanup();
+    test_modem_safe_route_policy();
+    test_route_audit();
     test_raw_parser();
     test_accept_lease_result();
+    test_route_audit_result_merge();
+    test_route_audit_worker();
     test_client_status_expiry();
     puts("PASS: DHCP client identity, timers, raw parsing and owned route policy");
     return 0;

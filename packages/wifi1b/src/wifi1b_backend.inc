@@ -28,6 +28,9 @@
 #define WIFI1B_DHCP_LINEAGE         APP_DIR "/client.lineage"
 #define WIFI1B_CLIENT_ROUTE_PROTO  66U
 #define WIFI1B_CLIENT_DEFAULT_METRIC 1000U
+#define WIFI1B_USB0_IFACE          "usb0"
+#define WIFI1B_USB0_IP             "10.55.0.2"
+#define WIFI1B_USB0_NETMASK        "255.255.255.0"
 
 /* Definitions that appear later in the original daemon. */
 static bool client_associated(void);
@@ -45,10 +48,18 @@ static void carplay_fw_close(void);
 static int choose_ssh_port(int desired);
 static bool ssh_running(void);
 static void ssh_stop(void);
+static void ssh_stop_cleanup(void);
 static bool ensure_car_user(void);
 static bool ensure_line(const char *path, const char *prefix, const char *line);
 static bool fw_chain_ensure(const char *tool, const char *chain);
 static bool ap_stop(void);
+static bool usb0_rule_write(int port);
+static bool g_client_modem_ipv4;
+static bool g_client_modem_unknown;
+/* Always 0: legacy-format strings are never proof and no legacy route is
+ * removed.  Kept for status compatibility only. */
+static int g_client_legacy_routes_removed;
+static int g_usb0_fw_port;
 
 /* ------------------------------------------------------------------ */
 /* small process / command helpers                                     */
@@ -1633,11 +1644,132 @@ static bool w2_connected_route_present(const char *iface, const char *ip,
 }
 
 /* ------------------------------------------------------------------ */
+/* modem and legacy wlan0 route state                                  */
+/* ------------------------------------------------------------------ */
+
+/* The vendor keeps a carrier-data IPv4 address on rmnet_usb0 (BlueLink)
+ * and/or rmnet_usb1 (navigation).  A failed readback is UNKNOWN, never
+ * "modem down": only a verified absence may enable the WiFi fallback. */
+typedef enum {
+    W2_IPV4_UNKNOWN = -1,
+    W2_IPV4_ABSENT = 0,
+    W2_IPV4_PRESENT = 1
+} w2_ipv4_state;
+
+static w2_ipv4_state w2_iface_ipv4_state(const char *iface)
+{
+    char buf[4096];
+    if (iface == NULL || !*iface) return W2_IPV4_UNKNOWN;
+    if (sh_out(buf, sizeof(buf), "ip -o -4 addr show dev %s 2>/dev/null",
+               iface) == 0) {
+        if (strstr(buf, " inet ") != NULL) return W2_IPV4_PRESENT;
+        return W2_IPV4_ABSENT;
+    }
+    if (sh_out(buf, sizeof(buf), "ifconfig %s 2>/dev/null", iface) == 0) {
+        if (strstr(buf, "inet addr:") != NULL || strstr(buf, "inet ") != NULL)
+            return W2_IPV4_PRESENT;
+        return W2_IPV4_ABSENT;
+    }
+    /* Both address readbacks failed.  A verified-absent interface is known
+     * no-IPv4; a present interface with failing readbacks is UNKNOWN. */
+    if (sh_out(buf, sizeof(buf), "ip link show 2>/dev/null") != 0)
+        return W2_IPV4_UNKNOWN;
+    char needle[64];
+    snprintf(needle, sizeof(needle), ": %s:", iface);
+    if (strstr(buf, needle) == NULL) {
+        snprintf(needle, sizeof(needle), ": %s@", iface);
+        if (strstr(buf, needle) == NULL) return W2_IPV4_ABSENT;
+    }
+    return W2_IPV4_UNKNOWN;
+}
+
+static w2_ipv4_state w2_modem_ipv4_state(void)
+{
+    w2_ipv4_state a = w2_iface_ipv4_state("rmnet_usb0");
+    w2_ipv4_state b = w2_iface_ipv4_state("rmnet_usb1");
+    if (a == W2_IPV4_PRESENT || b == W2_IPV4_PRESENT)
+        return W2_IPV4_PRESENT;
+    if (a == W2_IPV4_ABSENT && b == W2_IPV4_ABSENT)
+        return W2_IPV4_ABSENT;
+    return W2_IPV4_UNKNOWN;
+}
+
+
+/* The target's old iproute2 omits the `dev` token when the query is already
+ * filtered with `dev wlan0`.  Query the unfiltered table and keep only exact
+ * wlan0 default lines, so deletes and owned-route matching carry the device
+ * qualifier. */
+static bool w2_wlan_defaults(char *out, size_t n)
+{
+    char all[8192];
+    if (out == NULL || n == 0) return false;
+    out[0] = 0;
+    if (sh_out(all, sizeof(all), "ip -4 route show default 2>/dev/null") != 0)
+        return false;
+    size_t used = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(all, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *p = trim(line);
+        char copy[512], *tokens[64] = {0};
+        int count = 0;
+        char *tsave = NULL;
+        bool wlan = false;
+        if (strncmp(p, "default", 7) != 0) continue;
+        snprintf(copy, sizeof(copy), "%s", p);
+        for (char *tok = strtok_r(copy, " \t", &tsave); tok && count < 64;
+             tok = strtok_r(NULL, " \t", &tsave))
+            tokens[count++] = tok;
+        for (int i = 0; i + 1 < count; i++) {
+            if (!strcmp(tokens[i], "dev") && !strcmp(tokens[i + 1], "wlan0")) {
+                wlan = true;
+                break;
+            }
+        }
+        if (!wlan) continue;
+        int wrote = snprintf(out + used, n - used, "%s\n", p);
+        if (wrote < 0 || (size_t)wrote >= n - used) return false;
+        used += (size_t)wrote;
+    }
+    return true;
+}
+
+/* Strictly a route line from the kernel.  It is still treated as data: a
+ * line with shell metacharacters is never passed back to /bin/sh. */
+static bool w2_route_line_safe(const char *line)
+{
+    if (line == NULL) return false;
+    for (const unsigned char *p = (const unsigned char *)line; *p; p++) {
+        if (isalnum(*p) || *p == ' ' || *p == '\t' || *p == '.' || *p == ':' ||
+            *p == '/' || *p == '-' || *p == '_')
+            continue;
+        return false;
+    }
+    return true;
+}
+
+/* A default via wlan0 that is not backed by an exact v2 ledger is unknown
+ * owner/foreign state.  Never delete it from a V21 format string or a bare
+ * interface match: preserve it and fail the route mutation instead. */
+static bool w2_legacy_wlan_default_cleanup(void)
+{
+    char buf[4096];
+    if (!w2_wlan_defaults(buf, sizeof(buf))) return false;
+    if (strstr(buf, "default")) {
+        log_msg("dhcp client: unverified wlan0 default preserved; route mutation refused");
+        return false;
+    }
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* client default-route policy                                         */
 /*                                                                     */
-/* Client mode gets one owned default route, strictly lower priority    */
-/* than every pre-existing default. It is added/deleted by exact spec   */
-/* from a ledger; foreign defaults and policy rules are never flushed.  */
+/* modem_safe (default): while a modem data interface has IPv4, install  */
+/* no WiFi default at all. WiFi remains a connected-route SSH path.     */
+/* fallback: install one owned default strictly below every foreign      */
+/* default. It is added/deleted by exact spec from a ledger; foreign     */
+/* defaults and policy rules are never flushed.                         */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
@@ -1666,6 +1798,7 @@ typedef struct {
     bool updated;
     bool route_ok;
     bool cleanup_pending;
+    bool wifi_default;
     uint32_t ip;
     uint32_t server;
     uint32_t mask;
@@ -1725,9 +1858,11 @@ typedef struct {
 static bool w2_owner_file_trusted(const char *path)
 {
     struct stat st;
-    if (path == NULL || stat(path, &st) != 0) return false;
-    return S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
-           (st.st_mode & 0777) == 0600;
+    if (path == NULL || !w2_real_ancestors(path)) return false;
+    if (lstat(path, &st) != 0) return false;
+    /* No symlink/hardlink/FIFO side channel: exact single regular file. */
+    return S_ISREG(st.st_mode) && st.st_nlink == 1 &&
+           st.st_uid == geteuid() && (st.st_mode & 0777) == 0600;
 }
 
 static bool w2_lineage_token_ok(const char *token)
@@ -1751,7 +1886,7 @@ static int w2_dhcp_lineage_load(w2_dhcp_lineage_t *l)
         return errno == ENOENT ? 0 : -1;
     if (!w2_owner_file_trusted(WIFI1B_DHCP_LINEAGE)) return -1;
     int n = read_file(WIFI1B_DHCP_LINEAGE, buf, sizeof(buf));
-    if (n <= 0) return -1;
+    if (n <= 0 || n >= (int)sizeof(buf) - 1) return -1;
     snprintf(copy, sizeof(copy), "%s", buf);
     for (char *tok = strtok_r(copy, " \t\r\n", &save); tok && count < 6;
          tok = strtok_r(NULL, " \t\r\n", &save))
@@ -1920,7 +2055,7 @@ static int w2_owned_route_load(w2_owned_route_t *route)
         return errno == ENOENT ? 0 : -1;
     if (!w2_owner_file_trusted(WIFI1B_CLIENT_ROUTE_LEDGER)) return -1;
     int n = read_file(WIFI1B_CLIENT_ROUTE_LEDGER, buf, sizeof(buf));
-    if (n <= 0) return -1;
+    if (n <= 0 || n >= (int)sizeof(buf) - 1) return -1;
     int lr = w2_dhcp_lineage_load(&lineage);
     if (lr != 1) return -1;
     snprintf(copy, sizeof(copy), "%s", buf);
@@ -2213,7 +2348,7 @@ static int w2_dhcp_journal_load(w2_owner_journal_t *j)
         return errno == ENOENT ? 0 : -1;
     if (!w2_owner_file_trusted(WIFI1B_DHCP_OWNER_JOURNAL)) return -1;
     int n = read_file(WIFI1B_DHCP_OWNER_JOURNAL, buf, sizeof(buf));
-    if (n <= 0) return -1;
+    if (n <= 0 || n >= (int)sizeof(buf) - 1) return -1;
     if (w2_dhcp_lineage_load(&lineage) != 1) return -1;
     snprintf(copy, sizeof(copy), "%s", buf);
     for (char *tok = strtok_r(copy, " \t\r\n", &save); tok && count < 12;
@@ -2403,23 +2538,51 @@ static bool w2_dhcp_reconcile_owned_state(void)
         dirty = true;
     }
     if (jr == 1) {
-        char ipbuf[32], gw[32];
+        char ipbuf[32], gw[32], defaults[4096];
         bool addr_present = false, route_present = false;
+        bool addr_read = false, route_read = false;
+        bool file_match = false;
+        bool policy_suppressed = false;
         w2_ip4_str(j.ip, ipbuf, sizeof(ipbuf));
-        bool addr_read = w2_addr_query(j.iface, ipbuf, j.prefix,
-                                       &addr_present);
-        bool route_read = rr == 1 &&
-            w2_route_exact_present(route.gateway, route.iface,
-                                   route.metric, route.proto, &route_present);
-        bool file_match = g_dhcp_lease.valid &&
-                          !strcmp(j.state, "current") &&
-                          g_dhcp_lease.ip == j.ip &&
-                          g_dhcp_lease.prefix == j.prefix &&
-                          !strcmp(g_dhcp_lease.iface, j.iface) &&
-                          rr == 1 && g_dhcp_lease.route_ok &&
-                          g_dhcp_lease.route_metric == route.metric &&
-                          g_dhcp_lease.route_proto == route.proto &&
-                          !strcmp(g_dhcp_lease.iface, route.iface);
+        addr_read = w2_addr_query(j.iface, ipbuf, j.prefix, &addr_present);
+        if (rr == 1) {
+            route_read = w2_route_exact_present(route.gateway, route.iface,
+                                                route.metric, route.proto,
+                                                &route_present);
+        }
+        w2_ipv4_state modem_state = w2_modem_ipv4_state();
+        bool modem_up = modem_state == W2_IPV4_PRESENT;
+        bool modem_unknown = modem_state == W2_IPV4_UNKNOWN;
+        g_client_modem_ipv4 = modem_up;
+        g_client_modem_unknown = modem_unknown;
+        bool no_wlan_default = w2_wlan_defaults(defaults, sizeof(defaults)) &&
+                               !strstr(defaults, "default");
+        bool lease_router_ok = g_dhcp_lease.valid &&
+            g_dhcp_lease.gateway != 0 &&
+            g_dhcp_lease.ip == j.ip && g_dhcp_lease.prefix == j.prefix &&
+            !strcmp(g_dhcp_lease.iface, j.iface) &&
+            w2_lease_router_consistent(g_dhcp_lease.ip, g_dhcp_lease.prefix,
+                                       g_dhcp_lease.gateway);
+        if (rr == 0 && g_cfg.client_route_policy == CLIENT_ROUTE_MODEM_SAFE &&
+            !strcmp(j.state, "current") && modem_up && lease_router_ok &&
+            no_wlan_default) {
+            /* No WiFi default is the intended policy state.  The exact
+             * address journal plus live address is evidence of our owner;
+             * route absence is not a missing route here. */
+            policy_suppressed = addr_read && addr_present;
+        }
+        if (rr == 1) {
+            file_match = g_dhcp_lease.valid &&
+                         !strcmp(j.state, "current") &&
+                         g_dhcp_lease.ip == j.ip &&
+                         g_dhcp_lease.prefix == j.prefix &&
+                         !strcmp(g_dhcp_lease.iface, j.iface) &&
+                         g_dhcp_lease.route_ok &&
+                         g_dhcp_lease.wifi_default &&
+                         g_dhcp_lease.route_metric == route.metric &&
+                         g_dhcp_lease.route_proto == route.proto &&
+                         !strcmp(g_dhcp_lease.iface, route.iface);
+        }
         if (file_match) {
             w2_ip4_str(g_dhcp_lease.gateway, gw, sizeof(gw));
             file_match = !strcmp(route.gateway, gw) &&
@@ -2429,7 +2592,26 @@ static bool w2_dhcp_reconcile_owned_state(void)
         }
         bool live_addr = addr_read && addr_present;
         bool live_route = route_read && route_present;
-        if (!file_match || !live_addr || !live_route) dirty = true;
+        if (policy_suppressed) {
+            /* Journaled address and no WiFi default: this is a valid
+             * modem_safe policy state, not a missing owned route. */
+            if (g_dhcp_lease.ip == 0) {
+                g_dhcp_lease.ip = j.ip;
+                g_dhcp_lease.prefix = j.prefix;
+                str_copy(g_dhcp_lease.iface, sizeof(g_dhcp_lease.iface), j.iface);
+            }
+        } else if (!file_match || !live_addr || !live_route) {
+            /* Unknown modem state with a current journal, live address and
+             * no WiFi default is deferred, not treated as modem-down. */
+            bool defer_unknown = modem_unknown && rr == 0 && live_addr &&
+                                 no_wlan_default;
+            if (defer_unknown)
+                log_msg("dhcp client: modem IPv4 unknown; policy decision deferred");
+            else
+                dirty = true;
+        }
+        /* Adopt only the exact journaled owner for the bounded cleanup
+         * retry; this never publishes a ready lease. */
         if (g_dhcp_lease.ip == 0) {
             g_dhcp_lease.ip = j.ip;
             g_dhcp_lease.prefix = j.prefix;
@@ -2449,6 +2631,7 @@ static bool w2_dhcp_reconcile_owned_state(void)
     if (dirty) {
         g_dhcp_lease.valid = false;
         g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.wifi_default = false;
         g_dhcp_lease.cleanup_pending = true;
         g_dhcp_lease.updated = false;
         if (g_dhcp_lease.iface[0] == '\0')
@@ -2654,13 +2837,24 @@ static bool w2_owned_route_install(const char *gateway, const char *iface,
     return true;
 }
 
-/* Install the WiFi fallback default after removing only our previous exact
- * route. The gateway comes from the lease, never from configuration. */
+/* Install or suppress the WiFi route according to the active policy.  The
+ * gateway comes from the lease, never from configuration.  Only an exact
+ * ledged route is cleaned; an unverified V21/foreign wlan0 default is
+ * preserved and fails the mutation. */
 static bool w2_client_route_install(uint32_t gateway, const char *iface)
 {
     unsigned int metric = 0;
     char gw[32];
+    w2_ipv4_state modem_state = w2_modem_ipv4_state();
+    bool modem_up = modem_state == W2_IPV4_PRESENT;
 
+    g_client_modem_ipv4 = modem_up;
+    g_client_modem_unknown = modem_state == W2_IPV4_UNKNOWN;
+    if (modem_state == W2_IPV4_UNKNOWN) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "modem IPv4 state unknown; route mutation refused");
+        return false;
+    }
     if (gateway == 0) {
         snprintf(g_dhcp_error, sizeof(g_dhcp_error),
                  "DHCP lease has no router/gateway option");
@@ -2672,12 +2866,29 @@ static bool w2_client_route_install(uint32_t gateway, const char *iface)
                  "DHCP gateway is not a usable unicast address");
         return false;
     }
-    w2_ip4_str(gateway, gw, sizeof(gw));
     if (!w2_owned_route_cleanup()) {
         snprintf(g_dhcp_error, sizeof(g_dhcp_error),
                  "cannot remove previous owned default route");
         return false;
     }
+    if (!w2_legacy_wlan_default_cleanup()) {
+        snprintf(g_dhcp_error, sizeof(g_dhcp_error),
+                 "cannot remove stale wlan0 default route");
+        return false;
+    }
+
+    /* The requested design: WiFi is an SSH-only link while the modem has
+     * data.  Do not put any WiFi default in the main table in that state. */
+    if (g_cfg.client_route_policy == CLIENT_ROUTE_MODEM_SAFE && modem_up) {
+        g_dhcp_lease.route_ok = true;
+        g_dhcp_lease.wifi_default = false;
+        g_dhcp_lease.route_metric = 0;
+        g_dhcp_lease.route_proto = 0;
+        g_dhcp_lease.gateway = gateway;
+        log_msg("dhcp client: modem IPv4 present; WiFi default suppressed");
+        return true;
+    }
+    w2_ip4_str(gateway, gw, sizeof(gw));
     if (!w2_route_select_metric(&metric)) {
         snprintf(g_dhcp_error, sizeof(g_dhcp_error),
                  "cannot select a safe WiFi default-route metric");
@@ -2690,8 +2901,162 @@ static bool w2_client_route_install(uint32_t gateway, const char *iface)
     }
     g_dhcp_lease.route_ok = true;
     g_dhcp_lease.gateway = gateway;
+    g_dhcp_lease.wifi_default = true;
     g_dhcp_lease.route_metric = metric;
     g_dhcp_lease.route_proto = WIFI1B_CLIENT_ROUTE_PROTO;
+    return true;
+}
+
+static bool w2_default_metric_value(const char *line, unsigned int *value)
+{
+    char copy[512], *tokens[64] = {0};
+    int count = 0;
+    char *save = NULL;
+    bool have_metric = false;
+    unsigned int parsed = 0;
+
+    if (line == NULL || value == NULL) return false;
+    snprintf(copy, sizeof(copy), "%s", line);
+    for (char *tok = strtok_r(copy, " \t", &save); tok && count < 64;
+         tok = strtok_r(NULL, " \t", &save))
+        tokens[count++] = tok;
+    if (count == 0 || strcmp(tokens[0], "default") != 0) return false;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(tokens[i], "metric")) continue;
+        if (have_metric || i + 1 >= count ||
+            !w2_route_token_u32(tokens[i + 1], &parsed))
+            return false;
+        have_metric = true;
+    }
+    *value = have_metric ? parsed : 0;
+    return true;
+}
+
+/* Highest metric among defaults that are not our exact ledged route. */
+static bool w2_foreign_default_max_metric(unsigned int *max_metric, bool *saw)
+{
+    char buf[4096];
+    w2_owned_route_t own;
+    bool have_own = false;
+
+    if (max_metric == NULL || saw == NULL) return false;
+    *max_metric = 0;
+    *saw = false;
+    if (!w2_default_routes(buf, sizeof(buf))) return false;
+    int lr = w2_owned_route_load(&own);
+    if (lr < 0) return false;
+    have_own = lr == 1;
+
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *p = trim(line);
+        if (strncmp(p, "default", 7) != 0) continue;
+        if (have_own && w2_route_line_matches(p, own.gateway, own.iface,
+                                              own.metric, own.proto))
+            continue;
+        unsigned int value = 0;
+        if (!w2_default_metric_value(p, &value)) {
+            log_msg("route audit: refusing malformed default metric: %s", p);
+            return false;
+        }
+        *saw = true;
+        if (value > *max_metric) *max_metric = value;
+    }
+    return true;
+}
+
+/* True when a default via wlan0 exists that is not our exact ledged route.
+ * Such a route is unverified owner/foreign state: fallback mode refuses the
+ * mutation and preserves it; only an exact ledged route is ever deleted. */
+static bool w2_wlan_foreign_default_present(bool *present)
+{
+    char buf[4096];
+    w2_owned_route_t own;
+    bool have_own = false;
+
+    if (present == NULL) return false;
+    *present = false;
+    if (!w2_wlan_defaults(buf, sizeof(buf))) return false;
+    int lr = w2_owned_route_load(&own);
+    if (lr < 0) return false;
+    have_own = lr == 1;
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        char *p = trim(line);
+        if (strncmp(p, "default", 7) != 0) continue;
+        if (have_own && w2_route_line_matches(p, own.gateway, own.iface,
+                                              own.metric, own.proto))
+            continue;
+        *present = true;
+        break;
+    }
+    return true;
+}
+
+/* Reconcile the route intent with live state.  In modem_safe mode the WiFi
+ * default is removed as soon as a modem data IPv4 appears and reinstated
+ * only if the modem data call goes away.  In fallback mode the owned route
+ * is re-added if it vanished and moved above any higher foreign default. */
+static bool w2_client_route_audit(void)
+{
+    if (!g_dhcp_lease.valid || g_dhcp_lease.ip == 0) return true;
+    w2_ipv4_state modem_state = w2_modem_ipv4_state();
+    bool modem_up = modem_state == W2_IPV4_PRESENT;
+    g_client_modem_ipv4 = modem_up;
+    g_client_modem_unknown = modem_state == W2_IPV4_UNKNOWN;
+    if (modem_state == W2_IPV4_UNKNOWN) {
+        log_msg("route audit: modem IPv4 state unknown; no route mutation");
+        return false;
+    }
+    if (g_cfg.client_route_policy == CLIENT_ROUTE_MODEM_SAFE && modem_up) {
+        bool had = g_dhcp_lease.wifi_default;
+        if (!w2_owned_route_cleanup()) return false;
+        if (!w2_legacy_wlan_default_cleanup()) return false;
+        g_dhcp_lease.route_ok = true;
+        g_dhcp_lease.wifi_default = false;
+        g_dhcp_lease.route_metric = 0;
+        g_dhcp_lease.route_proto = 0;
+        if (had) log_msg("route audit: modem data is up; WiFi default removed");
+        return true;
+    }
+
+    bool own_present = false;
+    w2_owned_route_t own;
+    int lr = w2_owned_route_load(&own);
+    if (lr < 0) return false;
+    if (lr == 1 &&
+        !w2_route_exact_present(own.gateway, own.iface, own.metric,
+                                own.proto, &own_present))
+        return false;
+    if (g_dhcp_lease.gateway == 0 ||
+        !w2_lease_router_consistent(g_dhcp_lease.ip, g_dhcp_lease.prefix,
+                                    g_dhcp_lease.gateway)) {
+        log_msg("route audit: lease router is not usable; route intent preserved");
+        return false;
+    }
+    if (!own_present) {
+        log_msg("route audit: WiFi fallback missing; re-installing");
+        return w2_client_route_install(g_dhcp_lease.gateway, g_dhcp_lease.iface);
+    }
+
+    bool foreign_wlan = false;
+    if (!w2_wlan_foreign_default_present(&foreign_wlan)) return false;
+    if (foreign_wlan) {
+        log_msg("route audit: stale foreign wlan0 default present; re-installing");
+        return w2_client_route_install(g_dhcp_lease.gateway, g_dhcp_lease.iface);
+    }
+    unsigned int max_metric = 0;
+    bool saw = false;
+    if (!w2_foreign_default_max_metric(&max_metric, &saw)) return false;
+    if (saw && max_metric >= g_dhcp_lease.route_metric) {
+        log_msg("route audit: foreign default metric %u >= owned %u; re-installing",
+                max_metric, g_dhcp_lease.route_metric);
+        return w2_client_route_install(g_dhcp_lease.gateway, g_dhcp_lease.iface);
+    }
+    g_dhcp_lease.route_ok = true;
+    g_dhcp_lease.wifi_default = true;
     return true;
 }
 
@@ -3045,6 +3410,7 @@ static bool w2_dhcp_cleanup_owned(const char *iface, bool remove_address)
 
     g_dhcp_lease.valid = false;
     g_dhcp_lease.route_ok = false;
+    g_dhcp_lease.wifi_default = false;
     g_dhcp_lease.cleanup_pending = !clean;
     g_dhcp_lease.updated = clean;
     if (clean) {
@@ -3093,6 +3459,7 @@ static bool w2_dhcp_rollback_new_address(const char *iface, uint32_t ip,
 
     g_dhcp_lease.valid = false;
     g_dhcp_lease.route_ok = false;
+    g_dhcp_lease.wifi_default = false;
     if (clean) {
         g_dhcp_lease.cleanup_pending = false;
         g_dhcp_lease.updated = true;
@@ -3393,6 +3760,8 @@ static bool w2_dhcp_apply_ack_ex(const struct w2_dhcp_packet *rep, size_t n,
             return w2_dhcp_rollback_new_address(
                 iface, ip, prefix, "cannot record final address ownership");
         }
+    } else {
+        g_dhcp_lease.wifi_default = false;
     }
 
     g_dhcp_lease.valid = true;
@@ -3442,6 +3811,7 @@ static bool w2_dhcp_client_run(w2_dhcp_step_t step, const char *iface_in,
     if (step == W2_DHCP_ACQUIRE) {
         /* Re-acquisition cleans every exact previously owned address/route,
          * including a journal entry whose parent state was lost. */
+        g_client_modem_ipv4 = false;
         g_dhcp_error[0] = 0;
         if (!w2_dhcp_cleanup_owned(iface, true)) {
             log_msg("dhcp client: reacquire cleanup pending: %s",
@@ -3665,6 +4035,7 @@ static bool w2_dhcp_client_renew(w2_dhcp_step_t step)
 static bool client_disconnect(void)
 {
     bool cleanup_ok = w2_dhcp_cleanup_owned("wlan0", true);
+    g_dhcp_lease.wifi_default = false;
     if (!cleanup_ok)
         log_msg("client: owned lease cleanup failed during disconnect: %s",
                 g_dhcp_error[0] ? g_dhcp_error : "unknown");
@@ -3701,6 +4072,7 @@ static bool client_wait_ip(const char *service, int attempts)
 
 static bool client_connect(void)
 {
+    g_client_legacy_routes_removed = 0;
     if (!g_cfg.ssid[0]) {
         set_msg("no client SSID imported (use wifi.txt or iphone_wifi.txt)");
         return false;
@@ -3714,6 +4086,16 @@ static bool client_connect(void)
     /* A new association must not inherit a stale default route/address. */
     if (!w2_dhcp_cleanup_owned("wlan0", true)) {
         set_msg("client: previous owned lease cleanup could not be confirmed");
+        return false;
+    }
+    /* A default via wlan0 that is not our exact ledged route is unverified
+     * owner/foreign state: preserve it and refuse to claim a clean start. */
+    if (!w2_legacy_wlan_default_cleanup()) {
+        set_msg("client: unverified wlan0 default preserved; refusing route mutation");
+        g_dhcp_lease.valid = false;
+        g_dhcp_lease.route_ok = false;
+        g_dhcp_lease.wifi_default = false;
+        g_dhcp_lease.updated = true;
         return false;
     }
     memset(&g_dhcp_lease, 0, sizeof(g_dhcp_lease));
@@ -3772,8 +4154,32 @@ static bool client_connect(void)
 /* SSH                                                                 */
 /* ------------------------------------------------------------------ */
 
+#ifndef WIFI1B_USB0_SYSFS
+#define WIFI1B_USB0_SYSFS "/sys/class/net/usb0"
+#endif
+
+/* The Orange Pi is an ECM gadget: the head unit sees usb0 and the daemon's
+ * runtime udev rule gives it 10.55.0.2/24 with no default route.  That link
+ * is the out-of-band SSH path, independent of WiFi state. */
+static bool usb0_present(void)
+{
+    return file_exists(WIFI1B_USB0_SYSFS);
+}
+
+static bool ssh_wifi_active(void)
+{
+    return g_cfg.wlan_on && g_cfg.mode != MODE_OFF;
+}
+
+static bool ssh_transport_available(void)
+{
+    return ssh_wifi_active() || usb0_present();
+}
+
 static bool ensure_car_user(void)
 {
+    if (!w2_mkdir_mode_checked(SSH_HOME, 0700) ||
+        !w2_mkdir_mode_checked(SSH_HOME "/.ssh", 0700)) return false;
 #ifdef WIFI_TEST
     return true;
 #endif
@@ -3801,22 +4207,38 @@ static bool ensure_car_user(void)
 
 static bool ssh_start(void)
 {
-    if (!g_cfg.wlan_on || g_cfg.mode == MODE_OFF) {
+    if (!g_cfg.ssh_enabled || g_stop || g_shutdown_cleanup) {
         ssh_stop();
         return false;
+    }
+    /* WiFi off is not SSH off when the Orange Pi USB link is present: the
+     * Pi's usb0 path is the out-of-band management channel. */
+    if (!ssh_transport_available()) {
+        ssh_stop();
+        return true; /* deferred until a transport appears */
     }
     if (!file_exists(DROPBEAR_BIN) && !file_exists(DROPBEAR_MULTI)) {
         set_msg("dropbear binary missing");
         return false;
     }
-    ensure_car_user();
+    if (!w2_mkdir_mode_checked(SSH_DIR, 0700) || !ensure_car_user()) {
+        set_msg("SSH not started: credential parents or account are unverified");
+        return false;
+    }
     if (ssh_running() && g_ssh_active_port) {
         if (g_ssh_bound_ip[0]) {
             /* Dropbear may have outlived a firewall flush or a daemon
              * restart.  Never report SSH ready while its rule is missing. */
-            g_ssh_fw_open = fw_open(g_ssh_active_port);
-            if (!g_ssh_fw_open)
-                log_msg("SSH: firewall rule missing while SSH is running");
+            if (ssh_wifi_active()) {
+                g_ssh_fw_open = fw_open(g_ssh_active_port);
+                if (!g_ssh_fw_open)
+                    log_msg("SSH: firewall rule missing while SSH is running");
+            } else {
+                g_ssh_fw_open = false;
+            }
+            if (usb0_present() &&
+                !usb0_rule_write(g_ssh_active_port))
+                log_msg("SSH: usb0 exact state could not be reasserted");
             return true;
         }
         ssh_stop();
@@ -3832,29 +4254,76 @@ static bool ssh_start(void)
         g_ssh_port_fallback = true;
         config_save();
     }
-    mkdir(SSH_DIR, 0700);
-    mkdir(SSH_HOME, 0700);
-    mkdir(SSH_HOME "/.ssh", 0700);
-    char eff[512];
-    snprintf(eff, sizeof(eff), SSH_HOME "/.ssh/authorized_keys");
-    if (file_exists(SSH_KEYS)) {
-        char keys[16384];
-        if (read_file(SSH_KEYS, keys, sizeof(keys)) <= 0) {
-            set_msg("SSH not started: imported keys are empty or unreadable");
-            return false;
-        }
-        if (write_file_atomic(eff, keys, 0600) != 0) {
-            set_msg("SSH not started: effective key replacement failed");
-            return false;
-        }
-        chmod(eff, 0600);
-        sh("chsmack -a _ %s 2>/dev/null", eff);
-    } else {
-        unlink(eff);
+    if (!w2_mkdir_mode_checked(SSH_DIR, 0700) ||
+        !w2_mkdir_mode_checked(SSH_HOME, 0700) ||
+        !w2_mkdir_mode_checked(SSH_HOME "/.ssh", 0700)) {
+        set_msg("SSH not started: credential parents are unverified");
+        return false;
     }
-    int fw_ok = fw_open(chosen);
-    g_ssh_fw_open = fw_ok != 0;
-    if (!fw_ok) log_msg("SSH: owned firewall rule failed (nonfatal); dropbear will still bind");
+    char eff[512];
+    struct stat key_st;
+    snprintf(eff, sizeof(eff), SSH_HOME "/.ssh/authorized_keys");
+    bool have_canonical = lstat(SSH_KEYS, &key_st) == 0;
+    int canonical_errno = errno;
+    bool have_home = lstat(eff, &key_st) == 0;
+    int home_errno = errno;
+    if (!have_canonical && canonical_errno != ENOENT) {
+        set_msg("SSH not started: canonical key path is unverified");
+        return false;
+    }
+    if (!have_home && home_errno != ENOENT) {
+        set_msg("SSH not started: home key path is unverified");
+        return false;
+    }
+    if (have_canonical && !w2_single_regular(SSH_KEYS, NULL)) {
+        set_msg("SSH not started: canonical keys are not a single regular file");
+        return false;
+    }
+    if (have_home && !w2_single_regular(eff, NULL)) {
+        set_msg("SSH not started: home keys are not a single regular file");
+        return false;
+    }
+    if (have_canonical) {
+        char keys[16384];
+        int n = read_file(SSH_KEYS, keys, sizeof(keys));
+        if (n <= 0 || n >= (int)sizeof(keys) - 1) {
+            set_msg("SSH not started: canonical keys are empty or unreadable");
+            return false;
+        }
+        if (have_home) {
+            char home[16384];
+            int hn = read_file(eff, home, sizeof(home));
+            if (hn != n || hn < 0 || memcmp(keys, home, (size_t)n) != 0) {
+                set_msg("SSH not started: different canonical/home key sets preserved");
+                return false;
+            }
+        } else {
+            if (write_file_atomic(eff, keys, 0600) != 0 ||
+                !w2_file_equals_text(eff, keys)) {
+                set_msg("SSH not started: canonical-only key write failed");
+                return false;
+            }
+#ifndef WIFI_TEST
+            sh("chsmack -a _ %s 2>/dev/null", eff);
+#endif
+        }
+    }
+    /* If canonical is absent, a single-regular home-only key is preserved.
+     * Unsafe home-only types already failed above; dropbear is not started. */
+    int fw_ok = 1;
+    if (ssh_wifi_active()) {
+        fw_ok = fw_open(chosen);
+        g_ssh_fw_open = fw_ok != 0;
+        if (!fw_ok)
+            log_msg("SSH: owned firewall rule failed (nonfatal); dropbear will still bind");
+    } else {
+        g_ssh_fw_open = false;
+    }
+    if (!usb0_rule_write(chosen)) {
+        set_msg("SSH not started: usb0 helper/rule could not be verified");
+        ssh_stop_cleanup();
+        return false;
+    }
 
     const char *bin = file_exists(DROPBEAR_BIN) ? DROPBEAR_BIN : DROPBEAR_MULTI;
     const char *keygen = file_exists(DROPBEAR_KEY) ? DROPBEAR_KEY : NULL;
@@ -3886,6 +4355,8 @@ static bool ssh_start(void)
         return true;
     }
     fw_close(g_cfg.ssh_port);
+    if (!usb0_rule_write(0))
+        log_msg("SSH: usb0 port-0 state could not be applied");
     g_ssh_fw_open = false;
     set_msg("SSH failed to start on port %d", g_cfg.ssh_port);
     return false;
@@ -3949,6 +4420,22 @@ static bool stop_all(void)
     return lease_clean;
 }
 
+/* A failed WiFi apply must not take the Orange Pi out-of-band SSH path with
+ * it.  Keep usb0 SSH alive when it is present; otherwise stop WiFi SSH. */
+static void ssh_after_wifi_failure(void)
+{
+    char saved[256];
+    str_copy(saved, sizeof(saved), g_last_msg);
+    if (g_cfg.ssh_enabled && usb0_present() && !g_stop && !g_shutdown_cleanup) {
+        if (!ssh_start())
+            log_msg("SSH: usb0 recovery after WiFi failure failed");
+    } else {
+        ssh_stop();
+    }
+    /* Keep the WiFi failure reason visible; SSH start/stop has its own log. */
+    str_copy(g_last_msg, sizeof(g_last_msg), saved);
+}
+
 /* Return: 1 = restored, 0 = deferred because a peer owns wlan0 (safe),
  * -1 = attempted and not confirmed. */
 static int carplay_stock_handoff(bool owned)
@@ -4001,6 +4488,7 @@ static bool apply_mode_work(bool pair)
             route_cleanup_ok = w2_owned_route_cleanup();
             g_dhcp_lease.valid = false;
             g_dhcp_lease.route_ok = false;
+            g_dhcp_lease.wifi_default = false;
             /* ANY exact address/journal/ledger owner keeps cleanup pending,
              * even when there is no radio reservation to delete it yet. */
             if (!route_cleanup_ok || g_dhcp_lease.ip != 0 ||
@@ -4024,6 +4512,11 @@ static bool apply_mode_work(bool pair)
         /* Reached only with our reservation, including interrupted scans.
          * The earlier ownership guard keeps idle/peer-Off hands-off. */
         bool lease_clean = stop_all();
+        /* stop_all() intentionally tears down WiFi-owned SSH.  The Pi USB
+         * link is a separate transport and must stay usable with WiFi Off.
+         * Do not start it while the daemon is shutting down. */
+        if (!g_stop && !g_shutdown_cleanup && g_cfg.ssh_enabled && usb0_present())
+            ssh_start();
         bt_pair_stop();
         /* Wireless CarPlay is not active: clear the vendor flag so the stock
          * USB CarPlay path is not left disabled by a previous session. */
@@ -4043,8 +4536,10 @@ static bool apply_mode_work(bool pair)
             g_dhcp_lease.cleanup_pending = true;
             g_dhcp_lease.updated = false;
         }
+        bool usb_ssh = g_cfg.ssh_enabled && usb0_present() && ssh_running();
         bool off = lease_clean && route_ok && !g_dhcp_lease.cleanup_pending &&
-                   down && !wpa_process_alive() && !ssh_running() && !dhcpd_running();
+                   down && !wpa_process_alive() &&
+                   (!ssh_running() || usb_ssh) && !dhcpd_running();
         bool handoff_ok = true;
         if (off && g_cfg.carplay_control)
             handoff_ok = carplay_stock_handoff(true) == 1;
@@ -4054,6 +4549,8 @@ static bool apply_mode_work(bool pair)
                              g_cfg.carplay_control ?
                              "WLAN off; Stock USB handoff applied" : "WLAN off") :
                 "WLAN-off cleanup could not be confirmed; recovery will retry");
+        if (off && usb_ssh)
+            set_msg("WLAN off; USB SSH active on %s", WIFI1B_USB0_IP);
         return off && handoff_ok && radio_release();
     }
     /* The shared ownership contract above has spoken: a successful begin
@@ -4080,14 +4577,16 @@ static bool apply_mode_work(bool pair)
         restart_vbtd_if_needed(vbt_off);
         if (!ensure_wifi_ready()) {
             (void)w2_dhcp_cleanup_owned("wlan0", true);
-            ssh_stop();
+            g_dhcp_lease.wifi_default = false;
+            ssh_after_wifi_failure();
             return false;
         }
         if (!client_connect()) {
             char why[256];
             str_copy(why, sizeof(why), g_last_msg);
             (void)w2_dhcp_cleanup_owned("wlan0", true);
-            ssh_stop();
+            g_dhcp_lease.wifi_default = false;
+            ssh_after_wifi_failure();
             set_msg("client mode failed: %s", why);
             return false;
         }
@@ -4100,13 +4599,16 @@ static bool apply_mode_work(bool pair)
     /* Leaving client mode requires both the exact ledged route and the
      * owned address to be absent before CarPlay starts. */
     if (!w2_dhcp_cleanup_owned("wlan0", true)) {
+        g_dhcp_lease.wifi_default = false;
         set_msg("client: owned lease cleanup could not be confirmed; CarPlay not started");
         return false;
     }
+    g_dhcp_lease.wifi_default = false;
 
     if (g_ap_restart_requested) {
         ssh_stop();
         if (!ap_stop()) {
+            ssh_after_wifi_failure();
             set_msg("CarPlay explicit restart blocked: AP teardown not confirmed");
             return false;
         }
@@ -4114,7 +4616,7 @@ static bool apply_mode_work(bool pair)
     if (pair) bt_pair_start();
     else if (g_pairing_stop_requested) bt_pair_stop();
     if (!ap_start()) {
-        ssh_stop();
+        ssh_after_wifi_failure();
         bool vbt_off = false;
         vbt_set_wireless_carplay(false, &vbt_off);
         restart_vbtd_if_needed(vbt_off);
@@ -4124,7 +4626,7 @@ static bool apply_mode_work(bool pair)
         ap_probe_t failed;
         ap_probe(&failed);
         ap_evidence("firewall-failed", &failed);
-        ssh_stop();
+        ssh_after_wifi_failure();
         bool vbt_off = false;
         vbt_set_wireless_carplay(false, &vbt_off);
         restart_vbtd_if_needed(vbt_off);
@@ -4142,7 +4644,7 @@ static bool apply_mode_work(bool pair)
     ap_probe_t p;
     ap_probe(&p);
     if (p.state != AP_READY) {
-        ssh_stop();
+        ssh_after_wifi_failure();
         bool vbt_off = false;
         vbt_set_wireless_carplay(false, &vbt_off);
         restart_vbtd_if_needed(vbt_off);
