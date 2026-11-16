@@ -1,0 +1,33 @@
+{
+  "name": "dmengine-fumo-download-update-multi",
+  "description": "Mode C multi-component combined FUMO command: the mock sends Exec on ./ManagedObjects/FUMO/DownloadAndUpdate and serves the 291-byte two-component/three-update DP. The engine downloads it, advances FUMO state 30 -> 40 -> 60, hands event 77 with /update//lab-fumo to the OEM handler, then reports lab result 200 (state 90 -> idle). The result is lab-supplied and the package is structural; no physical install is claimed.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-ready",
+    "fumo-http-post",
+    "fumo-response",
+    "fumo-syncml",
+    "fumo-trigger",
+    "fumo-command",
+    "fumo-server-auth",
+    "fumo-dd",
+    "fumo-confirm",
+    "fumo-download",
+    "fumo-multidp",
+    "fumo-notify",
+    "fumo-dl-complete",
+    "fumo-state",
+    "fumo-combined-command",
+    "fumo-update-progressing",
+    "fumo-update-handoff",
+    "fumo-update-result-sent",
+    "fumo-update-result-accepted",
+    "fumo-update-result-reported",
+    "fumo-no-production",
+    "dmengine-fumo-download-update-multi"
+  ],
+  "blockers": {}
+}

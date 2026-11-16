@@ -927,7 +927,8 @@ python3 -B launch.py check-dp <package.dp> --key lab-dp-key
 
 It validates the preamble, version, declared body size, component-table
 range, update-table range, payload bounds, string offsets, installer type, NUL
-termination and the optional lab HMAC-SHA256 trailer. The trailer is an
+termination and the optional lab HMAC-SHA256 trailer. Multiple component and
+update entries are supported. The trailer is an
 integrity fixture, not a vendor firmware signature.
 
 The engine logs `DL session complete`, advances FUMO state `30` (downloading)
@@ -1161,6 +1162,186 @@ Set state, 40
 The mock returns the remaining 120 bytes with `206 Partial Content`; the
 download completes and the install notification is posted. A real run passes
 all seven checks. No install is claimed.
+
+## dmengine FUMO resume across restart (Mode C)
+
+```sh
+python3 -B launch.py run --kernel compat --profile research \
+  --scenario dmengine-fumo-resume-restart --payload payload/tweaks-vm --timeout 360
+```
+
+Two-phase resume. Phase 1 uses the partial-only mock mode (64/184 bytes with
+`Accept-Ranges`/ETag); after the engine writes `dlresume.dat` and the log shows
+the partial object, the probe stops the engine. Phase 2 restarts dmengine with
+a Range-capable mock and `dm_state=1`:
+
+```text
+phase 1: MOCK_DM_PARTIAL method=GET path=/object.bin bytes=64 total=184
+phase 1: /update/fota/dme/dlresume.dat written
+phase 2: MOCK_DM_OBJECT_HEADERS range=Range: bytes=64-
+phase 2: MOCK_DM_RESUME method=GET path=/object.bin offset=64 bytes=120 total=184
+phase 2: MOCK_DM_NOTIFY path=/notify bytes=11 body=900 Success
+phase 2: DM session complete
+phase 2: Set state, 50
+```
+
+The restarted engine truncates its log at startup, so phase-2 assertions use
+the whole truncated log rather than a byte offset. State `50` is the
+post-download value in this run; the check accepts a completed DL/DM session
+plus state `50` and the notification. A real run passes all ten checks. No
+install is claimed.
+
+## dmengine FUMO resume without an ETag (Mode C)
+
+```sh
+python3 -B launch.py run --kernel compat --profile research \
+  --scenario dmengine-fumo-resume-noetag --payload payload/tweaks-vm --timeout 320
+```
+
+The mock advertises `Accept-Ranges: bytes` on the first 64/184 response but
+omits the ETag. The engine records the offset but refuses to resume:
+
+```text
+MOCK_DM_NOETAG_PARTIAL method=GET path=/object.bin bytes=64 total=184
+DL resume: got offset=64, eTag=<[null]>, isIgnoreMissingETag=0
+MOCK_DM_NOETAG_FULL method=GET path=/object.bin bytes=184 range=none
+DL session complete
+Set state, 40
+MOCK_DM_NOTIFY path=/notify bytes=11 body=900 Success
+```
+
+No `Range: bytes=64-` is sent; the engine performs a full GET from zero and the
+download completes. This proves resume requires an ETag, not just
+`Accept-Ranges`. A real run passes all eight checks. No install is claimed.
+
+## dmengine FUMO multi-component download (Mode C)
+
+```sh
+python3 -B launch.py run --kernel compat --profile research \
+  --scenario dmengine-fumo-download-multi --payload payload/tweaks-vm --timeout 320
+```
+
+The mock serves a 291-byte object with a two-component, three-update DP body:
+
+```text
+MOCK_DM_DD method=GET path=/package.bin bytes=403 object=/object.bin object_bytes=291
+MOCK_DM_DOWNLOAD method=GET path=/object.bin bytes=291
+  preamble=RedBendEFDPackage version=4 components=2
+MOCK_DM_MULTIDP method=GET path=/object.bin bytes=291 components=2 updates=3
+MOCK_DM_NOTIFY path=/notify bytes=11 body=900 Success
+DL session complete
+Set state, 30
+Set state, 40
+```
+
+Layout: 52-byte header, two 28-byte component entries
+(`LABCOMP`/`LABID` and `LABCOMP2`/`LABID2`), three 8-byte update entries,
+59 bytes of strings, three 16-byte payloads (239-byte body) and the 52-byte
+lab HMAC trailer. The Python builder, parser and `check-dp --key` validate the
+same layout; a loopback test compares the C fixture byte-for-byte. A real run
+passes all sixteen checks. No install is claimed.
+
+## dmengine FUMO multi-component DownloadAndUpdate (Mode C)
+
+```sh
+python3 -B launch.py run --kernel compat --profile research \
+  --scenario dmengine-fumo-download-update-multi --payload payload/tweaks-vm --timeout 380
+```
+
+Combines the multi-component package with the combined FUMO command. The mock
+sends `Exec ./ManagedObjects/FUMO/DownloadAndUpdate` and serves the 291-byte
+two-component/three-update object:
+
+```text
+MOCK_DM_MULTIDP method=GET path=/object.bin bytes=291 components=2 updates=3
+Got EXEC on "DownloadAndUpdate" node.
+Set state, 30 -> 40 -> 60
+event to OEM handler = [77] ... strData = [/update//lab-fumo]
+VDMC_FUMO_updateReport] result = [200]
+Set state, 90
+DM session complete
+```
+
+The lab OEM result is supplied by the probe; the package is structural, so no
+physical install or firmware-success is claimed. A real run passes all
+twenty-two checks.
+
+## dmengine FUMO multi-component resume (Mode C)
+
+```sh
+python3 -B launch.py run --kernel compat --profile research \
+  --scenario dmengine-fumo-resume-multi --payload payload/tweaks-vm --timeout 340
+```
+
+The mock serves a 64/291 partial of the two-component/three-update DP with
+`Accept-Ranges` and `ETag: "lab-dp-291"`. The engine retries with the Range
+header and completes the download:
+
+```text
+MOCK_DM_DD method=GET path=/package.bin object=/object.bin object_bytes=291
+MOCK_DM_PARTIAL method=GET path=/object.bin bytes=64 total=291
+MOCK_DM_RESUME method=GET path=/object.bin offset=64 bytes=227 total=291
+DL resume: got offset=64, eTag=<"lab-dp-291">, isIgnoreMissingETag=0
+Object: size=291 len=227, offset=64, eTag=<"lab-dp-291">
+DL session complete
+Set state, 40
+MOCK_DM_NOTIFY path=/notify bytes=11 body=900 Success
+```
+
+The mock returns the remaining 227 bytes with 206. A real run passes all seven
+checks. No install is claimed.
+
+## dmengine FUMO multi-component failure result (Mode C, negative)
+
+```sh
+python3 -B launch.py run --kernel compat --profile research \
+  --scenario dmengine-fumo-download-update-multi-failure --payload payload/tweaks-vm --timeout 380
+```
+
+Same multi-component `DownloadAndUpdate` flow, but the lab OEM reports result
+`500`:
+
+```text
+MOCK_DM_MULTIDP bytes=291 components=2 updates=3
+Set state, 30 -> 40 -> 60
+event to OEM handler = [77] strData = [/update//lab-fumo]
+MOCK_OEM_SENT code=20 field1=500
+VDMC_FUMO_updateReport] result = [500]
+VDM_FUMO_triggerReportSession(500)
+Set state, 10
+DM session complete
+```
+
+The engine reports the failure through a DM session, returns to idle and never
+enters success state `90`. The result is lab-supplied and the package is
+structural; no physical install is claimed. A real run passes all twenty-three
+checks.
+
+## dmengine FUMO multi-component invalid result (Mode C, negative)
+
+```sh
+python3 -B launch.py run --kernel compat --profile research \
+  --scenario dmengine-fumo-download-update-multi-invalid-result --payload payload/tweaks-vm --timeout 380
+```
+
+Same multi-component `DownloadAndUpdate` flow, but the lab OEM reports the
+invalid result `0`:
+
+```text
+MOCK_DM_MULTIDP bytes=291 components=2 updates=3
+event to OEM handler = [77] strData = [/update//lab-fumo]
+VDMC_FUMO_updateReport] result = [0]
+validateResultCode - invalid result code (0). using UNDEFINED(409) instead.
+VDM_FUMO_triggerReportSession(0)
+Set state, 70
+Set state, 10
+DM session complete
+```
+
+The engine remaps the result to `409`, reports the failure and returns to idle
+without success state `90`. The result is lab-supplied and the package is
+structural; no physical install is claimed. A real run passes all twenty-four
+checks.
 
 ## dmengine startup (Mode C)
 

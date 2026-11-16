@@ -1,0 +1,19 @@
+{
+  "name": "dmengine-fumo-resume-noetag",
+  "description": "Mode C FUMO resume without an ETag: the mock advertises Accept-Ranges but omits the ETag on the first 64/184 object response. The engine records offset 64, logs eTag=<[null]> and isIgnoreMissingETag=0, then falls back to a full 184-byte GET instead of a Range request. The full download completes (DL session complete, state 40) and the install notification is posted. No install or update-success claim is made.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-noetag-ready",
+    "fumo-noetag-partial",
+    "fumo-noetag-recorded",
+    "fumo-noetag-fallback",
+    "fumo-noetag-complete",
+    "fumo-noetag-notify",
+    "fumo-no-production",
+    "dmengine-fumo-resume-noetag"
+  ],
+  "blockers": {}
+}

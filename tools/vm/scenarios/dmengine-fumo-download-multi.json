@@ -1,0 +1,27 @@
+{
+  "name": "dmengine-fumo-download-multi",
+  "description": "Mode C FUMO multi-component download: the mock serves a 291-byte object whose DP body has two components (LABCOMP/LABID and LABCOMP2/LABID2) and three 16-byte update payloads, followed by the 52-byte lab HMAC trailer. The engine performs the authenticated DD/object GET, posts the install notification and advances FUMO state 30 -> 40. The package is a structural lab fixture; no install is claimed.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-ready",
+    "fumo-http-post",
+    "fumo-response",
+    "fumo-syncml",
+    "fumo-trigger",
+    "fumo-command",
+    "fumo-server-auth",
+    "fumo-dd",
+    "fumo-confirm",
+    "fumo-download",
+    "fumo-multidp",
+    "fumo-notify",
+    "fumo-dl-complete",
+    "fumo-state",
+    "fumo-no-production",
+    "dmengine-fumo-download-multi"
+  ],
+  "blockers": {}
+}

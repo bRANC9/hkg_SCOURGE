@@ -1,0 +1,21 @@
+{
+  "name": "dmengine-fumo-resume-restart",
+  "description": "Mode C FUMO resume across a dmengine restart: phase 1 serves a 64/184 partial with Accept-Ranges/ETag, then the engine is stopped with dlresume.dat written. Phase 2 restarts the engine with dm_state=1 and a Range-capable mock; it sends Range: bytes=64-, receives the remaining 120 bytes via 206, completes the DL session and advances FUMO state (phase 2 truncates the log at 40/50). No install or update-success claim is made.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-resume-restart-phase1-ready",
+    "fumo-resume-partial",
+    "fumo-resume-restart-state",
+    "fumo-resume-restart-server",
+    "fumo-resume-restart-phase2-ready",
+    "fumo-resume-request",
+    "fumo-resume-complete",
+    "fumo-resume-notify",
+    "fumo-no-production",
+    "dmengine-fumo-resume-restart"
+  ],
+  "blockers": {}
+}

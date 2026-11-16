@@ -103,6 +103,55 @@ class DpBuildTests(unittest.TestCase):
         self.assertTrue(report['ok'], report['problems'])
         self.assertEqual(report['signature']['valid'], None)
 
+    def test_multi_component_and_multi_update_layout(self) -> None:
+        components = [
+            DpComponent('LABCOMP', 'LABID', '1.0', 'LABVENDOR',
+                        installer_type=0,
+                        updates=(DpUpdate(b'LABUPDATE-DATA01'),
+                                 DpUpdate(b'LABUPDATE-DATA02'))),
+            DpComponent('LABCOMP2', 'LABID2', '2.0', 'LABVENDOR2',
+                        installer_type=1,
+                        updates=(DpUpdate(b'LABUPDATE-DATA03'),)),
+        ]
+        body = build_dp(components)
+        self.assertEqual(len(body), 239)
+        self.assertEqual(struct.unpack_from('<2I', body, 24), (2, 239))
+        self.assertEqual(struct.unpack_from('<7I', body, 52),
+                         (132, 140, 146, 150, 0, 2, 108))
+        self.assertEqual(struct.unpack_from('<7I', body, 80),
+                         (160, 169, 176, 180, 1, 1, 124))
+        self.assertEqual(struct.unpack_from('<6I', body, 108),
+                         (191, 16, 207, 16, 223, 16))
+        self.assertEqual(body[191:239],
+                         b'LABUPDATE-DATA01LABUPDATE-DATA02'
+                         b'LABUPDATE-DATA03')
+        report = parse_dp(body)
+        self.assertTrue(report['ok'], report['problems'])
+        self.assertEqual([c['name'] for c in report['components']],
+                         ['LABCOMP', 'LABCOMP2'])
+        self.assertEqual([len(c['updates']) for c in report['components']],
+                         [2, 1])
+        self.assertEqual([u['size'] for c in report['components']
+                          for u in c['updates']], [16, 16, 16])
+
+    def test_multi_component_signature_trailer(self) -> None:
+        components = [
+            DpComponent('LABCOMP', 'LABID', '1.0', 'LABVENDOR',
+                        installer_type=0,
+                        updates=(DpUpdate(b'LABUPDATE-DATA01'),
+                                 DpUpdate(b'LABUPDATE-DATA02'))),
+            DpComponent('LABCOMP2', 'LABID2', '2.0', 'LABVENDOR2',
+                        installer_type=1,
+                        updates=(DpUpdate(b'LABUPDATE-DATA03'),)),
+        ]
+        body = build_dp(components)
+        signed = build_dp(components, signing_key=b'lab-dp-key')
+        self.assertEqual(len(signed), len(body) + SIG_TRAILER)
+        report = parse_dp(signed, b'lab-dp-key')
+        self.assertTrue(report['ok'], report['problems'])
+        self.assertTrue(report['signature']['valid'])
+        self.assertEqual(report['body_size'], 239)
+
     def test_rejects_empty_component_list(self) -> None:
         with self.assertRaises(DpError):
             build_dp([])

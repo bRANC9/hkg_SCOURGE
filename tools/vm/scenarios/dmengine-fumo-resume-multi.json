@@ -1,0 +1,18 @@
+{
+  "name": "dmengine-fumo-resume-multi",
+  "description": "Mode C FUMO multi-component resume: the mock serves only 64 of the 291-byte two-component/three-update object with Accept-Ranges and ETag lab-dp-291. The engine retries with Range: bytes=64- / If-Range; the mock returns the remaining 227 bytes with 206 and the download completes (DL session complete, state 30 -> 40, install notification). The package is a structural lab fixture; no install or update-success claim is made.",
+  "requires": [
+    "payload"
+  ],
+  "requires_mode": "compat",
+  "checks": [
+    "fumo-multi-resume-ready",
+    "fumo-multi-resume-partial",
+    "fumo-multi-resume-request",
+    "fumo-multi-resume-complete",
+    "fumo-multi-resume-notify",
+    "fumo-no-production",
+    "dmengine-fumo-resume-multi"
+  ],
+  "blockers": {}
+}

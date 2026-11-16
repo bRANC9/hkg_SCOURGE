@@ -25,13 +25,15 @@ def free_port() -> int:
 
 @unittest.skipUnless(MOCK_SERVER.is_file(),
                      'mock-dm-server build artifact is not present')
-class MockDmServerDpTests(unittest.TestCase):
+class _MockDmServerTest(unittest.TestCase):
+    MODE = 'download'
+
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.log = Path(self.tmp.name) / 'mock-dm.log'
         self.port = free_port()
         self.server = subprocess.Popen(
-            [str(MOCK_SERVER), str(self.port), str(self.log), 'download'],
+            [str(MOCK_SERVER), str(self.port), str(self.log), self.MODE],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -61,6 +63,8 @@ class MockDmServerDpTests(unittest.TestCase):
                 f'http://127.0.0.1:{self.port}{path}', timeout=3) as response:
             return response.read(), response.headers.get('Content-Type', '')
 
+
+class MockDmServerDpTests(_MockDmServerTest):
     def test_served_dp_matches_python_builder(self) -> None:
         data, content_type = self.get('/object.bin')
         self.assertEqual(content_type, 'application/octet-stream')
@@ -87,44 +91,46 @@ class MockDmServerDpTests(unittest.TestCase):
         self.assertIn('MOCK_DM_DD method=GET path=/package.bin', log)
 
 
+class MockDmServerMultiDpTests(_MockDmServerTest):
+    MODE = 'multidp'
 
-@unittest.skipUnless(MOCK_SERVER.is_file(),
-                     'mock-dm-server build artifact is not present')
-class MockDmServerBadSignatureTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.log = Path(self.tmp.name) / 'mock-dm.log'
-        self.port = free_port()
-        self.server = subprocess.Popen(
-            [str(MOCK_SERVER), str(self.port), str(self.log), 'badsig'],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if self.server.poll() is not None:
-                output = self.server.stdout.read() if self.server.stdout else ''
-                self.fail(f'mock server exited early: {output}')
-            try:
-                with socket.create_connection(('127.0.0.1', self.port), 0.2):
-                    return
-            except OSError:
-                time.sleep(0.05)
-        self.fail('mock server did not start')
+    def test_served_multi_dp_matches_python_builder(self) -> None:
+        data, content_type = self.get('/object.bin')
+        self.assertEqual(content_type, 'application/octet-stream')
+        expected = build_dp([
+            DpComponent('LABCOMP', 'LABID', '1.0', 'LABVENDOR',
+                        installer_type=0,
+                        updates=(DpUpdate(b'LABUPDATE-DATA01'),
+                                 DpUpdate(b'LABUPDATE-DATA02'))),
+            DpComponent('LABCOMP2', 'LABID2', '2.0', 'LABVENDOR2',
+                        installer_type=1,
+                        updates=(DpUpdate(b'LABUPDATE-DATA03'),)),
+        ], signing_key=b'lab-dp-key')
+        self.assertEqual(data, expected)
+        report = parse_dp(data, b'lab-dp-key')
+        self.assertTrue(report['ok'], report['problems'])
+        self.assertTrue(report['signature']['valid'])
+        self.assertEqual(report['body_size'], 239)
+        self.assertEqual([c['name'] for c in report['components']],
+                         ['LABCOMP', 'LABCOMP2'])
+        self.assertEqual([len(c['updates']) for c in report['components']],
+                         [2, 1])
+        self.assertIn('MOCK_DM_MULTIDP method=GET path=/object.bin '
+                      'bytes=291 components=2 updates=3',
+                      self.log.read_text())
 
-    def tearDown(self) -> None:
-        self.server.terminate()
-        try:
-            self.server.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            self.server.kill()
-            self.server.wait(timeout=1)
-        if self.server.stdout:
-            self.server.stdout.close()
-        self.tmp.cleanup()
+    def test_download_descriptor_points_at_the_multi_dp(self) -> None:
+        data, content_type = self.get('/package.bin')
+        text = data.decode('ascii')
+        self.assertEqual(content_type, 'application/vnd.oma.dd+xml')
+        self.assertIn('<size>291</size>', text)
+
+
+class MockDmServerBadSignatureTests(_MockDmServerTest):
+    MODE = 'badsig'
 
     def test_bad_signature_rejected_by_validator(self) -> None:
-        with urllib.request.urlopen(
-                f'http://127.0.0.1:{self.port}/object.bin', timeout=3) as response:
-            data = response.read()
+        data, _ = self.get('/object.bin')
         report = parse_dp(data, b'lab-dp-key')
         self.assertFalse(report['ok'])
         self.assertIn('signature mismatch', report['problems'])

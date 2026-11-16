@@ -1158,6 +1158,61 @@ items beyond that.
   `dmengine-fumo-resume` asserts partial, Range request, completion and
   notification. Real run PASS with seven checks; 3 new tests; 570 tests
   (75 skipped); doctor green.
+- **2026-11-15 — FUMO resume across restart**: phase 1 serves only the
+  64/184 partial object and writes `dlresume.dat`; the engine is stopped.
+  Phase 2 restarts it with a Range-capable mock and `dm_state=1`; the engine
+  sends `Range: bytes=64-`, the mock returns the remaining 120 bytes with 206,
+  and the restarted engine completes the session, logs `Set state, 50` and
+  posts the install notification. The restarted engine truncates its log at
+  startup, so phase-2 checks read the whole log. `dmengine-fumo-resume-restart`
+  asserts the restart state, Range request, completion and notification. Real
+  run PASS with ten checks; 3 new tests; 573 tests (75 skipped); doctor green.
+- **2026-11-15 — FUMO resume without ETag**: the mock serves a 64/184 partial
+  with `Accept-Ranges` but no ETag. The engine records offset 64, logs
+  `eTag=<[null]>` / `isIgnoreMissingETag=0`, sends **no** Range request and
+  re-downloads the full 184-byte object, which completes (state 40,
+  notification posted). `dmengine-fumo-resume-noetag` asserts the recorded
+  offset, the fallback full GET, completion and notification. This shows
+  resume requires an ETag, not just `Accept-Ranges`. Real run PASS with eight
+  checks; 3 new tests; 576 tests (75 skipped); doctor green.
+- **2026-11-15 — DP multi-component/update fixture**: `build_dp_multi_package`
+  serves a 291-byte object with two 28-byte component entries, three update
+  entries and three 16-byte payloads (239-byte body plus the 52-byte trailer).
+  The Python builder/parser and a loopback test validate the same layout
+  byte-for-byte. `dmengine-fumo-download-multi` downloads it through the real
+  DD/auth/object flow and asserts the two-component marker, notification and
+  state 30 -> 40. Real run PASS with sixteen checks; 7 new tests; 583 tests
+  (75 skipped); doctor green.
+- **2026-11-15 — Multi-component combined DownloadAndUpdate**: the mock serves
+  the 291-byte two-component/three-update object for an Exec on
+  `DownloadAndUpdate`. The engine downloads it, advances state
+  30 -> 40 -> 60, hands event 77 with `/update//lab-fumo` to the OEM handler
+  and reports lab result 200 (state 90 -> idle). The result is lab-supplied and
+  the package is structural; no physical install is claimed.
+  `dmengine-fumo-download-update-multi` asserts the multi marker, combined
+  command, handoff, result 200 and completion. Real run PASS with twenty-two
+  checks; 3 new tests; 586 tests (75 skipped); doctor green.
+- **2026-11-15 — Multi-component resume**: the mock serves a 64/291 partial
+  of the two-component/three-update object with `Accept-Ranges` and ETag
+  `lab-dp-291`. The engine sends `Range: bytes=64-` / `If-Range`, receives the
+  remaining 227 bytes with 206, completes the DL session and advances state
+  30 -> 40. `dmengine-fumo-resume-multi` asserts the offset/eTag, 206 request,
+  completion and notification. Real run PASS with seven checks; 3 new tests;
+  589 tests (75 skipped); doctor green.
+- **2026-11-15 — Multi-component failure result**: the multi-component
+  `DownloadAndUpdate` flow reports OEM result 500 after the event-77 handoff.
+  The engine logs `VDMC_FUMO_updateReport result=[500]`,
+  `triggerReportSession(500)`, reports through a DM session and returns to idle
+  without state 90. `dmengine-fumo-download-update-multi-failure` asserts the
+  multi marker, handoff, failure result and absence of success. Real run PASS
+  with twenty-three checks; 3 new tests; 592 tests (75 skipped); doctor green.
+- **2026-11-15 — Multi-component invalid result**: the 291-byte
+  `DownloadAndUpdate` flow receives OEM result 0. `validateResultCode` remaps
+  it to `UNDEFINED(409)`; the engine reports through a DM session, transitions
+  state 70 -> 10 and never enters success state 90.
+  `dmengine-fumo-download-update-multi-invalid-result` asserts the multi
+  marker, remap, failure report and absence of success. Real run PASS with
+  twenty-four checks; 3 new tests; 595 tests (75 skipped); doctor green.
 - **2026-11-15 — FUMO bad-signature boundary**: the mock flips one bit in
   the lab HMAC trailer. The engine still downloads the 184-byte object, posts
   the install notification and advances to state 40. `check-dp --key` rejects

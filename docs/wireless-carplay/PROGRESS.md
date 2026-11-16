@@ -3,7 +3,8 @@
 ## Resume here
 
 Current branch: `wireless-carplay-confirmed-fixes`.
-V23 integration and release gates: [V23.md](V23.md).
+Current V24 integration and release gates: [V24.md](V24.md).
+Historical V23 offline checkpoint: [V23.md](V23.md).
 Reviewed defect checkpoints: [CONFIRMED-FIXES.md](CONFIRMED-FIXES.md).
 The original `wireless-carplay-integration` branch is preserved as history.
 
@@ -33,7 +34,7 @@ pinned); remove the previous two-model requirement. GLM was unavailable
 | C3 | Recover and verify OEM Bluetooth RX/TX/listener and MFi/identity ABI | Static research complete for SPP; live bus/transport proof still pending |
 | C4 | Integrate wireless transport and authenticated bootstrap | Deferred auth, SPP transport and serialized runtime broker independently reviewed offline. All remain unactivated; trusted target receiver integration and live phone/OEM validation still gated |
 | C5 | Connect existing OEM discovery/receiver and lifecycle observations | Offline passive-probe/pin follow-up PASS at `dd970f3`; trusted live receiver mapping and lifecycle integration pending |
-| C6 | Installer/restore, regression gates, experimental release pair | Historical offline independent PASS at `4114142` (28 side-by-side groups); V23 compatibility/build/artifact gates are separate and pending |
+| C6 | Installer/restore, regression gates, experimental release pair | V23 independent offline review and fresh private build/artifact gates PASS at `42f5e4b`, including 32 side-by-side groups; phone/car proof remains unverified and optional firmware SPP readback remains blocked |
 | C7 | Parked vehicle/iPhone validation, explicitly owner-authorized | Not authorized |
 
 At each checkpoint record: exact commit/tree, commands and results, incomplete
@@ -45,7 +46,7 @@ validation. Update this document before ending a work session.
 - Country GB; preserve owner credentials/keys and station-network priority.
 - Preserve stock USB, modem routing, shared micom helper, Battery, charge door,
   cluster, Tweaks and approved Reboot behavior.
-- New standalone V23 must not reinstall WiFi or require migration. Retain existing
+- New standalone V24 must not reinstall WiFi or require migration. Retain existing
   released bundles; do not publish an experimental build as a verified fix.
 - First-action bounded cleanup remains first. Stop owned radios in installers.
 - Firmware-specific binary modifications require exact hash and byte gates.
