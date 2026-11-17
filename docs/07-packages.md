@@ -64,6 +64,16 @@ Copy the contents to the root of a FAT/exFAT stick, plug it in, read
 `run_stuff_result.txt`. Restore: `MODE=restore` (combo) or rename
 `run_stuff_restore.sh` over `run_stuff.sh` (single package).
 
+Installers keep a bounded backup history: `backup/latest` is the restore
+point, and the two newest timestamped snapshots are kept next to it — older
+ones are pruned at the start of the next install (`prune:` line in the
+install log). A stick left in the car re-runs on every power-on (the
+loader's md5 gate lives in `/run`), so this bound is what keeps `/rw_data`
+from filling up. The Wi-Fi daemons likewise cap `daemon.log` and
+`wpa_supplicant.log` at 1 MiB each. Retention and the log caps are
+offline-validated (installer sandbox for retention; daemon smoke tests);
+car validation is pending.
+
 ## Validating without the car
 
 Three cheap gates catch most package regressions before a stick reaches the

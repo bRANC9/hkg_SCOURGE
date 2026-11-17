@@ -134,14 +134,13 @@ repo.
     other `#`-comment files — **after any shebang line, never before it**.
   - `/* SPDX-FileCopyrightText: … */` block form for C sources.
   - Exceptions (no header, never add one): `payload/rootfs/**` (bytes are
-    pinned by the known-good hash table), `config/message.txt` (its bytes
-    are the payload), `packages/wifi/wifi.txt.sample` (imported content),
+    pinned by the known-good hash table), `config/messages.json` (the boot
+    message payload), `packages/wifi/wifi.txt.sample` (imported content),
     `LICENSE`, files under `docs/`, and — codified with the enforcement
     gate — all markdown (the project-level notice covers it, including
     package README/SPEC), all JSON (no comment syntax), binary/image
-    assets, and `tools/vm/payload/PAYLOAD` (marker bytes, like
-    `config/message.txt`). Third-party/fetched material never gets our
-    header.
+    assets, and `tools/vm/payload/PAYLOAD` (marker bytes). Third-party/fetched
+    material never gets our header.
 - Package installers follow the docs/06 house rules (manifest, stock-hash
   guards, backups, idempotency, explicit status lines).
 - Docs are numbered `docs/01–17`; UI research lives in `docs/ui/`.

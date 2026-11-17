@@ -9,6 +9,8 @@ test-carplay:
 		PYTHONDONTWRITEBYTECODE=1 python3 "$$test"; \
 	done
 test: payload test-carplay
+	sh -n scripts/hotswap_daemon.sh
+	sh tests/test_hotswap.sh
 	python3 tests/test_release1b.py
 	python3 tests/test_qml1b.py
 	python3 tests/test_qmlpatch.py

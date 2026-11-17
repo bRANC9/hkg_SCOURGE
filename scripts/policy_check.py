@@ -138,7 +138,7 @@ def spdx_exempt(path: str) -> bool:
     if lowered.endswith((".md", ".json", ".png", ".gif", ".jpg", ".jpeg",
                          ".svg", ".ico", ".img", ".bin", ".pyc", ".qml")):
         return True
-    return path in {"LICENSE", ".gitignore", "config/message.txt",
+    return path in {"LICENSE", ".gitignore",
                     "packages/wifi/wifi.txt.sample",
                     "tools/vm/payload/PAYLOAD"}
 
