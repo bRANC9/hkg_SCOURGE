@@ -79,6 +79,9 @@ artifact against this table; any mismatch means stop and investigate.**
 
 > **Build 6 is car-validated as of 2026-11-21.** A 2021 Ioniq 5 RWD installed
 > `out/stage1.te2` (`7f3b155e…`) through the TOCTOU rig — the run is in docs/17.
+> That hash is the one on the car; the table at the end of this section describes
+> what the current tree builds (`0d975468…`, after the message wording change),
+> and `config/firmware_locks.env` pins the latter.
 > The build-6 column below is therefore what is on that car, and the build-5
 > values are the historical reference: the message refresh changes all patched
 > `.qm` files, so every rootfs-derived hash moved while the four payload
@@ -101,10 +104,15 @@ artifact against this table; any mismatch means stop and investigate.**
 | `config/message.txt` (build 5, retired) | sha256 | `a00dd663d6f3cb791dac9b7d3d674df59f97c0f42b615a981d20c256114abb33` |
 | `out/usb.img` | size / sha256 | 28,894,603,490 / `9b55dafbdfe6b2837e2e77b3e539345aff286b5ad919d11f9ef57a190db558c3` |
 
-Build-6 input (WIP): `config/messages.json` sha256
-`f9929bf437ba0bdd763e744b3a1ec47cbfd910973431b88272a346ceb4a266f6`.
+Build-6 input: `config/messages.json` sha256
+`c202dc016f3465d41602bef66ff60375bb1186308a9bfd827cbc19310a97d269`. The wording
+changed after the 2026-11-21 run, so **the car carries the previous envelope**
+(`7f3b155e…`, the `f9929bf4…` text) and this table describes what the tree builds
+now. Any rebuild with a different `messages.json` moves every rootfs-derived hash
+below, which is precisely why the pins live in `config/firmware_locks.env` and not
+in a sentence.
 
-### Build 6 measurements (offline-validated 2026-11-19, NOT car-validated)
+### Build 6 measurements (offline-validated 2026-11-19; re-recorded 2026-11-21 after the message change)
 
 A full local run of the chain on the OEM 260128 package reproduced every
 payload binary byte-for-byte and produced the values below. The build-5 column
@@ -113,14 +121,19 @@ run confirms them.
 
 | Artifact | Property | Measured value (build 6) |
 |---|---|---|
-| `out/stage1.te2` | size / sha256 | 879,126,179 / `7f3b155e487f10929ea97cb3e12eb95fdeb114e57a38c187ec8b410d1b12fb94` |
-| `work/stage1.padded.tar.gz` | sha256 | `32aec017f8e0c16a7cfcdb836c8db346717774d42186cbf47c87dbe23516a8c4` |
+| `out/stage1.te2` | size / sha256 | 879,126,179 / `0d97546812c755139806c89b55771e0c06230748f46cb7869ccac26045e20db5` |
+| `work/stage1.padded.tar.gz` | sha256 | `c93ae95cb2356b00579d9731b446fa4357fa99e9587e2e3f44cd0edb999561c5` |
 | `work/payload/*.patched` (4 files) | sha256 | unchanged — identical to the build-5 pins |
 | `out/AppUpgrade.patched.te2` | sha256 | `9a0df0809a3f15c2d5f1d3e83c19ec0a27f336727e57e01bb2c5ae2e82783876` (unchanged) |
-| `out/package_second/IONIQ5_EU.ver` | size / sha256 | 2,469 / `c763b6d7947a5bdb70f925db675e284d9a322a6cf7e850a9e0be2f5c6077dd12` |
-| `out/package_wrapper/IONIQ5_EU.ver` | size / sha256 | 2,469 / `34bb8bc8966353a4b3084d916cacfd839d07accf43f691c84471be16602f40d3` |
-| `out/usb.img` | size / sha256 | 28,894,603,492 / `ab4686bd4144d770d5bd95fcf4b337f9340e1a1d2e3d3966619a7a9ba027dcf5` |
+| `out/package_second/IONIQ5_EU.ver` | size / sha256 | 2,469 / `e706e07e34c68501b52d22e6c4bb7e6b186c1e206f18c3e4a943da98764ff199` |
+| `out/package_wrapper/IONIQ5_EU.ver` | size / sha256 | 2,469 / `7203f8d68567e270a51f0d7e8cac6f25c570ace6dcca11cc9718f7fb1a210ab1` |
+| `out/usb.img` | size / sha256 | 28,894,603,492 / `288985aafe5c88190c518b47cfaaeb42d11b9c31879c47c5322b58f456b54b85` (stock, unchanged by the message) |
 | `out/regions.json` | `off` / `len` | 5,505,024 / 879,126,179 (single extent, `benign_then_evil`, pass 2) |
+
+For the record, the envelope the car actually installed on 2026-11-21 was
+`7f3b155e487f10929ea97cb3e12eb95fdeb114e57a38c187ec8b410d1b12fb94`
+(crc32 `287530490`, plaintext `32aec017…`), built from the `f9929bf4…` message
+set. It is not reproducible from this tree any more; docs/17 has the run.
 
 Two facts about the build-5 column, both established on 2026-11-19 while
 reproducing it from a clean download:
