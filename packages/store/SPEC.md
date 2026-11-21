@@ -94,7 +94,32 @@ install and the result says `page installed, tile skipped`. The installer never
 falls back to `stock` once any other payload marker is present, so it cannot
 wipe the Battery/WiFi/Tweaks tiles.
 
-## 6. Two sources, one pipeline
+## 6. Store-installed packages inject their tile at install time
+
+The Store itself is built like every other package (variant files from the
+owner's base). **Anything the Store installs afterwards has no base and no
+variant**, so its installer injects its tile into the live home screen with
+`scripts/qml_inject.sh`:
+
+```sh
+# copy the component next to the others, then inject the instance snippet
+cp MyTile.qml /app/share/AppHomeScreen/qml_eco3.0/component/
+sh qml_inject.sh --file /app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml \
+                 --anchor menuPage --block MyTile.instance.qml
+sh qml_inject.sh --file … --revert      # undo, from the backup
+```
+
+Rules the injector enforces: `--block` is an **instance** snippet (`MyTile { … }`),
+never the component file - imports are only legal at the top of a file and the
+script strips them with a warning; the insertion is brace-matched after the item
+whose `id: <anchor>` matches (the same allocator the build-time variants use);
+the brace balance is verified before writing; the original is kept in
+`/rw_data/store/qml-backup/` and `Advanced.before-store.qml`-style backups stay
+on the stick; SMACK64 is preserved; the QML caches are cleared. `--dry-run`
+reports where it would insert. After an injection the AppHomeScreen must be
+restarted (the package installers already do that).
+
+## 7. Two sources, one pipeline
 
 The app installs from **WiFi (the hub)** and from a **USB stick**, and both end
 in the same `stage_and_run()`: sha256 -> tar -> `run_stuff.sh` -> ledger ->
