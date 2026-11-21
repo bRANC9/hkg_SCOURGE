@@ -5,6 +5,10 @@ through the ordinary head-unit updater (`Settings > General > Software
 Update > Update via USB`) from an exFAT flash drive. No TOCTOU rig, no race,
 no partition write from userspace.
 
+The **TOCTOU path** — the same update delivered by the dynamic gadget instead of
+a pre-written drive — was car-validated on 2026-11-21; the evidence is in *The
+TOCTOU path* below.
+
 TARGET: Ioniq 5 Gen5W_L (Linux), firmware `NE_E.EUR.S5W_L.001.001.260128` (EU).
 
 ## What the image contains
@@ -121,6 +125,31 @@ Record the actual output before treating gate 6 as car-validated.
 5. Do not pull the stick or power off while the updater is working.
 6. After the reboot, run the inline SMACK check above and confirm the
    boot message.
+
+## The TOCTOU path (car-validated 2026-11-21)
+
+A Pi 4 in USB-C peripheral mode served the 28.9 GB image through `nbdkit` from
+an exFAT stick, with one `benign_then_evil` region over the rootfs container
+(`off` 5 505 024, `len` 879 126 179, `switch_after_pass` 2). The head unit was
+started on `Settings > General > Software Update > Update via USB` and accepted
+the same-version 260128 reinstall.
+
+| step | evidence (`out/rig-logs/20261121T131757Z/`) |
+|---|---|
+| check pass | `PASS #1 END reads=214626 bytes_genuine=879108096 bytes_evil=0 served=GENUINE dur=186.71s` |
+| switch | `*** SWITCH at pass #2 (mode=benign_then_evil) ***` at mono 702.563 |
+| install pass | 210 413 reads served from `stage1.te2`, `off` 5 505 024 → 884 625 408, mono 702.566 → 3013.237 |
+| root channel after boot | `uid=0`, `uname=Linux prm-gen-5 4.1.27-abl`, `smack_flag=present`, loader md5 `3a244ac1…` |
+
+There is no `PASS #2 END` line: the update ended without another sweep, so the
+per-read timeline (211 k evil reads covering the whole region) is the record,
+not a summary row. The link measured 4.7 MB/s on the check pass and ~0.37 MB/s
+on the install pass; `tar` throttles the read, not the wire (`docs/04`).
+
+The updater stubs survived the flash: `31c0c3` at five offsets in `AppUpgrade`
+(2 086 500, 2 086 852, 2 086 916, 2 087 076, 7 346 024) and two in `AppScomoDM`
+(930 864, 930 928). The installed `AppUpgrade` md5 is `55e522e37e85b9a7c599f9f17fc1a580`,
+`AppScomoDM` is `45f881b3b08f40e6e07c03988e441341`.
 
 ## Limits and recovery
 

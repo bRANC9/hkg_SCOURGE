@@ -12,7 +12,10 @@ TARGET: Ioniq 5 Gen5W_L (Linux), firmware 260128 (EU). Read docs/12 first.
   tailing.
 - A recovery plan exists: the A/B slot is the built-in fallback (the update
   writes the inactive slot), and the stock package + rig can always
-  re-run. Keep a stock 260128 package tree available.
+  re-run. Keep a stock 260128 package tree available. The stock *reinstall*
+  over the rig is `~/scourge/build/regions-stock.json` (`[]`) copied over
+  `regions.json` — with a swap region in place even a stock image installs the
+  envelope (docs/04, Images).
 
 ## The run
 
@@ -44,7 +47,10 @@ TARGET: Ioniq 5 Gen5W_L (Linux), firmware 260128 (EU). Read docs/12 first.
 - `/rw_data/initial_root.log` shows the loader start and the run.
 - The updater stubs are in place: the sample's `updater_guard` line, or
   `scripts/15_car_preflight.sh` from an update drive, reports `31c0c3` at
-  all six offsets (four in AppUpgrade, two in AppScomoDM).
+  all seven offsets: five in `AppUpgrade` (2 086 500, 2 086 852, 2 086 916,
+  2 087 076, 7 346 024) and two in `AppScomoDM` (930 864, 930 928). The
+  preflight's own header still says "five stubs expected" for the engine —
+  the 2026-11-21 car run matched that, not the older "four" in this list.
 
 ## Failure handling
 
@@ -70,3 +76,17 @@ TARGET: Ioniq 5 Gen5W_L (Linux), firmware 260128 (EU). Read docs/12 first.
 Photos of the update screen at each stage, `toctou.log`, the stick's
 `RUN_STUFF_OK.txt`, and `/rw_data/initial_root.log` — they are the record
 that the deployment matched the documented flow.
+
+Everything the rig produced is on its SD card, so collecting it is one command on
+the build host:
+
+```sh
+scripts/22_collect_rig_logs.sh                 # rig already on the known WiFi
+scripts/22_collect_rig_logs.sh --host 10.42.0.1  # joined the rig's fallback AP
+```
+
+That drops `toctou.log`, `toctou-reads.log`, the gadget journal, a `rig-state.txt`
+(uname, service state, UDC, the region config that was actually in force), the
+page's own `/api/toctou` view, and prints the pass table — `served`, bytes,
+duration and MB/s per pass — into `out/rig-logs/<UTC stamp>/`. The MB/s there is
+the head unit's real read rate, the one number a dry run cannot give you.
