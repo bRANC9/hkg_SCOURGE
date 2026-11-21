@@ -85,6 +85,21 @@ scripts/22_collect_rig_logs.sh                 # rig already on the known WiFi
 scripts/22_collect_rig_logs.sh --host 10.42.0.1  # joined the rig's fallback AP
 ```
 
+The head unit's half of the record is on the head unit. The updater's own log is
+**`/log_data/AppUpgrade`**, on the 1.9 GB persistent ext4 `/log_data` partition
+(703 MB used, 1.1 GB free as of the 2026-11-21 capture) — it survives power-off
+and is superseded when the engine runs another update. The perishable one is
+`/log_data/dltlog/*.dlt`: it rotates fast, so the boot window has to be taken
+early (`docs/bluelink/architecture-and-diagnostics.md:140`).
+
+`tools/update-debug/collect_logs.sh` is the collector for exactly that set:
+copied to the drive it tars `/log_data/{AppUpgrade,dltlog,standarddlt,kernel}`,
+`/rw_data/{second_stage_preflight.txt,initial_root.log,dlt}` and `/update` into
+`scourge_logs.tar.gz` with a `scourge_logs_result.txt` beside it. Call it from
+`run_stuff.sh` (`sh "$USB_DIR/collect_logs.sh"`) rather than installing it *as*
+`run_stuff.sh`, or the restore and `updater_guard` steps of the failsafe never
+run.
+
 That drops `toctou.log`, `toctou-reads.log`, the gadget journal, a `rig-state.txt`
 (uname, service state, UDC, the region config that was actually in force), the
 page's own `/api/toctou` view, and prints the pass table — `served`, bytes,
