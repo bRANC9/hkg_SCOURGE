@@ -338,6 +338,17 @@ class ToctouTests(unittest.TestCase):
         self.assertIn("27.1 MB/s", html)
         self.assertIn("switch after pass 2", html)
 
+    def test_pass_closed_by_session_end_is_flagged_not_rated(self) -> None:
+        """A real run served 862 MB over 3205 s because the plugin kept the pass
+        open until shutdown; that is idle time, not a 0.3 MB/s transfer."""
+        text = self.SESSION + "[toctou] ===== SESSION END sess=aa11 =====\n"
+        state = self._state(text)
+        self.assertTrue(state["passes"][-1]["closed_at_session_end"])
+        self.assertNotIn("closed_at_session_end", state["passes"][0])
+        html = self.agent.render_toctou(state)
+        self.assertIn("until session end", html)
+        self.assertIn("lower bound", html)
+
     def test_only_the_newest_session_counts(self) -> None:
         stale = ("[toctou] *** region@5505024 SWITCH at pass #2 (mode=benign_then_evil) ***\n"
                  "[toctou] ===== SESSION START sess=bb22 boot=x pid=900 switch_after_pass=2 =====\n"

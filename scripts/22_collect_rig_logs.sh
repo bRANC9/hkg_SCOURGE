@@ -110,7 +110,9 @@ for line in lines:
                             "evil": pathlib.Path(evil).name}
 
 starts = [i for i, line in enumerate(lines) if "SESSION START" in line]
-for line in (lines[starts[-1]:] if starts else lines):
+session = (lines[starts[-1]:] if starts else lines)
+last_pass = None
+for index, line in enumerate(session):
     if "SESSION START" in line:
         match = re.search(r"sess=(\w+)", line)
         values["session"] = match.group(1) if match else "?"
@@ -128,6 +130,7 @@ for line in (lines[starts[-1]:] if starts else lines):
                                  "mbps": rate})
         values["pass_seconds_total"] = round(
             values["pass_seconds_total"] + float(dur), 1)
+        last_pass = index
         print(f"  pass #{number}: {served:<7} {total/1e6:7.0f} MB "
               f"{float(dur):6.1f} s {rate:5.1f} MB/s")
         continue
@@ -135,6 +138,15 @@ for line in (lines[starts[-1]:] if starts else lines):
     if match:
         values["switched_at_pass"] = int(match.group(1))
         print("  " + line.split("] ", 1)[-1])
+
+# A pass is closed either by the next sweep starting, or by the session ending.
+# In the second case the plugin's duration runs from the first read to shutdown,
+# so most of it can be idle time — the rate is a lower bound, not a measurement.
+if last_pass is not None and values["passes"]:
+    closed_by_session_end = any("SESSION END" in line for line in session[last_pass:])
+    values["passes"][-1]["closed_at_session_end"] = closed_by_session_end
+    if closed_by_session_end:
+        values["passes"][-1]["mbps_lower_bound_only"] = True
 
 out.write_text(json.dumps(values, indent=2) + "\n")
 PY

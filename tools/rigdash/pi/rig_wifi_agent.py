@@ -821,7 +821,9 @@ def toctou_state() -> dict:
     # Only the newest session counts: the plugin numbers passes from 1 each time it
     # starts, and yesterday's "SWITCH" would otherwise read as done.
     starts = [i for i, raw in enumerate(lines) if "SESSION START" in raw]
-    for raw in (lines[starts[-1]:] if starts else lines):
+    session = (lines[starts[-1]:] if starts else lines)
+    last_pass = None
+    for index, raw in enumerate(session):
         match = _PASS_END_RE.search(raw)
         if match:
             number, genuine, evil_bytes = int(match.group(2)), int(match.group(3)), int(match.group(4))
@@ -831,9 +833,17 @@ def toctou_state() -> dict:
                 "n": number, "served": served, "bytes": total, "dur": dur,
                 "mbps": round(total / dur / 1e6, 1) if dur > 0 else 0.0,
             })
+            last_pass = index
             continue
         if _SWITCH_RE.search(raw):
             state["switched"] = True
+    # The last pass is closed either by the next sweep or by the plugin exiting. In
+    # the second case its duration runs to shutdown, so most of it is idle time and
+    # the rate is only a lower bound — a real run showed 0.3 MB/s that way against
+    # 7.8 MB/s of actual install.
+    if last_pass is not None and state["passes"]:
+        closed_by_session = any("SESSION END" in line for line in session[last_pass:])
+        state["passes"][-1]["closed_at_session_end"] = closed_by_session
     state["passes"] = state["passes"][-6:]
     try:
         proc = subprocess.run(["systemctl", "is-active", "toctou-gadget"],
@@ -859,11 +869,18 @@ def render_toctou(t: dict) -> str:
                     f'switch after pass {region["switch_after_pass"]} · '
                     f'evil {region["evil"]}')
     bits.append("switched" if t.get("switched") else "not switched yet")
+    def pass_row(p: dict) -> str:
+        # A pass closed by the plugin exiting carries shutdown time in its
+        # duration, so its rate is a lower bound — say so instead of showing 0.3.
+        tail = (f'{p["dur"]:.0f} s until session end (rate a lower bound)'
+                if p.get("closed_at_session_end")
+                else f'{p["dur"]:.1f} s · {p["mbps"]:.1f} MB/s')
+        return (f'<li class="{"ok" if p["served"] == "GENUINE" else "todo"}">'
+                f'<span class="mark">#{p["n"]}</span><b>{_esc(p["served"])}</b>'
+                f'<span class="dim">{p["bytes"] / 1e6:.0f} MB · {tail}</span></li>')
+
     rows = "".join(
-        f'<li class="{"ok" if p["served"] == "GENUINE" else "todo"}">'
-        f'<span class="mark">#{p["n"]}</span><b>{_esc(p["served"])}</b>'
-        f'<span class="dim">{p["bytes"] / 1e6:.0f} MB · {p["dur"]:.1f} s · '
-        f'{p["mbps"]:.1f} MB/s</span></li>'
+        pass_row(p)
         for p in t.get("passes", [])
     ) or ('<li class="todo"><span class="mark">!</span><b>no completed pass</b>'
           '<span class="dim">the head unit has not swept the region yet</span></li>')
