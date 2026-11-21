@@ -61,6 +61,11 @@ static char g_rw[MAX_PATH] = "/rw_data/store";
 static char g_hub[MAX_PATH] = DEFAULT_HUB;
 /* Where the USB-stick packages live: <mount>/scourge-packages, tarballs. */
 static char g_local_dir[MAX_PATH] = "/media/usb";
+/* TLS: the daemon drives the vendor `openssl s_client` and verifies against a
+ * CA path (the unit ships 440 hashed CAs in /etc/ssl/certs). */
+#define CA_PATH_DEFAULT "/etc/ssl/certs"
+static char g_ca_path[MAX_PATH] = CA_PATH_DEFAULT;
+static int g_tls_timeout_s = 15;
 static char g_token[128];
 static char g_install_id[64];
 static char g_firmware[96];
@@ -256,6 +261,8 @@ static void load_state(void)
                 snprintf(g_gui, sizeof(g_gui), "%s", p + 4);
             else if (!strncmp(p, "local_dir=", 10))
                 snprintf(g_local_dir, sizeof(g_local_dir), "%s", p + 10);
+            else if (!strncmp(p, "ca_path=", 8))
+                snprintf(g_ca_path, sizeof(g_ca_path), "%s", p + 8);
         }
     }
     config_path(path, sizeof(path), "device.json");
@@ -436,16 +443,20 @@ static int dns_lookup(const char *name, struct in_addr *out)
 }
 
 /* --------------------------------------------------------------- http client */
-static int parse_url(const char *url, char *host, size_t host_size, int *port, char *path, size_t path_size)
+static int parse_url_tls(const char *url, int *tls, char *host, size_t host_size, int *port,
+                         char *path, size_t path_size)
 {
     const char *p = url;
     const char *slash;
 
+    *tls = 0;
     if (!strncmp(p, "http://", 7)) {
         p += 7;
         *port = 80;
     } else if (!strncmp(p, "https://", 8)) {
-        return -1; /* plain HTTP only in-process; use STORE_FETCH_HELPER for TLS */
+        p += 8;
+        *port = 443;
+        *tls = 1;
     } else {
         return -1;
     }
@@ -476,11 +487,12 @@ static int parse_url(const char *url, char *host, size_t host_size, int *port, c
 }
 
 /* Fetch into `out` (JSON answers). Returns HTTP status or -1. */
-static int http_request(const char *url, const char *method, const char *auth_token,
-                        const char *body, char **out, size_t *out_len)
+static int http_request_plain(const char *url, const char *method, const char *auth_token,
+                              const char *body, char **out, size_t *out_len)
 {
     char host[256], path[1024];
     int port = 80, sock;
+    int tls = 0;
     struct sockaddr_in addr;
     char request[2048], buffer[MAX_BUF * 4];
     size_t used = 0;
@@ -490,7 +502,7 @@ static int http_request(const char *url, const char *method, const char *auth_to
     long content_length = -1;
     int status = -1;
 
-    if (parse_url(url, host, sizeof(host), &port, path, sizeof(path)) != 0)
+    if (parse_url_tls(url, &tls, host, sizeof(host), &port, path, sizeof(path)) != 0 || tls)
         return -2;
 
     sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -587,7 +599,7 @@ static int http_request(const char *url, const char *method, const char *auth_to
         logmsg("redirect %d -> %s", status, next_url);
         depth++;
         {
-            int ret = http_request(next_url, method, auth_token, body, out, out_len);
+            int ret = http_request_plain(next_url, method, auth_token, body, out, out_len);
             depth--;
             return ret;
         }
@@ -604,6 +616,36 @@ static int http_request(const char *url, const char *method, const char *auth_to
     if (out_len)
         *out_len = payload_len;
     return status;
+}
+
+/* Scheme dispatch: https goes through the vendor openssl s_client, http through
+ * the in-process client (which already follows proxy redirects). */
+static int parse_url_tls(const char *url, int *tls, char *host, size_t host_size, int *port,
+                         char *path, size_t path_size);
+static int https_request(const char *host, int port, const char *request, char **out, size_t *out_len);
+
+static int http_request(const char *url, const char *method, const char *auth_token,
+                        const char *body, char **out, size_t *out_len)
+{
+    int tls = 0, port = 0;
+    char host[256], path[1024], request[2048];
+
+    if (parse_url_tls(url, &tls, host, sizeof(host), &port, path, sizeof(path)) != 0)
+        return -2;
+    if (!tls)
+        return http_request_plain(url, method, auth_token, body, out, out_len);
+
+    snprintf(request, sizeof(request),
+             "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
+             "Accept: application/json\r\n%s%s%s"
+             "Content-Length: %zu\r\n\r\n%s",
+             method, path, host,
+             auth_token ? "Authorization: Device " : "",
+             auth_token ? auth_token : "",
+             auth_token ? "\r\n" : "",
+             body ? strlen(body) : 0,
+             body ? body : "");
+    return https_request(host, port, request, out, out_len);
 }
 
 /* Download a URL into a file (artifacts). */
@@ -653,6 +695,155 @@ static void beep(int times)
         if (i + 1 < times)
             usleep(500000);
     }
+}
+
+/* ------------------------------------------------------------------ https ---
+ * The unit ships a full `openssl` (and 440 hashed CAs in /etc/ssl/certs), so the
+ * daemon does TLS by driving `s_client` over pipes instead of carrying its own
+ * TLS stack. `-verify_return_error` makes a bad chain fail the handshake, so a
+ * forged answer never reaches the parser.
+ */
+
+
+static int parse_http_response(char *buf, size_t used, int *status, char **payload, size_t *payload_len)
+{
+    char *end = strstr(buf, "\r\n\r\n");
+    long content_length = -1;
+    char *cl;
+    char *p;
+    size_t body_len;
+
+    if (!end)
+        return -1;
+    if (sscanf(buf, "HTTP/%*d.%*d %d", status) != 1)
+        *status = -1;
+    cl = strstr(buf, "\r\nContent-Length:");
+    if (!cl)
+        cl = strstr(buf, "\r\ncontent-length:");
+    if (cl)
+        content_length = strtol(cl + 18, NULL, 10);
+
+    p = end + 4;
+    body_len = used - (size_t)(p - buf);
+    if (strstr(buf, "Transfer-Encoding: chunked") || strstr(buf, "transfer-encoding: chunked")) {
+        /* de-chunk in place */
+        char *src = p, *dst = p, *buf_end = buf + used;
+        while (src < buf_end) {
+            char *nl = strstr(src, "\r\n");
+            long chunk;
+            if (!nl)
+                break;
+            chunk = strtol(src, NULL, 16);
+            if (chunk <= 0)
+                break;
+            src = nl + 2;
+            if (src + chunk > buf_end)
+                chunk = (long)(buf_end - src);
+            memmove(dst, src, (size_t)chunk);
+            dst += chunk;
+            src += chunk;
+            if (src < buf_end && *src == '\r')
+                src += 2;
+        }
+        body_len = (size_t)(dst - p);
+    } else if (content_length >= 0 && (size_t)content_length < body_len) {
+        body_len = (size_t)content_length;
+    }
+    *payload = p;
+    *payload_len = body_len;
+    return 0;
+}
+
+static int https_request(const char *host, int port, const char *request, char **out, size_t *out_len)
+{
+    int to_child[2], from_child[2];
+    pid_t pid;
+    char conn[300], buffer[MAX_BUF * 4];
+    size_t used = 0, written = 0;
+    size_t req_len = strlen(request);
+    int status = -1, waited = 0;
+    char *payload = NULL;
+    size_t payload_len = 0;
+
+    snprintf(conn, sizeof(conn), "%s:%d", host, port);
+    if (pipe(to_child) != 0)
+        return -1;
+    if (pipe(from_child) != 0) {
+        close(to_child[0]);
+        close(to_child[1]);
+        return -1;
+    }
+    pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        dup2(to_child[0], 0);
+        dup2(from_child[1], 1);
+        close(to_child[0]);
+        close(to_child[1]);
+        close(from_child[0]);
+        close(from_child[1]);
+        execl("/usr/bin/openssl", "openssl", "s_client", "-quiet", "-connect", conn,
+              "-servername", host, "-verify_return_error", "-verify", "5",
+              "-CApath", g_ca_path, (char *)NULL);
+        execl("/bin/openssl", "openssl", "s_client", "-quiet", "-connect", conn,
+              "-servername", host, "-verify_return_error", "-verify", "5",
+              "-CApath", g_ca_path, (char *)NULL);
+        _exit(127);
+    }
+    close(to_child[0]);
+    close(from_child[1]);
+
+    while (written < req_len) {
+        ssize_t n = write(to_child[1], request + written, req_len - written);
+        if (n <= 0)
+            break;
+        written += (size_t)n;
+    }
+    close(to_child[1]);
+
+    for (;;) {
+        fd_set rfds;
+        struct timeval tv = {g_tls_timeout_s, 0};
+        int ready;
+        ssize_t n;
+
+        FD_ZERO(&rfds);
+        FD_SET(from_child[0], &rfds);
+        ready = select(from_child[0] + 1, &rfds, NULL, NULL, &tv);
+        if (ready <= 0) {
+            logmsg("tls: read timeout from %s", conn);
+            kill(pid, SIGKILL);
+            break;
+        }
+        n = read(from_child[0], buffer + used, sizeof(buffer) - used - 1);
+        if (n <= 0)
+            break;
+        used += (size_t)n;
+        buffer[used] = 0;
+        if (used + 4096 >= sizeof(buffer))
+            break;
+    }
+    close(from_child[0]);
+    while (!waited) {
+        int st = 0;
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid || r < 0)
+            break;
+        usleep(20000);
+    }
+
+    if (parse_http_response(buffer, used, &status, &payload, &payload_len) != 0) {
+        return status >= 0 ? status : -1;
+    }
+    *out = malloc(payload_len + 1);
+    if (!*out)
+        return -1;
+    memcpy(*out, payload, payload_len);
+    (*out)[payload_len] = 0;
+    if (out_len)
+        *out_len = payload_len;
+    return status;
 }
 
 /* ------------------------------------------------------------- child helpers */
@@ -1436,6 +1627,10 @@ int main(int argc, char **argv)
             g_allow_install = 1;
         else if (!strcmp(argv[i], "--local-dir") && i + 1 < argc)
             snprintf(g_local_dir, sizeof(g_local_dir), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--ca-path") && i + 1 < argc)
+            snprintf(g_ca_path, sizeof(g_ca_path), "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--tls-timeout") && i + 1 < argc)
+            g_tls_timeout_s = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--version")) {
             printf("store_daemon %s\n", STORE_BUILD_ID);
             return 0;

@@ -146,14 +146,16 @@ Plain `http://` in-process (POSIX sockets, no TLS, no libcurl).
   `STORE_MAX_REDIRECTS` (3) hops, absolute or root-relative. This is what makes a
   hub behind a reverse proxy work: `http://` -> `https://` at the edge no longer
   turns into `index fetch failed (301)`.
-- **TLS is not implemented in-process.** An `https://` hub returns -2
-  (`hub unreachable`) with a logged reason. Options, in order of effort:
-  1. put the daemon behind a plain-http listener on the LAN (the hub by IP:port,
-     or a local TLS terminator);
-  2. a static `curl` built against mbedTLS/wolfSSL, called through the fetch
-     helper hook;
-  3. `openssl s_client` piping (the unit ships `/usr/bin/openssl`) - workable but
-     hand-rolled chunked decoding.
+- **`https://` works**: the daemon drives the vendor
+  `/usr/bin/openssl s_client -quiet -connect host:443 -servername host
+  -verify_return_error -verify 5 -CApath /etc/ssl/certs` over pipes, writes the
+  HTTP request to it and parses the answer (Content-Length, or chunked).
+  `-verify_return_error` fails the handshake on a bad chain, so a forged answer
+  never reaches the parser; there is no `--insecure` switch. The CA path is
+  `--ca-path` / `ca_path=` (default `/etc/ssl/certs`, where the unit ships 440
+  hashed CAs) and the read timeout is `--tls-timeout` (default 15 s).
+  A public hub at `https://hub.example` therefore needs no proxy or helper on the
+  unit; plain `http://` stays for LAN/local use.
   Integrity does not depend on TLS either way: the index is ECDSA-signed and
   every artifact is sha256-checked, so a tampered plain-http answer is rejected.
 DNS: the daemon resolves A records itself (`/etc/hosts`, then the

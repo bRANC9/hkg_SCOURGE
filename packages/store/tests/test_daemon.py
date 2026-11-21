@@ -43,6 +43,8 @@ APP_PORT_USB = free_port()
 APP_PORT_SU = free_port()
 APP_PORT_SU2 = free_port()
 APP_PORT_STAGE = free_port()
+APP_PORT_TLS = free_port()
+APP_PORT_TLS_BAD = free_port()
 
 
 def make_payload(marker_path, body=b"#!/bin/sh\necho installed > \"$MARKER\"\n"):
@@ -161,9 +163,10 @@ def wait_job(want, timeout=20.0, port=None):
     raise AssertionError(f"job never reached {want}: {last}\n--- daemon log ---\n{daemon_tail()}")
 
 
-def start_daemon(rw, allow_install=True, hub_port=HUB_PORT, port=None, extra_args=None):
+def start_daemon(rw, allow_install=True, hub_port=HUB_PORT, port=None, extra_args=None, hub_url=None):
     port = port or APP_PORT
-    args = [DAEMON, "--rw-dir", rw, "--hub", f"http://127.0.0.1:{hub_port}", "--port", str(port)]
+    hub = hub_url or f"http://127.0.0.1:{hub_port}"
+    args = [DAEMON, "--rw-dir", rw, "--hub", hub, "--port", str(port)]
     if allow_install:
         args.append("--allow-install")
     args.extend(extra_args or [])
@@ -179,6 +182,35 @@ def start_daemon(rw, allow_install=True, hub_port=HUB_PORT, port=None, extra_arg
             raise AssertionError(f"daemon died: {open(log_path).read()}")
         time.sleep(0.1)
     raise AssertionError(f"daemon did not start: {open(log_path).read()}")
+
+
+def make_ca_dir(tmp):
+    """Self-signed cert for 127.0.0.1 + a hashed CA dir the daemon can trust."""
+    cert = os.path.join(tmp, "test-cert.pem")
+    key = os.path.join(tmp, "test-key.pem")
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+         "-keyout", key, "-out", cert, "-subj", "/CN=127.0.0.1",
+         "-addext", "subjectAltName=IP:127.0.0.1",
+         "-addext", "basicConstraints=critical,CA:TRUE"],
+        check=True, capture_output=True,
+    )
+    ca = os.path.join(tmp, "ca")
+    os.makedirs(ca, exist_ok=True)
+    shutil.copyfile(cert, os.path.join(ca, "test-root.pem"))
+    subprocess.run(["openssl", "rehash", ca], check=True, capture_output=True)
+    return cert, key, ca
+
+
+def start_tls_hub(port, cert, key):
+    import ssl
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), FakeHub)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def main():
@@ -360,6 +392,59 @@ def main():
         proc_old.terminate()
         proc_old.wait(timeout=5)
         shutil.rmtree(tmp_old, ignore_errors=True)
+
+    # ---- https: the public-store path, via the vendor openssl s_client ----
+    tmp_tls = tempfile.mkdtemp(prefix="store-daemon-tls.")
+    rw_tls = os.path.join(tmp_tls, "rw")
+    os.makedirs(rw_tls)
+    cert, key, ca_dir = make_ca_dir(tmp_tls)
+    tls_port = free_port()
+    try:
+        tls_hub = start_tls_hub(tls_port, cert, key)
+        FakeHub.index.pop("marketplace", None)
+        FakeHub.index["demo"] = {
+            "pkg": "demo", "version": "1.0", "release_id": 7,
+            "url": f"https://127.0.0.1:{tls_port}/artifact/demo.tar.gz",
+            "sha256": hashlib.sha256(FakeHub.payload).hexdigest(),
+            "size": len(FakeHub.payload), "installer_sha256": "",
+        }
+        proc_tls = start_daemon(rw_tls, allow_install=False,
+                                hub_url=f"https://127.0.0.1:{tls_port}",
+                                port=APP_PORT_TLS,
+                                extra_args=["--ca-path", ca_dir])
+        try:
+            status, body = api("/pair?code=123456", "POST", port=APP_PORT_TLS)
+            assert status == 200, f"{body}\n--- daemon log ---\n{daemon_tail()}"
+            status, body = api("/refresh", "POST", port=APP_PORT_TLS)
+            assert status == 200, body
+            status, body = api("/catalog", port=APP_PORT_TLS)
+            assert status == 200 and body["packages"][0]["pkg"] == "demo", body
+        finally:
+            proc_tls.terminate()
+            proc_tls.wait(timeout=5)
+
+        # an untrusted chain must fail, not silently downgrade
+        rw_bad = os.path.join(tmp_tls, "rw-bad")
+        os.makedirs(rw_bad)
+        proc_bad = start_daemon(rw_bad, allow_install=False,
+                                hub_url=f"https://127.0.0.1:{tls_port}",
+                                port=APP_PORT_TLS_BAD,
+                                extra_args=["--ca-path", "/etc/ssl/certs", "--tls-timeout", "5"])
+        try:
+            status, body = api("/refresh", "POST", port=APP_PORT_TLS_BAD)
+            assert status == 502, body
+            assert "index fetch failed" in body["detail"], body
+        finally:
+            proc_bad.terminate()
+            proc_bad.wait(timeout=5)
+        tls_hub.shutdown()
+    finally:
+        # put the fake catalogue back on plain http for the remaining scenarios
+        FakeHub.index["demo"].update({
+            "url": f"http://127.0.0.1:{HUB_PORT}/artifact/demo.tar.gz",
+            "sha256": hashlib.sha256(FakeHub.payload).hexdigest(),
+        })
+        shutil.rmtree(tmp_tls, ignore_errors=True)
 
     # allow_install=0: staged but never executed
     tmp = tempfile.mkdtemp(prefix="store-daemon-stage.")
