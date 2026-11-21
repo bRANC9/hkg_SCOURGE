@@ -3,7 +3,8 @@
 # --- secrets & local configuration -------------------------------------------
 config/key.local
 config/paths.local.env
-config/rig.local.env
+# any per-target/local override env file (rig.local.env, paths.local.env, …)
+*.local.env
 *.key
 *.local
 
@@ -49,6 +50,9 @@ usb.img
 venv/
 __pycache__/
 *.pyc
+
+# --- rust ----------------------------------------------------------------------
+target/
 
 # --- editors / OS --------------------------------------------------------------
 .idea/

@@ -107,6 +107,16 @@ binary built on a modern host dies on-car. Policy:
 | `dropbearmulti` | **static musl** (pinned Alpine container or musl-gcc; `packages/wifi/scripts/build_dropbear.sh`) | `file` must report statically linked; sha256 recorded; `--help` smoke test |
 | battery/wifi/tweaks daemons | static via host gcc (validated on the vendor kernel in the VM; no NSS-dependent calls by design) | same static gate |
 | `tweaks_persist` | **deliberately dynamic** against vendor glibc 2.25 + `libpersistence_client_library.so.7` (it must call the vendor PCL); links against the extracted vendor rootfs (`SCOURGE_ROOTFS`) | vendor-interpreter check; pinned to 260128 |
+| Rust apps/daemons | **static musl** via the pinned host toolchain and `tools/rust/scripts/package_app.sh`; the unit gets only the binary + unit, never rustc/cargo | `readelf`: no `PT_INTERP`/`DT_NEEDED`; VM `rust-app` scenario |
+
+## Rust apps/daemons (WIP)
+
+Rust is a host-build language, not a head-unit runtime. The unit receives a
+self-contained static-musl binary and a systemd unit through the normal USB
+installer; there is no Cargo or `libstd` package on the car. The sample
+`scourge-statusd` and the `rust-app` VM scenario are WIP/VM-validated on the
+vendor kernel; car validation is pending. Build/package quickstart and the
+static-vs-shared rationale: `docs/19-rust-apps.md`.
 
 ## Networking notes (WiFi package)
 

@@ -155,6 +155,12 @@ reproducing it from a clean download:
    future script; the pin is gone and the value is derived
    (`verify_package.py`, `09_preflight.sh`). The wrapper pins are current
    (`609028602` stock, `414600538` patched).
+   A second encoding is not a bad build: the OEM server also serves the same
+   rows under a different package-id counter in its header (`+|…|101489|1`
+   instead of the `2026.01.28` USB-tree `+|…|1489|1`). The row values are
+   identical; only the header package-id, and with it the file's size and hash,
+   differs — `01b_audit_inputs.py` accepts that as a verified repack. Compare a
+   package against the matching base before calling a mismatch a bad download.
 2. **The build-5 `.ver` output hashes are therefore unreachable from a fresh
    download** — they were produced from that 2,467-byte base. Re-record them
    from a car-validated run, not from this table.

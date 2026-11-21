@@ -77,6 +77,8 @@ configuration initialization succeeded in the same startup.
 `/app/data` is a symlink to `/rw_data/app_data`, so both files sit on the
 persistent partition and survive firmware reflashes. A flash is not a reset for
 this failure mode.
+See the tentative [writable-data reference](../18-rw-data-baseline.md) for
+capture limitations and space triage; it is not a source of replacement state.
 
 ## Access: keep the diagnostic channel independent
 
