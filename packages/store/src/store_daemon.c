@@ -55,6 +55,7 @@
 #define MAX_BUF 65536
 #define DEFAULT_PORT 8092
 #define DEFAULT_HUB "http://127.0.0.1:8002"
+#define STORE_MAX_REDIRECTS 3
 
 static char g_rw[MAX_PATH] = "/rw_data/store";
 static char g_hub[MAX_PATH] = DEFAULT_HUB;
@@ -555,6 +556,43 @@ static int http_request(const char *url, const char *method, const char *auth_to
 
     if (!header_done)
         return -1;
+
+    /* Follow one redirect hop set (nginx `http -> https` and friends). The hub
+     * behind a reverse proxy answers 301 for a plain-http URL; without this the
+     * refresh would just fail. Bounded by STORE_MAX_REDIRECTS. */
+    if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+        static int depth;
+        char location[512], next_url[1024];
+        char *loc = strstr(buffer, "\r\nLocation:");
+        if (!loc)
+            return status;
+        loc += 11;
+        while (*loc == ' ')
+            loc++;
+        {
+            size_t i = 0;
+            while (*loc && *loc != '\r' && *loc != '\n' && i + 1 < sizeof(location))
+                location[i++] = *loc++;
+            location[i] = 0;
+        }
+        if (!location[0] || depth >= STORE_MAX_REDIRECTS)
+            return status;
+        if (!strncmp(location, "http://", 7) || !strncmp(location, "https://", 8)) {
+            snprintf(next_url, sizeof(next_url), "%s", location);
+        } else if (location[0] == '/') {
+            snprintf(next_url, sizeof(next_url), "http://%s:%d%s", host, port, location);
+        } else {
+            return status;
+        }
+        logmsg("redirect %d -> %s", status, next_url);
+        depth++;
+        {
+            int ret = http_request(next_url, method, auth_token, body, out, out_len);
+            depth--;
+            return ret;
+        }
+    }
+
     payload_len = used - (size_t)(payload - buffer);
     if (content_length >= 0 && (size_t)content_length < payload_len)
         payload_len = (size_t)content_length;

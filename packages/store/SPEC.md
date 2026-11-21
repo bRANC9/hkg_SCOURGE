@@ -140,9 +140,22 @@ catalogue.
 
 ## 7. Transport
 
-Plain `http://` in-process (POSIX sockets, no TLS, no libcurl). `https://`
-requires the hub to be reachable through a TLS terminator on the unit or a
-future `STORE_FETCH_HELPER`; the logic is independent of the transport.
+Plain `http://` in-process (POSIX sockets, no TLS, no libcurl).
+
+- **Redirects are followed**: 301/302/303/307/308 with a `Location` header, up to
+  `STORE_MAX_REDIRECTS` (3) hops, absolute or root-relative. This is what makes a
+  hub behind a reverse proxy work: `http://` -> `https://` at the edge no longer
+  turns into `index fetch failed (301)`.
+- **TLS is not implemented in-process.** An `https://` hub returns -2
+  (`hub unreachable`) with a logged reason. Options, in order of effort:
+  1. put the daemon behind a plain-http listener on the LAN (the hub by IP:port,
+     or a local TLS terminator);
+  2. a static `curl` built against mbedTLS/wolfSSL, called through the fetch
+     helper hook;
+  3. `openssl s_client` piping (the unit ships `/usr/bin/openssl`) - workable but
+     hand-rolled chunked decoding.
+  Integrity does not depend on TLS either way: the index is ECDSA-signed and
+  every artifact is sha256-checked, so a tampered plain-http answer is rejected.
 DNS: the daemon resolves A records itself (`/etc/hosts`, then the
 `resolv.conf` nameserver) because a static glibc binary cannot use NSS.
 

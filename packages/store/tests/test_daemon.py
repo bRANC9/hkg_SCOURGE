@@ -75,6 +75,13 @@ class FakeHub(http.server.BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
+        if self.path.startswith("/old-index/"):
+            # a reverse proxy answering http -> https with a redirect
+            self.send_response(301)
+            self.send_header("Location", self.path.replace("/old-index", "", 1))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
         if self.path.startswith("/api/v1/index/"):
             return self._json(200, {"packages": list(self.index.values())})
         if self.path.startswith("/artifact/"):
@@ -215,11 +222,18 @@ def main():
         assert status == 409 and "claimed" in body["detail"], body
         FakeHub.pair_status = 200
 
-        # index refresh + catalog cache
+        # index refresh follows a proxy redirect instead of failing on the 301:
+        # point the daemon through a path the fake proxy redirects away from.
+        status, body = api(f"/config?hub=http%3A%2F%2F127.0.0.1%3A{HUB_PORT}%2Fold-index", "POST")
+        assert status == 200, body
+
+        # index refresh + catalog cache (through the redirect above)
         status, body = api("/refresh", "POST")
         assert status == 200, body
         status, body = api("/catalog")
         assert status == 200 and body["packages"][0]["pkg"] == "demo", body
+        # back to the plain base path for the rest of the run
+        api(f"/config?hub=http%3A%2F%2F127.0.0.1%3A{HUB_PORT}", "POST")
 
         # install job: download -> sha256 -> tar -> run_stuff.sh -> report
         status, body = api("/install?pkg=demo", "POST")
