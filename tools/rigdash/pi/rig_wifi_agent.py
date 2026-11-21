@@ -45,6 +45,11 @@ from urllib.parse import parse_qs, urlparse
 AP_ADDRESS = "10.42.0.1"
 AP_PASSPHRASE_ENV = "RIG_AP_PASSPHRASE"
 AGENT_TOKEN_ENV = "RIG_AGENT_TOKEN"
+
+#: The rig dials out; nothing dials in. Target, port and key live on the board in
+#: /etc/rig/tunnel.env, never in this repo — it names a host and holds a key path.
+TUNNEL_UNIT = "rig-tunnel.service"
+TUNNEL_ENV = "/etc/rig/tunnel.env"
 MAX_BODY = 4096
 
 SSID_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,32}$")
@@ -59,6 +64,39 @@ def nmcli(*args: str, timeout: float = 40.0) -> tuple[int, str]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return 1, f"{type(exc).__name__}: {exc}"
     return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def tunnel_state() -> dict:
+    """Whether the rig can be reached from outside, and through which door.
+
+    There are two: `usb0` (the gadget's network function - ssh over the same
+    cable, no WiFi and no access point in the way) and the reverse tunnel the
+    `rig-tunnel` unit keeps dialling. Only the target and the remote port are
+    read back; the key path stays out of the page.
+    """
+    state = {"unit": TUNNEL_UNIT, "configured": os.path.exists(TUNNEL_ENV),
+             "enabled": "", "active": "", "target": "", "remote": "", "usb0": ""}
+    for name, argv in (("enabled", ["systemctl", "is-enabled", TUNNEL_UNIT]),
+                       ("active", ["systemctl", "is-active", TUNNEL_UNIT])):
+        _, out = _run(argv, timeout=10)
+        state[name] = out.splitlines()[0] if out else ""
+    if state["configured"]:
+        try:
+            with open(TUNNEL_ENV, encoding="utf-8") as handle:
+                for line in handle:
+                    name, _, value = line.strip().partition("=")
+                    value = value.strip().strip('"')
+                    if name.strip() == "RIG_TUNNEL_TARGET":
+                        state["target"] = value
+                    elif name.strip() == "RIG_TUNNEL_REMOTE":
+                        state["remote"] = value
+        except OSError as exc:
+            state["active"] = f"env unreadable: {type(exc).__name__}"
+    rc, out = _run(["ip", "-4", "-br", "addr", "show", "usb0"], timeout=5)
+    words = out.split()
+    if rc == 0 and len(words) >= 3 and "/" in words[2]:
+        state["usb0"] = words[2]
+    return state
 
 
 def status() -> dict:
@@ -297,6 +335,7 @@ def rig_state() -> dict:
         "files": deploy_state(),
         "images": images(),
         "toctou": toctou_state(),
+        "tunnel": tunnel_state(),
         "devices": removable_devices(),
         "log": recent_actions(),
         "services": services,
@@ -327,6 +366,8 @@ DEPLOY_MAP = (
      "/etc/systemd/system/rig-ap-fallback.service"),
     ("tools/rigdash/pi/rig-wifi-agent.service",
      "/etc/systemd/system/rig-wifi-agent.service"),
+    ("tools/rigdash/pi/rig-tunnel.service",
+     "/etc/systemd/system/rig-tunnel.service"),
 )
 
 
@@ -887,6 +928,34 @@ def render_toctou(t: dict) -> str:
     return f'<p class="dim">{" · ".join(bits)}</p><ul class="lines">{rows}</ul>'
 
 
+def _render_tunnel(t: dict) -> str:
+    """The way out: the USB network function, and the tunnel that dials home."""
+    bits = [f'usb0 {t["usb0"]}' if t.get("usb0") else "usb0 absent"]
+    if t.get("configured"):
+        bits.append(f'tunnel {t.get("active") or "?"} / {t.get("enabled") or "?"} '
+                    f'-> {t.get("target") or "(no target)"} '
+                    f'(-R {t.get("remote") or "0"}:127.0.0.1:22)')
+        note = ""
+    else:
+        bits.append("tunnel not configured")
+        note = (
+            '<p class="dim">Write <code>/etc/rig/tunnel.env</code> on the rig (0600, '
+            'root), then start it here: <code>RIG_TUNNEL_TARGET=user@host</code>, '
+            '<code>RIG_TUNNEL_REMOTE=2222</code>, '
+            '<code>RIG_TUNNEL_KEY=/root/.ssh/id_ed25519</code>. It stays out of the '
+            'repo because it names a host.</p>')
+    buttons = "" if not t.get("configured") else (
+        '<div class="row">'
+        '<form method="post" action="/api/tunnel">'
+        '<input type="hidden" name="action" value="start">'
+        '<button type="submit">Start tunnel</button></form>'
+        '<form method="post" action="/api/tunnel">'
+        '<input type="hidden" name="action" value="stop">'
+        '<button type="submit">Stop tunnel</button></form></div>')
+    return ('<section><strong>Remote access</strong>'
+            f'<p class="dim">{" - ".join(bits)}</p>{note}{buttons}</section>')
+
+
 def render_body(st: dict, steps: list[dict], token_ok: bool = False) -> str:
     """The page body: steps, files, USB control, WiFi setup.
 
@@ -1078,7 +1147,8 @@ def render_body(st: dict, steps: list[dict], token_ok: bool = False) -> str:
         f'<p class="dim">now: {_esc(role_line)} · boot dr_mode {_esc(usb["mode"] or "unset")}'
         f' · link {_esc("up" if usb["connected"] else "down")}</p>'
         f'<div class="row">{actions}</div></section>'
-        f'<section><strong>WiFi</strong>{wifi_body}</section>'
+        + _render_tunnel(st.get("tunnel") or {})
+        + f'<section><strong>WiFi</strong>{wifi_body}</section>'
         + _render_log(st.get("log", []))
     )
 
@@ -1288,6 +1358,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_images(path)
         elif path in ("/images/upload", "/api/images/upload"):
             self._post_upload()
+        elif path in ("/tunnel", "/api/tunnel"):
+            self._post_tunnel(path)
         elif path == "/agent/token":
             self._post_agent_token()
         elif path in ("/media/mount", "/api/media/mount"):
@@ -1411,6 +1483,31 @@ class Handler(BaseHTTPRequestHandler):
             ok, message = usb_link("disconnect" not in path)
             record("usb connect" if ok and "disconnect" not in path else
                    "usb disconnect" if ok else "usb link", ok, message)
+        if path.startswith("/api/"):
+            self._json(200 if ok else 400, {"ok": ok, "message": message})
+            return
+        self._send(200, self._page(message, error=not ok))
+
+    def _post_tunnel(self, path: str) -> None:
+        """Start or stop the reverse tunnel. Token-gated like every other action."""
+        form = self._form()
+        if not self._agent_ok(form.get("token", "")):
+            message = "actions need RIG_AGENT_TOKEN (see /etc/rig/wifi.env)"
+            if path.startswith("/api/"):
+                self._json(403, {"ok": False, "error": message})
+                return
+            self._send(403, self._page(message, error=True))
+            return
+        action = form.get("action", "")
+        ok = False
+        if action not in ("start", "stop"):
+            message = "action must be start or stop"
+        else:
+            rc, out = _run(["systemctl", action, TUNNEL_UNIT], timeout=45)
+            ok = rc == 0
+            message = (f"tunnel {action}: running" if ok
+                       else f"tunnel {action} failed: {out[:160]}")
+        record(f"tunnel {action or '?'}", ok, message)
         if path.startswith("/api/"):
             self._json(200 if ok else 400, {"ok": ok, "message": message})
             return
