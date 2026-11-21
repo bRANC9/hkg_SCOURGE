@@ -1561,6 +1561,36 @@ static void route(int fd, const char *method, const char *target, const char *bo
         respond(fd, 200, out, "application/json");
         return;
     }
+    if (!strcmp(path, "/versions")) {
+        char pkg[64], url[1200], cache[MAX_PATH], *resp = NULL;
+        url_param(query, "pkg", pkg, sizeof(pkg));
+        if (!pkg[0]) {
+            respond(fd, 400, "{\"detail\":\"pkg required\"}\n", "application/json");
+            return;
+        }
+        snprintf(url, sizeof(url), "%s/api/v1/versions/%s/%s/%s/%s", g_hub, g_firmware, g_region, g_gui, pkg);
+        snprintf(cache, sizeof(cache), "%s/versions-%s.json", g_rw, pkg);
+        {
+            int status = http_request(url, "GET", g_token[0] ? g_token : NULL, NULL, &resp,
+                                      NULL);
+            if (status == 200 && resp) {
+                write_file_atomic(cache, resp);
+                respond(fd, 200, resp, "application/json");
+                free(resp);
+                return;
+            }
+            free(resp);
+        }
+        /* offline: serve the last known history */
+        {
+            char cached[MAX_BUF * 2];
+            if (read_file(cache, cached, sizeof(cached)))
+                respond(fd, 200, cached, "application/json");
+            else
+                respond(fd, 502, "{\"detail\":\"versions unavailable\"}\n", "application/json");
+        }
+        return;
+    }
     if (!strcmp(path, "/local")) {
         char listing[MAX_BUF * 3];
         local_list(listing, sizeof(listing));
