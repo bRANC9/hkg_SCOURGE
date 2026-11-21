@@ -77,35 +77,66 @@ fi
 
 echo
 echo "== what the passes say"
-"$PYTHON" - "$DEST/toctou.log" <<'PY'
+# The numbers, not the narrative: the pass table is what a run is judged on, so it
+# goes out as JSON too (values.json) and can be pasted into the docs without
+# re-deriving anything by hand.
+"$PYTHON" - "$DEST/toctou.log" "$DEST/values.json" <<'PY'
+import json
 import pathlib
 import re
 import sys
 
-log = pathlib.Path(sys.argv[1])
+log, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+values = {"log": str(log.name), "session": "", "serving": "", "image_size": 0,
+          "region": {}, "passes": [], "switched_at_pass": 0,
+          "pass_seconds_total": 0.0}
 if not log.exists():
     print("no toctou.log collected")
+    out.write_text(json.dumps(values, indent=2) + "\n")
     raise SystemExit(0)
+
 lines = log.read_text(errors="replace").splitlines()
+for line in lines:
+    match = re.search(r"open baseline=(\S+) size=(\d+) regions=(\d+)", line)
+    if match:
+        values["serving"] = pathlib.Path(match.group(1)).name
+        values["image_size"] = int(match.group(2))
+        continue
+    match = re.search(r"region \[(\d+),(\d+)\) mode=(\S+) switch_after_pass=(\d+) evil=(\S+)", line)
+    if match:
+        off, end, mode, switch, evil = match.groups()
+        values["region"] = {"off": int(off), "len": int(end) - int(off),
+                            "mode": mode, "switch_after_pass": int(switch),
+                            "evil": pathlib.Path(evil).name}
+
 starts = [i for i, line in enumerate(lines) if "SESSION START" in line]
 for line in (lines[starts[-1]:] if starts else lines):
     if "SESSION START" in line:
-        m = re.search(r"sess=(\w+)", line)
-        print(f"session {m.group(1) if m else '?'}")
+        match = re.search(r"sess=(\w+)", line)
+        values["session"] = match.group(1) if match else "?"
+        print(f"session {values['session']}")
         continue
-    if "open baseline=" in line:
-        print("  " + line.split("] ", 1)[-1])
-        continue
-    m = re.search(r"PASS #(\d+) END .*bytes_genuine=(\d+) bytes_evil=(\d+) "
-                  r"served=(\w+).*dur=([\d.]+)s", line)
-    if m:
-        number, genuine, evil, served, dur = m.groups()
+    match = re.search(r"PASS #(\d+) END .*bytes_genuine=(\d+) bytes_evil=(\d+) "
+                      r"served=(\w+).*dur=([\d.]+)s", line)
+    if match:
+        number, genuine, evil, served, dur = match.groups()
         total = int(genuine) + int(evil)
+        rate = round(total / float(dur) / 1e6, 1) if float(dur) > 0 else 0.0
+        values["passes"].append({"n": int(number), "served": served,
+                                 "bytes": total, "genuine": int(genuine),
+                                 "evil": int(evil), "dur_s": float(dur),
+                                 "mbps": rate})
+        values["pass_seconds_total"] = round(
+            values["pass_seconds_total"] + float(dur), 1)
         print(f"  pass #{number}: {served:<7} {total/1e6:7.0f} MB "
-              f"{float(dur):6.1f} s {total/float(dur)/1e6:5.1f} MB/s")
+              f"{float(dur):6.1f} s {rate:5.1f} MB/s")
         continue
-    if "SWITCH" in line:
+    match = re.search(r"SWITCH at pass #(\d+)", line)
+    if match:
+        values["switched_at_pass"] = int(match.group(1))
         print("  " + line.split("] ", 1)[-1])
+
+out.write_text(json.dumps(values, indent=2) + "\n")
 PY
 
 echo
