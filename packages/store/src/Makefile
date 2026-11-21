@@ -3,8 +3,9 @@
 CC ?= gcc
 CFLAGS ?= -O2 -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation
 LDFLAGS ?= -static
+STORE_VERSION ?= 0.1.0
 BUILD_ID ?= $(shell sha256sum store_daemon.c | cut -c1-12)
-CPPFLAGS += -DSTORE_BUILD_ID='"$(BUILD_ID)"'
+CPPFLAGS += -DSTORE_BUILD_ID='"$(BUILD_ID)"' -DSTORE_VERSION='"$(STORE_VERSION)"'
 
 all: store_daemon
 

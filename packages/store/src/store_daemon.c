@@ -42,6 +42,14 @@
 #define STORE_BUILD_ID "store-development"
 #endif
 
+#ifndef STORE_VERSION
+#define STORE_VERSION "0.1.0"
+#endif
+
+/* The app itself is published in the catalogue under this slug, which is what
+ * makes a self-update just another install with a special reporting order. */
+#define SELF_SLUG "marketplace"
+
 #define MAX_PATH 512
 #define MAX_BUF 65536
 #define DEFAULT_PORT 8092
@@ -168,6 +176,22 @@ static int json_get_str(const char *json, const char *key, char *out, size_t siz
         p++;
     }
     out[o] = 0;
+    return 0;
+}
+
+/* Numeric semver-ish compare: returns <0, 0, >0. */
+static int version_cmp(const char *a, const char *b)
+{
+    while (*a || *b) {
+        long na = strtol(a, (char **)&a, 10);
+        long nb = strtol(b, (char **)&b, 10);
+        if (na != nb)
+            return na < nb ? -1 : 1;
+        while (*a == '.' || *a == '-')
+            a++;
+        while (*b == '.' || *b == '-')
+            b++;
+    }
     return 0;
 }
 
@@ -584,9 +608,30 @@ static int sha256_of(const char *path, char *out, size_t size)
 }
 
 /* --------------------------------------------------------------- state views */
+static int find_entry(const char *index, const char *slug, char *out, size_t size);
+
+/* Does the cached index offer a newer Marketplace build than ours? */
+static int self_update_available(char *offer_version, size_t size)
+{
+    char path[MAX_PATH], index[MAX_BUF * 2], entry[MAX_BUF], version[64];
+
+    if (offer_version && size)
+        offer_version[0] = 0;
+    config_path(path, sizeof(path), "index.json");
+    if (!read_file(path, index, sizeof(index)))
+        return 0;
+    if (find_entry(index, SELF_SLUG, entry, sizeof(entry)) != 0)
+        return 0;
+    if (json_get_str(entry, "version", version, sizeof(version)) != 0)
+        return 0;
+    if (offer_version && size)
+        snprintf(offer_version, size, "%s", version);
+    return version_cmp(version, STORE_VERSION) > 0;
+}
+
 static void status_json(char *out, size_t size)
 {
-    char path[MAX_PATH], job[MAX_BUF], ledger[MAX_BUF];
+    char path[MAX_PATH], job[MAX_BUF], ledger[MAX_BUF], offer[64];
 
     config_path(path, sizeof(path), "job.json");
     if (!read_file(path, job, sizeof(job)))
@@ -596,12 +641,15 @@ static void status_json(char *out, size_t size)
         snprintf(ledger, sizeof(ledger), "{\"installed\":[]}");
 
     snprintf(out, size,
-             "{\"build\":\"%s\",\"port\":%d,\"paired\":%s,\"install_id\":\"%s\","
+             "{\"build\":\"%s\",\"version\":\"%s\",\"port\":%d,\"paired\":%s,\"install_id\":\"%s\","
              "\"firmware\":\"%s\",\"region\":\"%s\",\"gui\":\"%s\",\"hub\":\"%s\","
-             "\"allow_install\":%s,\"job\":%s,\"ledger\":%s}\n",
-             STORE_BUILD_ID, g_port, g_token[0] ? "true" : "false", g_install_id,
+             "\"allow_install\":%s,\"self_update\":%s,\"self_version\":\"%s\","
+             "\"job\":%s,\"ledger\":%s}\n",
+             STORE_BUILD_ID, STORE_VERSION, g_port, g_token[0] ? "true" : "false", g_install_id,
              g_firmware, g_region, g_gui, g_hub,
-             g_allow_install ? "true" : "false", job, ledger);
+             g_allow_install ? "true" : "false",
+             self_update_available(offer, sizeof(offer)) ? "true" : "false", offer,
+             job, ledger);
 }
 
 static void ledger_add(const char *pkg, const char *version, const char *sha)
@@ -904,18 +952,43 @@ static void install_worker(const char *slug)
     ledger_add(slug, version, sha);
     job_write("installed", "run_stuff.sh finished", 100, slug);
 
-    /* Report the result to the hub (best effort). */
+    /* Report the result to the hub (best effort). A self-update restarts this
+     * service a moment later, so its report is queued on disk first and flushed
+     * on the next start (report.pending.json). */
     if (g_token[0]) {
         char url[1024], body[512], *resp = NULL;
         snprintf(body, sizeof(body),
                  "{\"release\":%ld,\"status\":\"ok\",\"artifact_sha256\":\"%s\"}",
                  json_get_int(entry, "release_id", 0), sha);
-        snprintf(url, sizeof(url), "%s/api/v1/device/report", g_hub);
-        http_request(url, "POST", g_token, body, &resp, NULL);
-        free(resp);
+        if (!strcmp(slug, SELF_SLUG)) {
+            config_path(path, sizeof(path), "report.pending.json");
+            write_file_atomic(path, body);
+        } else {
+            snprintf(url, sizeof(url), "%s/api/v1/device/report", g_hub);
+            http_request(url, "POST", g_token, body, &resp, NULL);
+            free(resp);
+        }
     }
     (void)size;
     _exit(0);
+}
+
+/* Flush a report that a self-update could not send before the restart. */
+static void flush_pending_report(void)
+{
+    char path[MAX_PATH], body[512], url[1024], *resp = NULL;
+
+    config_path(path, sizeof(path), "report.pending.json");
+    if (!read_file(path, body, sizeof(body)))
+        return;
+    if (!g_token[0])
+        return;
+    snprintf(url, sizeof(url), "%s/api/v1/device/report", g_hub);
+    if (http_request(url, "POST", g_token, body, &resp, NULL) == 200)
+        unlink(path);
+    else
+        logmsg("pending report still unsent (%s)", g_hub);
+    free(resp);
 }
 
 static void route(int fd, const char *method, const char *target, const char *body)
@@ -994,6 +1067,30 @@ static void route(int fd, const char *method, const char *target, const char *bo
         respond(fd, 200, out, "application/json");
         return;
     }
+    if ((!strcmp(path, "/self-update") || !strcmp(path, "/self_update")) && !strcmp(method, "POST")) {
+        char offer[64];
+        pid_t pid;
+
+        if (!self_update_available(offer, sizeof(offer))) {
+            snprintf(out, sizeof(out),
+                     "{\"started\":false,\"detail\":\"already at %s\",\"version\":\"%s\"}\n",
+                     STORE_VERSION, STORE_VERSION);
+            respond(fd, 200, out, "application/json");
+            return;
+        }
+        job_write("starting", "self-update", 1, SELF_SLUG);
+        pid = fork();
+        if (pid == 0) {
+            setsid();
+            install_worker(SELF_SLUG);
+            _exit(1);
+        }
+        snprintf(out, sizeof(out),
+                 "{\"started\":true,\"package\":\"%s\",\"from\":\"%s\",\"to\":\"%s\"}\n",
+                 SELF_SLUG, STORE_VERSION, offer);
+        respond(fd, 200, out, "application/json");
+        return;
+    }
     if (!strcmp(path, "/job")) {
         char job[MAX_BUF];
         config_path(out, sizeof(out), "job.json");
@@ -1056,6 +1153,9 @@ int main(int argc, char **argv)
 
     mkdir_p(g_rw);
     load_state();
+    /* A self-update restarts this process; the report it could not send before
+     * the restart is queued on disk and flushed here. */
+    flush_pending_report();
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);

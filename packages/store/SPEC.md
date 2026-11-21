@@ -31,6 +31,7 @@ surfaces that verbatim.
 | GET | `/catalog` | the cached index |
 | POST | `/install?pkg=slug` | start the install job (forked, non-blocking) |
 | GET | `/job` | `starting`/`downloading`/`verifying`/`extracting`/`installing`/`installed`/`staged`/`failed` + percent + detail |
+| POST | `/self-update` | install the `marketplace` package from the catalogue (see §4) |
 | GET | `/logs` | installer output (`run_stuff.sh`) |
 
 ## 3. Install job
@@ -47,7 +48,29 @@ surfaces that verbatim.
 unit but nothing was executed. **Default is 0** - the installer or `/config`
 must arm it.
 
-## 4. Transport
+## 4. Self-update
+
+The app publishes itself in the catalogue under the slug **`marketplace`** (the
+release tarball from `scripts/package_app.sh`), so updating it is the same job
+with three differences:
+
+1. `/status` compares the catalogue version with the compiled `STORE_VERSION`
+   (`self_update: true`, `self_version: "<offered>"`); `/self-update` starts the
+   job for the `marketplace` slug and answers `{"started": false, "already at …"}`
+   when no newer build is offered.
+2. The release's own `run_stuff.sh` does the swap: it removes the old binary
+   before copying (the running process keeps the old inode alive), replaces the
+   QML page/tile and icons, clears the QML caches and restarts
+   `store-daemon.service` - the unit's `Restart=on-failure` covers a failed boot.
+3. The install report cannot be sent after the restart, so the daemon writes
+   `report.pending.json` *before* running the installer and flushes it on the
+   next start (`flush_pending_report()`); `/status`/`/job` show `installed`.
+
+`allow_install=0` still applies: a self-update is staged, never executed, until
+the store arms it. The previous binary is kept as `store_daemon.prev` by the
+installer for a manual rollback.
+
+## 5. Transport
 
 Plain `http://` in-process (POSIX sockets, no TLS, no libcurl). `https://`
 requires the hub to be reachable through a TLS terminator on the unit or a
@@ -55,7 +78,7 @@ future `STORE_FETCH_HELPER`; the logic is independent of the transport.
 DNS: the daemon resolves A records itself (`/etc/hosts`, then the
 `resolv.conf` nameserver) because a static glibc binary cannot use NSS.
 
-## 5. Safety
+## 6. Safety
 
 - installs are opt-in (`allow_install`), never on by default;
 - every artifact is sha256-verified against the signed index before execution;
@@ -63,7 +86,7 @@ DNS: the daemon resolves A records itself (`/etc/hosts`, then the
 - nothing touches firmware, the updater, bootloader or partitions;
 - the daemon binds `127.0.0.1` only.
 
-## 6. Tests
+## 7. Tests
 
 `tests/test_daemon.py` (host, no car): fake hub serves `register`, `pair`,
 `index` and `report`; the job downloads a real tarball, verifies sha256, extracts,

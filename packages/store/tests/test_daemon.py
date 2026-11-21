@@ -221,6 +221,60 @@ def main():
         proc.wait(timeout=5)
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # self-update: the app itself is a catalogue package ("marketplace")
+    tmp_su = tempfile.mkdtemp(prefix="store-daemon-selfupdate.")
+    rw_su = os.path.join(tmp_su, "rw")
+    os.makedirs(rw_su)
+    payload_su = make_payload(os.path.join(tmp_su, "self.marker"))
+    FakeHub.payload = payload_su
+    FakeHub.index["marketplace"] = {
+        "pkg": "marketplace",
+        "version": "99.0.0",
+        "release_id": 99,
+        "url": f"http://127.0.0.1:{HUB_PORT}/artifact/marketplace.tar.gz",
+        "sha256": hashlib.sha256(payload_su).hexdigest(),
+        "size": len(payload_su),
+        "installer_sha256": "",
+    }
+    proc_su = start_daemon(rw_su, allow_install=False)
+    try:
+        api("/pair?code=123456", "POST")
+        api("/refresh", "POST")
+        status, body = api("/status")
+        assert status == 200, body
+        assert body["version"], body
+        assert body["self_update"] is True and body["self_version"] == "99.0.0", body
+
+        # without allow_install it only stages - it must never restart itself
+        status, body = api("/self-update", "POST")
+        assert status == 200 and body["started"] is True, body
+        job = wait_job("staged")
+        assert job["package"] == "marketplace", job
+        assert os.path.isfile(os.path.join(rw_su, "stage", "marketplace", "payload", "demo.qml"))
+        # staging must not have queued a report (nothing was installed)
+        assert not os.path.exists(os.path.join(rw_su, "report.pending.json"))
+    finally:
+        proc_su.terminate()
+        proc_su.wait(timeout=5)
+        shutil.rmtree(tmp_su, ignore_errors=True)
+
+    # same index, older version in the catalogue -> no update offered
+    FakeHub.index["marketplace"]["version"] = "0.0.1"
+    tmp_old = tempfile.mkdtemp(prefix="store-daemon-noupdate.")
+    rw_old = os.path.join(tmp_old, "rw")
+    os.makedirs(rw_old)
+    proc_old = start_daemon(rw_old, allow_install=False)
+    try:
+        api("/refresh", "POST")
+        status, body = api("/status")
+        assert body["self_update"] is False, body
+        status, body = api("/self-update", "POST")
+        assert body["started"] is False and "already at" in body["detail"], body
+    finally:
+        proc_old.terminate()
+        proc_old.wait(timeout=5)
+        shutil.rmtree(tmp_old, ignore_errors=True)
+
     # allow_install=0: staged but never executed
     tmp = tempfile.mkdtemp(prefix="store-daemon-stage.")
     rw = os.path.join(tmp, "rw")
