@@ -931,6 +931,12 @@ def render_toctou(t: dict) -> str:
 def _render_tunnel(t: dict) -> str:
     """The way out: the USB network function, and the tunnel that dials home."""
     bits = [f'usb0 {t["usb0"]}' if t.get("usb0") else "usb0 absent"]
+    link_note = "" if t.get("usb0") else (
+        '<p class="dim">No network function on the cable. On the rig: '
+        '<code>sudo scripts/23_usb_debug_link.sh --on</code>, then from a laptop '
+        'on the same WiFi <code>ssh -J pi@&lt;rig&gt; root@10.55.0.2 -p 2224</code>. '
+        'The head unit answers only once the Wifi1b package gives it 10.55.0.2 and '
+        'dropbear.</p>')
     if t.get("configured"):
         bits.append(f'tunnel {t.get("active") or "?"} / {t.get("enabled") or "?"} '
                     f'-> {t.get("target") or "(no target)"} '
@@ -953,7 +959,7 @@ def _render_tunnel(t: dict) -> str:
         '<input type="hidden" name="action" value="stop">'
         '<button type="submit">Stop tunnel</button></form></div>')
     return ('<section><strong>Remote access</strong>'
-            f'<p class="dim">{" - ".join(bits)}</p>{note}{buttons}</section>')
+            f'<p class="dim">{" - ".join(bits)}</p>{note}{link_note}{buttons}</section>')
 
 
 def render_body(st: dict, steps: list[dict], token_ok: bool = False) -> str:
@@ -1166,6 +1172,8 @@ GUIDE = """<details class="fold"{open}>
 Update via USB</code>, then accept the same-version confirmation.</li>
 <li>Let it run to the reboot. Do not unplug while the update is writing.</li>
 <li>Afterwards press <b>Normal mode</b>, then unplug.</li>
+<li>Not updating? The same cable can carry ssh instead of the drive
+(<code>scripts/23_usb_debug_link.sh --on</code>).</li>
 </ol></details>"""
 
 

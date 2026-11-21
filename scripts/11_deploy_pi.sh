@@ -124,6 +124,11 @@ src, dst, root = sys.argv[1:4]
 text = re.sub(r"/home/[^/\s]+/toctou-usb-update", root, open(src).read())
 lines = []
 for line in text.splitlines():
+    if line.startswith("ConditionPathExists="):
+        # A dangling serve.img means "no image armed": let the unit be skipped
+        # cleanly instead of failing on every boot.
+        lines.append(line)
+        line = "ConditionPathExists=%s/build/serve.img" % root
     if line.startswith("ExecStart="):
         # The upstream unit relies on 03_deploy_gadget.sh's own defaults, which
         # point at <pizero>/build/. Pass the real locations explicitly instead,

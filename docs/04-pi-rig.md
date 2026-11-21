@@ -214,6 +214,26 @@ the two ways out instead:
   starts at all (`ConditionPathExists`), and the page says so instead of showing
   a dead button.
 
+### The cable as a debug link (23)
+
+The USB-C port does one job at a time: the gadget owns the UDC. When the head
+unit is not being updated, the same cable can carry a network instead of a drive:
+
+```sh
+sudo scripts/23_usb_debug_link.sh --on        # stop the gadget, bring up usb0 10.55.0.1/24
+ssh -J pi@<rig> root@10.55.0.2 -p 2224        # from a laptop on the rig's WiFi
+sudo scripts/23_usb_debug_link.sh --off       # link down; re-arm with systemctl start toctou-gadget
+```
+
+That is one half of the link. Nothing on the head unit configures its `usb0` or
+listens on it until the Wifi1b package is installed (`packages/wifi1b`), which is
+what puts `10.55.0.2` and a key-only dropbear on 2224 there. The rig's own sshd
+carries the second hop, so no NAT and no IP forwarding are involved.
+
+Keep the two apart on purpose: during an update the head unit should see mass
+storage and nothing else, because every extra USB descriptor is a risk in the one
+phase that cannot be retried casually.
+
 ### Where each file lives
 
 One table, used by `scripts/18_deploy_rig_agent.sh` and by the *Files* section of
