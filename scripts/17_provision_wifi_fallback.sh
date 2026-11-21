@@ -49,12 +49,12 @@ install -D -m 0644 "$PI/rig-ap-fallback.service" /etc/systemd/system/rig-ap-fall
 install -D -m 0644 "$PI/rig-wifi-agent.service" /etc/systemd/system/rig-wifi-agent.service
 install -d -m 0755 /etc/rig
 umask 077
-# The agent token gates the page's actions once the rig is on the LAN. Reuse the
-# existing one so a re-provision does not invalidate the phone's saved link.
-AGENT_TOKEN="$(sed -n 's/^RIG_AGENT_TOKEN=//p' /etc/rig/wifi.env 2>/dev/null | tr -d '"' | head -n1)"
-[ -n "$AGENT_TOKEN" ] || AGENT_TOKEN="$(openssl rand -hex 16)"
-printf 'RIG_AP_SSID=%s\nRIG_AP_PASSPHRASE=%s\nRIG_AGENT_TOKEN=%s\n' \
-    "$RIG_AP_SSID" "$RIG_AP_PASSPHRASE" "$AGENT_TOKEN" >/etc/rig/wifi.env
+# Two values only: the AP's name and its passphrase. There is no agent token any
+# more — the page is reachable over the owner's LAN or this AP, and gating it
+# bought a field to retype on a phone. A RIG_AGENT_TOKEN left over from an older
+# provisioning is simply ignored (and dropped the next time this runs).
+printf 'RIG_AP_SSID=%s\nRIG_AP_PASSPHRASE=%s\n' \
+    "$RIG_AP_SSID" "$RIG_AP_PASSPHRASE" >/etc/rig/wifi.env
 chmod 0600 /etc/rig/wifi.env
 
 echo "== enable"

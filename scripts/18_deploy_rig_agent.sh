@@ -105,4 +105,4 @@ if [ "$changed" -eq 1 ] || [ "$RESTART" -eq 1 ]; then
     echo "  restarted  rig-wifi-agent.service"
 fi
 echo
-echo "page: http://$PI_HOST/  (actions need RIG_AGENT_TOKEN from /etc/rig/wifi.env)"
+echo "page: http://$PI_HOST/  (no token: reachable on the rig's own network)"

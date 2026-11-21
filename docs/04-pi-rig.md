@@ -349,11 +349,11 @@ this script deploys, and a button that cannot build is worse than none.
   card you pulled out of a camera).
 - **Delete** removes one image from the depot; the one currently served is
   refused until another is served, and its cached hash goes with it.
-- Every action on the page needs `RIG_AGENT_TOKEN`. Paste it once into the
-  *Actions token* box: the agent keeps it in a `rigagent` cookie (`HttpOnly`,
-  `SameSite=Strict`), so the buttons work from the phone without re-typing it.
-  The setup AP is trusted on its own, since holding that link means hands on the
-  board.
+- **No API token.** The page is reachable over the owner's LAN or the setup AP
+  the owner raised in their own car, and a token in front of that only bought a
+  field to retype on a phone. `/connect` still asks for the AP passphrase — that
+  is a network credential, not a gate on this API. A `RIG_AGENT_TOKEN` left in
+  `/etc/rig/wifi.env` from an older provisioning is ignored.
 
 ## Following the steps in a browser
 

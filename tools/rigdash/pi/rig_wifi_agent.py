@@ -19,8 +19,10 @@ Gates, both from /etc/rig/wifi.env:
 
 * `RIG_AP_PASSPHRASE` — required for `/api/connect`; whoever joined the setup AP
   already knows it.
-* `RIG_AGENT_TOKEN` — required for every state-changing call once the rig is on
-  the LAN. Without it the page is read-only, which is the safe default.
+* no API token. The page is reachable over the owner's LAN or the setup AP the
+  owner raised in their own car, and a token in front of that bought a field to
+  retype on a phone and nothing else. `/connect` still needs the AP passphrase,
+  because that is a network credential rather than a gate on this API.
 
 Standard library only: the rig does not get a Python site-packages tree, and
 this must work on a freshly flashed card.
@@ -45,7 +47,6 @@ from urllib.parse import parse_qs, urlparse
 #: gives clients 10.42.0.x and this is the gateway they land on.
 AP_ADDRESS = "10.42.0.1"
 AP_PASSPHRASE_ENV = "RIG_AP_PASSPHRASE"
-AGENT_TOKEN_ENV = "RIG_AGENT_TOKEN"
 
 #: The rig dials out; nothing dials in. Target, port and key live on the board in
 #: /etc/rig/tunnel.env, never in this repo — it names a host and holds a key path.
@@ -1095,7 +1096,7 @@ def render_tweaks(t: dict) -> str:
     return "".join(blocks)
 
 
-def render_body(st: dict, steps: list[dict], token_ok: bool = False) -> str:
+def render_body(st: dict, steps: list[dict]) -> str:
     """The page body: steps, files, USB control, WiFi setup.
 
     Dense on purpose — one line per check, everything green folded away, so the
@@ -1250,14 +1251,6 @@ def render_body(st: dict, steps: list[dict], token_ok: bool = False) -> str:
         '<p id="upprog" class="dim">body is the file itself — progress shows here; '
         f'free {_free_gib():.1f} GB</p></section>' + UPLOAD_JS
     )
-    token_block = "" if token_ok else (
-        '<section><strong>Actions token</strong>'
-        '<p class="dim">Paste RIG_AGENT_TOKEN from /etc/rig/wifi.env once — it is '
-        'kept in a cookie, so every button on this page works afterwards.</p>'
-        '<form method="post" action="/agent/token" class="row">'
-        '<input name="token" type="password" autocomplete="off" style="flex:1 1 200px">'
-        '<button type="submit">Set</button></form></section>'
-    )
 
     # Green lists stay folded; the page only opens what needs a decision.
     checks = (
@@ -1287,7 +1280,7 @@ def render_body(st: dict, steps: list[dict], token_ok: bool = False) -> str:
         f'<p class="summary">{_tally(steps)} · {files_ok}/{len(files)} files · '
         f'{st.get("free_gb", 0)} GB free · up {st.get("uptime_h", 0)} h</p>'
         + checks + files_block + images_block + toctou_block + tweaks_block
-        + devices_block + upload_block + token_block
+        + devices_block + upload_block
         + GUIDE.format(open="" if role == "toctou" else " open")
         + '<section><strong>USB</strong>'
         f'<p class="dim">now: {_esc(role_line)} · boot dr_mode {_esc(usb["mode"] or "unset")}'
@@ -1423,19 +1416,13 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return hmac.compare_digest(token.encode(), expected.encode())
 
-    def _agent_token_ok(self, token: str) -> bool:
-        expected = os.environ.get(AGENT_TOKEN_ENV, "")
-        if not expected:
-            return False
-        return hmac.compare_digest(token.encode(), expected.encode())
-
     def _page(self, message: str = "", error: bool = False) -> bytes:
         st = rig_state()
         subtitle = (f"setup access point · {st['wifi']['ip'] or 'no address'}"
                     if st["wifi"]["ap_active"] else st["wifi"]["state"])
         page = PAGE.format(host=_esc(st["hostname"]),
                            state=_esc(subtitle),
-                           body=render_body(st, rig_steps(), token_ok=self._agent_ok()))
+                           body=render_body(st, rig_steps()))
         if message:
             css = "err" if error else "okc"
             page = page.replace("</h1>", f'</h1><p class="{css}">'
@@ -1480,14 +1467,17 @@ class Handler(BaseHTTPRequestHandler):
                 return value
         return ""
 
-    def _supplied_token(self, form_token: str = "") -> str:
-        return (form_token or self._cookie("rigagent")
-                or self.headers.get("X-Rig-Token", ""))
+    def _agent_ok(self, form_token: str = "") -> bool:  # noqa: ARG002 - call sites kept
+        """Always true: the page is not gated.
 
-    def _agent_ok(self, form_token: str = "") -> bool:
-        """Token from form, cookie or header — or the setup AP, i.e. hands on."""
-        return (self._agent_token_ok(self._supplied_token(form_token))
-                or status()["ap_active"])
+        It runs on the rig, on whatever network the rig is on, and the only ways
+        anyone reaches it are the owner's LAN and the setup AP that the owner
+        created by powering the board in their own car. A token in front of that
+        bought nothing but a field to retype on a phone, so it is gone; the
+        access-point passphrase still guards `/connect`, because that one is a
+        network credential, not an API gate.
+        """
+        return True
 
     def _form(self) -> dict[str, str]:
         length = min(int(self.headers.get("Content-Length") or 0), MAX_BODY)
@@ -1511,8 +1501,6 @@ class Handler(BaseHTTPRequestHandler):
             self._post_upload()
         elif path in ("/tunnel", "/api/tunnel"):
             self._post_tunnel(path)
-        elif path == "/agent/token":
-            self._post_agent_token()
         elif path in ("/media/mount", "/api/media/mount"):
             self._post_mount(path)
         else:
@@ -1540,29 +1528,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(200, self._page(message, error=not ok))
 
-    def _post_agent_token(self) -> None:
-        """Trade the token for a cookie so the buttons work on the LAN."""
-        token = self._form().get("token", "")
-        if not self._agent_token_ok(token):
-            self._send(403, self._page("wrong token", error=True))
-            return
-        self.send_response(303)
-        self.send_header("Location", "/")
-        self.send_header("Set-Cookie",
-                         f"rigagent={token}; Path=/; HttpOnly; SameSite=Strict; "
-                         "Max-Age=2592000")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
     def _post_images(self, path: str) -> None:
         form = self._form()
-        if not self._agent_ok(form.get("token", "")):
-            message = "actions need RIG_AGENT_TOKEN (see /etc/rig/wifi.env)"
-            if path.startswith("/api/"):
-                self._json(403, {"ok": False, "error": message})
-            else:
-                self._send(403, self._page(message, error=True))
-            return
         name = form.get("name", "")
         if path.endswith("hash"):
             ok, message = image_hash(name)
@@ -1580,13 +1547,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def _post_mount(self, path: str) -> None:
         form = self._form()
-        if not self._agent_ok(form.get("token", "")):
-            message = "actions need RIG_AGENT_TOKEN (see /etc/rig/wifi.env)"
-            if path.startswith("/api/"):
-                self._json(403, {"ok": False, "error": message})
-            else:
-                self._send(403, self._page(message, error=True))
-            return
         ok, message = mount_media(form.get("device", ""))
         record(f"mount {form.get('device', '?')}", ok, message)
         if path.startswith("/api/"):
@@ -1598,10 +1558,6 @@ class Handler(BaseHTTPRequestHandler):
         """Raw-body upload: the request body IS the image."""
         query = parse_qs(urlparse(self.path).query)
         name = (query.get("name") or [""])[0]
-        if not self._agent_ok():
-            self._json(403, {"ok": False,
-                             "error": "actions need RIG_AGENT_TOKEN"})
-            return
         length = int(self.headers.get("Content-Length") or 0)
         ok, message = save_upload(name, self.rfile, length)
         record(f"image upload {name}", ok, message)
@@ -1615,13 +1571,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def _post_usb(self, path: str) -> None:
         form = self._form()
-        if not self._agent_ok(form.get("token", "")):
-            message = "actions need RIG_AGENT_TOKEN (see /etc/rig/wifi.env)"
-            if path.startswith("/api/"):
-                self._json(403, {"ok": False, "error": message})
-            else:
-                self._send(403, self._page(message, error=True))
-            return
         if path.endswith("role"):
             role = form.get("role", "")
             ok, message = usb_apply_role(role)
@@ -1640,15 +1589,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, self._page(message, error=not ok))
 
     def _post_tunnel(self, path: str) -> None:
-        """Start or stop the reverse tunnel. Token-gated like every other action."""
+        """Start or stop the reverse tunnel."""
         form = self._form()
-        if not self._agent_ok(form.get("token", "")):
-            message = "actions need RIG_AGENT_TOKEN (see /etc/rig/wifi.env)"
-            if path.startswith("/api/"):
-                self._json(403, {"ok": False, "error": message})
-                return
-            self._send(403, self._page(message, error=True))
-            return
         action = form.get("action", "")
         ok = False
         if action not in ("start", "stop"):
