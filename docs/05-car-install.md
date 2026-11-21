@@ -42,9 +42,11 @@ pass #2, and the installed rootfs was the patched one (docs/17 has the numbers).
 - The startup safety-disclaimer screen shows the boot message. Build 5
   patches only `en-gb`/`en-au` with the old text ("Good news everyone!...");
   the other 24 locales keep the OEM disclaimer. After the optional
-  all-language refresh (docs/08) every locale shows "We're rooted." /
-  "run_stuff.sh auto-runs from USB." / "Updater signature checks are
-  disabled." / "No warranties provided."
+  all-language refresh (docs/08) every locale shows its `config/messages.json`
+  text; the English one reads "Drive safely and obey traffic rules." /
+  "Root access is enabled for the owner. run_stuff.sh runs by itself from a
+  plugged-in USB drive. Updater signature checks are off. Provided as is, no
+  warranty. Drive on."
 - Plug a FAT/exFAT stick with `payload/run_stuff.sample.sh` (renamed to
   `run_stuff.sh`) at its root: within ~8 s the failsafe runs it as root and
   writes `RUN_STUFF_OK.txt` back to the stick (uid=0 proves the root

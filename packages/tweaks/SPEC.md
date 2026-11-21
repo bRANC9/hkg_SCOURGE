@@ -186,6 +186,10 @@ Brightness is kept at `128:128:128`.
   from
   `/rw_data/tweaks/disclaimer_auto` and
   `/rw_data/tweaks/disclaimer_timeout_ms`.
+- **Default delay: 2 s** (`disclaimer_timeout_ms=2000`, auto-accept on) in the
+  daemon defaults, the installer's seeded config and the QML fallback. An
+  existing `/rw_data/tweaks/config.conf` keeps its own value; change it in the
+  Tweaks page or with `POST /set?disclaimer_timeout_ms=<ms>`.
 - On timeout it confirms the last-used driver, except when the vehicle is
   driving/calling and the current driver is not the first driver.
 - Any touch cancels the timer for the rest of the boot.
