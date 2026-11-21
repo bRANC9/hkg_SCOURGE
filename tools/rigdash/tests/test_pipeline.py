@@ -359,6 +359,76 @@ class ToctouTests(unittest.TestCase):
         self.assertEqual([p["served"] for p in state["passes"]], ["GENUINE"])
 
 
+class TweaksTests(unittest.TestCase):
+    """The disclaimer stick on the rig page: id, payload, manifest, last result."""
+
+    def setUp(self) -> None:
+        from tools.rigdash.pi import rig_wifi_agent as agent
+        self.agent = agent
+        self._tmp = tempfile.TemporaryDirectory()
+        self.stick = Path(self._tmp.name) / "stick"
+        self.stick.mkdir()
+        self._saved = agent._usb_mounts
+        agent._usb_mounts = lambda: [{"target": str(self.stick), "fstype": "exfat",
+                                      "source": "/dev/sdz1"}]
+        (self.stick / "run_stuff.sh").write_text(
+            "#!/bin/sh\n# TWEAKS_DISCLAIMER_ID=abc123def4567890\nset -u\n")
+        for base in ("qml_eco3.0", "new_qml"):
+            target = self.stick / "payload" / "qml" / "AppStandbyClock" / base
+            target.mkdir(parents=True)
+            for name in ("main.qml", "Screen_AppStandbyClock_Confirm.qml"):
+                (target / name).write_text("// TWEAKS_UNGATED_CONFIRM\n")
+        lines = []
+        for path in sorted(self.stick.joinpath("payload").rglob("*.qml")):
+            import hashlib
+            rel = path.relative_to(self.stick)
+            lines.append(f"{hashlib.md5(path.read_bytes()).hexdigest()}  {rel.as_posix()}")
+        (self.stick / "manifest.md5").write_text("\n".join(lines) + "\n")
+
+    def tearDown(self) -> None:
+        self.agent._usb_mounts = self._saved
+        self._tmp.cleanup()
+
+    def test_reads_id_payload_and_manifest(self) -> None:
+        state = self.agent.tweaks_state()
+        self.assertTrue(state["found"])
+        stick = state["sticks"][0]
+        self.assertEqual(stick["id"], "abc123def4567890")
+        self.assertEqual(stick["bases"], ["new_qml", "qml_eco3.0"])
+        self.assertEqual(stick["files"], 4)
+        self.assertEqual(stick["manifest_failed"], 0)
+        self.assertEqual(stick["result"], {})
+        html = self.agent.render_tweaks(state)
+        self.assertIn("manifest ok", html)
+        self.assertIn("not run yet", html)
+        self.assertIn("next boot", html)
+
+    def test_tampered_payload_is_reported(self) -> None:
+        target = (self.stick / "payload" / "qml" / "AppStandbyClock" /
+                  "qml_eco3.0" / "main.qml")
+        target.write_text("// changed after the manifest was written\n")
+        stick = self.agent.tweaks_state()["sticks"][0]
+        self.assertEqual(stick["manifest_failed"], 1)
+        self.assertTrue(any("mismatch" in p for p in stick["problems"]))
+        self.assertIn("problem", self.agent.render_tweaks({"found": True, "sticks": [stick]}))
+
+    def test_last_result_is_shown(self) -> None:
+        (self.stick / "run_stuff_result.txt").write_text(
+            "SCOURGE_DISCLAIMER\ntime=2026-11-21 14:00:00 UTC\nuid=0\n"
+            "bases=qml_eco3.0,new_qml\ndisclaimer=next-boot\nstatus=OK\n")
+        stick = self.agent.tweaks_state()["sticks"][0]
+        self.assertEqual(stick["result"]["status"], "OK")
+        html = self.agent.render_tweaks({"found": True, "sticks": [stick]})
+        self.assertIn("status", html)
+        self.assertIn("disclaimer", html)
+
+    def test_nothing_plugged_in_is_quiet(self) -> None:
+        self.agent._usb_mounts = lambda: []
+        state = self.agent.tweaks_state()
+        self.assertFalse(state["found"])
+        self.assertIn("No disclaimer stick", self.agent.render_tweaks(state))
+
+
 def pipeline_secret_keys() -> tuple[str, ...]:
     from tools.rigdash.config import SECRET_KEYS
     return SECRET_KEYS

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import hmac
 import html
 import json
@@ -335,6 +336,7 @@ def rig_state() -> dict:
         "files": deploy_state(),
         "images": images(),
         "toctou": toctou_state(),
+        "tweaks": tweaks_state(),
         "tunnel": tunnel_state(),
         "devices": removable_devices(),
         "log": recent_actions(),
@@ -597,7 +599,10 @@ def image_serve(name: str) -> tuple[bool, str]:
     # moving the pointer is not enough: the gadget has to be re-armed for the new
     # file to reach the wire. Re-arming also re-binds the UDC, so the head unit
     # sees the drive disappear and come back as the freshly chosen image.
-    rc, message = _run(["systemctl", "restart", "toctou-gadget"], timeout=90)
+    # --no-ask-password: without it a non-root caller (or one on a host without
+    # the unit) blocks on polkit for 90 s waiting for a desktop auth dialog.
+    rc, message = _run(["systemctl", "--no-ask-password", "restart", "toctou-gadget"],
+                       timeout=90)
     detail = " · gadget re-armed" if rc == 0 else \
         f" · gadget restart failed ({message[:120]})"
     return True, f"now serving {os.path.basename(path)}{detail}"
@@ -962,6 +967,134 @@ def _render_tunnel(t: dict) -> str:
             f'<p class="dim">{" - ".join(bits)}</p>{note}{link_note}{buttons}</section>')
 
 
+# --- tweaks (the disclaimer stick) ------------------------------------------
+#: A stick built by packages/tweaks/scripts/build_disclaimer_stick.sh carries its
+#: own id in the header of run_stuff.sh, a manifest over the payload, and the last
+#: run's result on the drive root. The page reads all three. The acceptance itself
+#: is the owner's tap on the head unit's standby screen at the next boot — the rig
+#: has no way to make that decision for the car, so it only reports.
+TWEAKS_ID_RE = re.compile(r"^# TWEAKS_DISCLAIMER_ID=(\S+)", re.MULTILINE)
+TWEAKS_STANDBY = os.path.join("payload", "qml", "AppStandbyClock")
+
+
+def _md5_of(path: str) -> str:
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_manifest(root: str) -> tuple[int, int, list[str]]:
+    """Check every file the stick's manifest lists — no shell, no cwd, read-only."""
+    checked = failed = 0
+    problems: list[str] = []
+    try:
+        with open(os.path.join(root, "manifest.md5"), encoding="utf-8",
+                  errors="replace") as handle:
+            lines = handle.readlines()
+    except OSError:
+        return 0, 0, ["no manifest.md5 on the stick"]
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        want, relative = parts[0].lower(), parts[-1]
+        try:
+            got = _md5_of(os.path.join(root, relative))
+        except OSError:
+            failed += 1
+            problems.append(f"missing {relative}")
+            continue
+        checked += 1
+        if got != want:
+            failed += 1
+            problems.append(f"mismatch {relative}")
+    return checked, failed, problems
+
+
+def _stick_result(root: str) -> dict:
+    """The last run's key=value result, if the stick has one."""
+    try:
+        with open(os.path.join(root, "run_stuff_result.txt"), encoding="utf-8",
+                  errors="replace") as handle:
+            text = handle.read(4096)
+    except OSError:
+        return {}
+    result = {}
+    for line in text.splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            result[key.strip()] = value.strip()
+    return result
+
+
+def tweaks_state() -> dict:
+    """The disclaimer stick when one is plugged in, and what it last did."""
+    out: dict = {"found": False, "sticks": []}
+    for mount in _usb_mounts():
+        root = mount["target"]
+        try:
+            with open(os.path.join(root, "run_stuff.sh"), encoding="utf-8",
+                      errors="replace") as handle:
+                head = handle.read(4096)
+        except OSError:
+            continue
+        match = TWEAKS_ID_RE.search(head)
+        if not match:
+            continue
+        standby = os.path.join(root, TWEAKS_STANDBY)
+        bases: list[str] = []
+        files = 0
+        if os.path.isdir(standby):
+            for base in sorted(os.listdir(standby)):
+                try:
+                    count = len([n for n in os.listdir(os.path.join(standby, base))
+                                 if n.endswith(".qml")])
+                except OSError:
+                    continue
+                if count:
+                    bases.append(base)
+                    files += count
+        checked, failed, problems = _verify_manifest(root)
+        out["found"] = True
+        out["sticks"].append({
+            "target": root, "id": match.group(1), "bases": bases, "files": files,
+            "manifest_checked": checked, "manifest_failed": failed,
+            "problems": problems[:5], "result": _stick_result(root),
+        })
+    return out
+
+
+def render_tweaks(t: dict) -> str:
+    """One block per disclaimer stick: what it carries, and what it last did."""
+    if not t.get("found"):
+        return ('<p class="dim">No disclaimer stick plugged into the rig. Build one with '
+                '<code>packages/tweaks/scripts/build_disclaimer_stick.sh /path/to/stick</code> '
+                'and plug it in here to check it before it goes to the car.</p>')
+    blocks = []
+    for stick in t.get("sticks", []):
+        manifest = ("manifest ok" if stick["manifest_checked"] and not stick["manifest_failed"]
+                    else f'manifest {stick["manifest_failed"]} problem(s)')
+        heads = [f'id {stick["id"]}', f'{stick["files"]} qml',
+                 "bases " + (" ".join(stick["bases"]) or "none"), manifest]
+        result = stick.get("result") or {}
+        rows = "".join(
+            f'<li class="{"ok" if key != "status" or value == "OK" else "todo"}">'
+            f'<span class="mark">·</span><b>{_esc(key)}</b>'
+            f'<span class="dim">{_esc(value)}</span></li>'
+            for key, value in sorted(result.items()) if key != "SCOURGE_DISCLAIMER"
+        ) or ('<li class="todo"><span class="mark">!</span><b>not run yet</b>'
+             '<span class="dim">plug it into the head unit; its failsafe runs run_stuff.sh</span></li>')
+        problems = "".join(f'<li class="todo"><span class="mark">!</span>'
+                           f'<b>{_esc(p)}</b></li>' for p in stick.get("problems", []))
+        blocks.append(f'<p class="dim">{_esc(stick["target"])} · {" · ".join(heads)}</p>'
+                      f'<ul class="lines">{problems}{rows}</ul>')
+    blocks.append('<p class="dim">The patch applies on the head unit\'s next boot; the '
+                  'disclaimer is accepted on its standby screen, not here.</p>')
+    return "".join(blocks)
+
+
 def render_body(st: dict, steps: list[dict], token_ok: bool = False) -> str:
     """The page body: steps, files, USB control, WiFi setup.
 
@@ -1137,6 +1270,13 @@ def render_body(st: dict, steps: list[dict], token_ok: bool = False) -> str:
         f'<summary>Files <span class="dim">{files_ok}/{len(files)}</span></summary>'
         f'<ul class="lines">{files_rows}</ul></details>'
     )
+    tweaks = st.get("tweaks") or {}
+    tweaks_label = "disclaimer stick" if tweaks.get("found") else "none"
+    tweaks_block = (
+        f'<details class="fold"{" open" if tweaks.get("found") else ""}>'
+        f'<summary>Tweaks <span class="dim">{tweaks_label}</span></summary>'
+        f'<div id="tweaks-body">{render_tweaks(tweaks)}</div></details>'
+    )
     toctou = st.get("toctou") or {}
     toctou_block = (
         '<details class="fold" open><summary>TOCTOU passes '
@@ -1146,8 +1286,8 @@ def render_body(st: dict, steps: list[dict], token_ok: bool = False) -> str:
     return (
         f'<p class="summary">{_tally(steps)} · {files_ok}/{len(files)} files · '
         f'{st.get("free_gb", 0)} GB free · up {st.get("uptime_h", 0)} h</p>'
-        + checks + files_block + images_block + toctou_block + devices_block
-        + upload_block + token_block
+        + checks + files_block + images_block + toctou_block + tweaks_block
+        + devices_block + upload_block + token_block
         + GUIDE.format(open="" if role == "toctou" else " open")
         + '<section><strong>USB</strong>'
         f'<p class="dim">now: {_esc(role_line)} · boot dr_mode {_esc(usb["mode"] or "unset")}'
@@ -1319,6 +1459,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"networks": scan(timeout=25)})
         elif path == "/api/log":
             self._json(200, {"actions": recent_actions()})
+        elif path == "/api/tweaks":
+            t = tweaks_state()
+            self._json(200, {"state": t, "html": render_tweaks(t)})
         elif path == "/api/toctou":
             t = toctou_state()
             self._json(200, {"state": t, "html": render_toctou(t)})
@@ -1511,7 +1654,8 @@ class Handler(BaseHTTPRequestHandler):
         if action not in ("start", "stop"):
             message = "action must be start or stop"
         else:
-            rc, out = _run(["systemctl", action, TUNNEL_UNIT], timeout=45)
+            rc, out = _run(["systemctl", "--no-ask-password", action, TUNNEL_UNIT],
+                           timeout=45)
             ok = rc == 0
             message = (f"tunnel {action}: running" if ok
                        else f"tunnel {action} failed: {out[:160]}")
