@@ -2,6 +2,10 @@
 
 TARGET: Ioniq 5 Gen5W_L (Linux), firmware 260128 (EU). Read docs/12 first.
 
+**Car-validated 2026-11-21 on a 2021 Ioniq 5 RWD** — the whole flow below, one
+take: 34 min 21 s from the first read to `[UPDATE_DONE]`, the swap landed at
+pass #2, and the installed rootfs was the patched one (docs/17 has the numbers).
+
 ## Preconditions
 
 - **Your own vehicle.** Parked, off-road, battery supported for a 1–1.5 h
@@ -9,7 +13,8 @@ TARGET: Ioniq 5 Gen5W_L (Linux), firmware 260128 (EU). Read docs/12 first.
 - The stage-1 build passed `09_preflight.sh` and every artifact matched the
   known-good table (docs/03).
 - The rig is deployed and armed (docs/04), watchdog disabled, `toctou.log`
-  tailing.
+  tailing. Expect the engine's md5 sweep to run at ~4.7 MB/s and the install at
+  ~7.8 MB/s — the head unit's own pipeline, not the rig, sets both.
 - A recovery plan exists: the A/B slot is the built-in fallback (the update
   writes the inactive slot), and the stock package + rig can always
   re-run. Keep a stock 260128 package tree available. The stock *reinstall*

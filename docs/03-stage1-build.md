@@ -77,11 +77,14 @@ libdeflate L10 → exact-size padding → TE2-encrypt with the stock envelope
 as metadata template) reproduces byte-identical artifacts. **Compare every
 artifact against this table; any mismatch means stop and investigate.**
 
-> **Build 6 (all-language boot message) is WIP.** The message refresh changes
-> all patched `.qm` files, so it changes every rootfs-derived hash below. The
-> values are the car-validated **build 5** and remain the reference for the
-> image on the car. Re-record the table from a full build and validate the new
-> image on the car before calling build 6 known-good. The `.qm`-only SSH
+> **Build 6 is car-validated as of 2026-11-21.** A 2021 Ioniq 5 RWD installed
+> `out/stage1.te2` (`7f3b155e…`) through the TOCTOU rig — the run is in docs/17.
+> The build-6 column below is therefore what is on that car, and the build-5
+> values are the historical reference: the message refresh changes all patched
+> `.qm` files, so every rootfs-derived hash moved while the four payload
+> binaries stayed byte-identical (see the table's payload rows).
+> `config/firmware_locks.env`'s `KNOWN_GOOD_*` pins now carry the validated
+> values, so a build that does not reproduce them stops here. The `.qm`-only SSH
 > refresh (`tools/deploy_boot_messages.sh`) does not use this table.
 
 | Artifact | Property | Known-good value (build 5) |

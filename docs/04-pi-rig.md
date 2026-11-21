@@ -180,6 +180,40 @@ The dashboard does the same job without the AP when the rig is already on the
 network: the WiFi panel lists what the rig can see and pushes a network to it
 over ssh.
 
+### Remote access from the car (USB-SSH and a reverse tunnel)
+
+A rig in a car has no inbound route, so the page's **Remote access** line watches
+the two ways out instead:
+
+- **`usb0`** — the gadget's own network function: `ssh` over the same cable, no
+  WiFi and no access point in the way. The page reports the address when the
+  interface exists. The current gadget is mass-storage only, so this stays empty
+  until a network function joins the deployment; do not add one casually, because
+  every extra descriptor the head unit sees during an update is a risk it does not
+  need.
+- **`rig-tunnel.service`** — a `RemoteForward` the rig dials out repeatedly, so
+  the build host reaches the rig's sshd as if it were local. That is how the
+  upstream author debugs from the car. The target, the remote port and the key
+  live in `/etc/rig/tunnel.env` on the board (0600, root), never in this repo —
+  the file names a host, and the leak gate has no way to tell a friend from a
+  secret:
+
+  ```sh
+  sudo tee /etc/rig/tunnel.env >/dev/null <<'EOF'
+  RIG_TUNNEL_TARGET=you@build-host
+  RIG_TUNNEL_REMOTE=2222
+  RIG_TUNNEL_KEY=/root/.ssh/id_ed25519
+  EOF
+  sudo chmod 0600 /etc/rig/tunnel.env
+  sudo systemctl enable --now rig-tunnel
+  ```
+
+  **Start tunnel** / **Stop tunnel** on the page run the same two `systemctl`
+  calls, token-gated like every other action. The unit retries every 10 s, so a
+  dropped link or a WiFi roam costs nothing; with the file missing the unit never
+  starts at all (`ConditionPathExists`), and the page says so instead of showing
+  a dead button.
+
 ### Where each file lives
 
 One table, used by `scripts/18_deploy_rig_agent.sh` and by the *Files* section of
@@ -240,8 +274,15 @@ update menu stays greyed out.
 
 `~/scourge/build/` is the depot. Every `*.img` in it shows up in the page's
 **Images** list with its size, age and hash, and **Serve** moves the
-`serve.img` symlink onto that file — a pointer move, not a 27 GB copy, so the
-head unit keeps seeing the same storage device.
+`serve.img` symlink onto that file — a pointer move, not a 27 GB copy. The
+gadget's `ExecStart` points at `serve.img`, not at a concrete file, so the
+symlink is the single answer to "what is on the wire".
+
+A pointer move alone would change nothing: the plugin opens the baseline once at
+config time and keeps that fd. **Serve therefore re-arms the gadget** as its last
+step, which re-binds the UDC — the head unit sees the drive disappear and come
+back as the newly chosen image. Serving needs the page's actions token, and the
+link down first (`Normal mode`), so a running update cannot lose its device.
 
 - A file whose name contains `stock` is *flagged* **recovery** in the list. The
   badge is a label: what actually decides is the region config. `regions.json`
@@ -320,18 +361,27 @@ from a phone without ssh. The floor to check against: the region is
 879 126 179 B. The rig side needs ≥9 s for a pass at the measured 98 MB/s; the
 real floor is the USB 2.0 link the head unit sits on.
 
-The first car run (2026-11-21, Pi 4 through its USB-C device port) landed well
-below that floor, so budget from the measurement, not from the link:
+The first car run (2026-11-21, a **2021 Ioniq 5 RWD**, Pi 4 through its USB-C
+device port) landed well below that floor, so budget from the measurement, not
+from the link:
 
 | pass | reads | bytes | duration | rate |
 |---|---:|---:|---:|---:|
 | #1 genuine check (`md5sum`) | 214 626 | 879 108 096 | 186.7 s | 4.7 MB/s |
-| #2 evil install (`DecryptToPIPE \| tar`) | 210 413 | 861 850 112 | 2310.7 s | 0.37 MB/s |
+| #2 evil install (`DecryptToPIPE \| tar`) | 210 413 | 861 851 648 | closed at session end | lower bound only |
 
-The check pass is the link's honest number. The install pass is not: `tar`
-throttles the read to roughly a tenth of it, which is why the whole update takes
-over half an hour for a 879 MB rootfs. A retry does not get faster by moving the
-image — it is the extraction, not the wire.
+Pass #1 is the engine's own md5 sweep and the slowest single read of the run. Pass
+#2 is not a rate at all: the plugin keeps a pass open until the next sweep or
+shutdown, so its duration carries the idle time between reads (the run above stayed
+open from the first install read until the board was powered off). The page and
+`22_collect_rig_logs.sh` now label that case instead of dividing by it.
+
+The number that matters is the head unit's own, from
+`/log_data/AppUpgrade/upgrade_log`: the rootfs install took **113 s for 879.1 MB
+— 7.8 MB/s**, and the whole update **34 min 21 s**. A stock stick spent the same
+113 s on that step (2026-07-26, volume `9C14-E5DD`), so the cost is the head
+unit's decrypt → `zcat` → `tar` → ext4 pipeline, not the wire and not the rig:
+moving the image elsewhere does not make a retry faster.
 
 ## Provisioning (one time, ON the Pi)
 

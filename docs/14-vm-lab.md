@@ -304,6 +304,12 @@ Not promoted by a successful flash: the `.ver` row CRC in the *served* image. It
 stays the genuine `1243982759`, because the install path never re-hashes the
 rootfs (`docs/01`).
 
+**Promoted 2026-11-21** from a 2021 Ioniq 5 RWD that took the patched rootfs
+through the rig (`docs/17`): the status label in `docs/17`, the build-6 column in
+`docs/03`, the `KNOWN_GOOD_*` pins in `config/firmware_locks.env`, and the rate
+figures in `docs/04`. The fixture pins had already been derived rather than
+pinned, so the run confirmed them instead of changing them.
+
 ## Status labels
 
 `car-validated` · `VM-validated (vendor kernel)` · `VM-validated (compat
