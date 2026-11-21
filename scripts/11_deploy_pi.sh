@@ -49,14 +49,20 @@ while [ $# -gt 0 ]; do
         *) echo "usage: $0 [--skip-image] [--start] [--image PATH-ON-PI]" >&2; exit 2 ;;
     esac
 done
+PI_ROOT="/home/$PI_USER/$PI_DIR"
 # Where the gadget reads the 27 GB image. The SD card is often too small for it
 # (docs/04), in which case the image sits on a dedicated exFAT stick and this
 # path points there instead.
-IMG_PI="${IMG_PI:-/home/$PI_USER/$PI_DIR/build/usb.img}"
-#: The patched envelope the gadget serves from pass #2 on. Where the image sits
-#: on the stick, so can this — 839 MB over the WiFi is 1.5 h.
-ENV_PI="${ENV_PI:-/home/$PI_USER/$PI_DIR/build/stage1.te2}"
-PI_ROOT="/home/$PI_USER/$PI_DIR"
+IMG_PI="${IMG_PI:-$PI_ROOT/build/usb.img}"
+#: The patched envelope the gadget serves from pass #2 on. Where the image sits,
+#: so can this — 839 MB over the WiFi is 1.5 h. An image on a stick defaults to
+#: the envelope beside it; a build-dir default there would point the swap at a
+#: file that is not on that media at all.
+case "$IMG_PI" in
+    "$PI_ROOT"/build/*) ENV_PI_DEFAULT="$PI_ROOT/build/stage1.te2" ;;
+    *) ENV_PI_DEFAULT="${IMG_PI%/*}/stage1.te2" ;;
+esac
+ENV_PI="${ENV_PI:-$ENV_PI_DEFAULT}"
 
 [ -f "$OUT_DIR/usb.img" ] || { echo "missing $OUT_DIR/usb.img (run 08_build_usb_image.sh)" >&2; exit 1; }
 [ -f "$OUT_DIR/stage1.te2" ] || { echo "missing $OUT_DIR/stage1.te2" >&2; exit 1; }
@@ -122,8 +128,8 @@ for line in text.splitlines():
         # The upstream unit relies on 03_deploy_gadget.sh's own defaults, which
         # point at <pizero>/build/. Pass the real locations explicitly instead,
         # and point at serve.img so the page's Serve button owns the choice.
-         line = "ExecStart=%s/pizero/03_deploy_gadget.sh %s/build/serve.img %s/build/regions.json" % (
-            root, root, root)
+        line = ("ExecStart=%s/pizero/03_deploy_gadget.sh "
+                "%s/build/serve.img %s/build/regions.json" % (root, root, root))
     lines.append(line)
 open(dst, "w").write("\n".join(lines) + "\n")
 print(dst)
