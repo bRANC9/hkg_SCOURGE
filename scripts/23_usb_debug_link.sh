@@ -76,7 +76,7 @@ case "$ACTION" in
         ;;
 esac
 
-systemctl stop toctou-gadget 2>/dev/null || true
+systemctl --no-ask-password stop toctou-gadget 2>/dev/null || true
 modprobe libcomposite 2>/dev/null || true
 mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config
 mkdir -p "$GADGET"
