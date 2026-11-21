@@ -86,6 +86,13 @@ class FakeHub(http.server.BaseHTTPRequestHandler):
             return None
         if self.path.startswith("/api/v1/index/"):
             return self._json(200, {"packages": list(self.index.values())})
+        if self.path.startswith("/gh/releases/download/"):
+            # what GitHub does for release assets: 302 to a short-lived URL
+            self.send_response(302)
+            self.send_header("Location", self.path.replace("/gh/releases/download", "/artifact", 1))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return None
         if self.path.startswith("/artifact/"):
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
@@ -419,6 +426,18 @@ def main():
             assert status == 200, body
             status, body = api("/catalog", port=APP_PORT_TLS)
             assert status == 200 and body["packages"][0]["pkg"] == "demo", body
+
+            # GitHub-style asset URL: the artifact lives behind a 302
+            FakeHub.index["demo"].update({
+                "url": f"https://127.0.0.1:{tls_port}/gh/releases/download/demo.tar.gz",
+                "sha256": hashlib.sha256(FakeHub.payload).hexdigest(),
+            })
+            status, body = api("/refresh", "POST", port=APP_PORT_TLS)
+            assert status == 200, body
+            status, body = api("/install?pkg=demo", "POST", port=APP_PORT_TLS)
+            assert status == 200 and body["started"] is True, body
+            job = wait_job("staged", port=APP_PORT_TLS)  # allow_install=0 in this daemon
+            assert job["package"] == "demo", job
         finally:
             proc_tls.terminate()
             proc_tls.wait(timeout=5)
