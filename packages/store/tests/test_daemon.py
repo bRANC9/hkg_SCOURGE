@@ -39,6 +39,10 @@ def free_port():
 
 HUB_PORT = free_port()
 APP_PORT = free_port()
+APP_PORT_USB = free_port()
+APP_PORT_SU = free_port()
+APP_PORT_SU2 = free_port()
+APP_PORT_STAGE = free_port()
 
 
 def make_payload(marker_path, body=b"#!/bin/sh\necho installed > \"$MARKER\"\n"):
@@ -120,34 +124,54 @@ def api(path, method="GET", port=None):
             return exc.code, json.loads(raw)
         except json.JSONDecodeError:
             return exc.code, raw
+    except (urllib.error.URLError, ConnectionError, TimeoutError) as exc:
+        # The daemon is not (yet) listening: callers poll on this.
+        return 0, str(exc)
 
 
-def wait_job(want, timeout=20.0):
+DAEMON_LOG = [None]
+
+
+def daemon_tail(lines=20):
+    path = DAEMON_LOG[0]
+    if not path or not os.path.exists(path):
+        return "(no daemon log)"
+    with open(path, "r", errors="replace") as fh:
+        return "".join(fh.readlines()[-lines:])
+
+
+def wait_job(want, timeout=20.0, port=None):
     deadline = time.time() + timeout
     last = {}
     while time.time() < deadline:
-        _status, job = api("/job")
+        _status, job = api("/job", port=port or APP_PORT)
         last = job if isinstance(job, dict) else {}
         if last.get("state") == want:
             return last
         if last.get("state") in ("failed", "installed") and want not in ("failed", "installed"):
             return last
         time.sleep(0.2)
-    raise AssertionError(f"job never reached {want}: {last}")
+    raise AssertionError(f"job never reached {want}: {last}\n--- daemon log ---\n{daemon_tail()}")
 
 
-def start_daemon(rw, allow_install=True, hub_port=HUB_PORT, port=APP_PORT):
+def start_daemon(rw, allow_install=True, hub_port=HUB_PORT, port=None, extra_args=None):
+    port = port or APP_PORT
     args = [DAEMON, "--rw-dir", rw, "--hub", f"http://127.0.0.1:{hub_port}", "--port", str(port)]
     if allow_install:
         args.append("--allow-install")
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    args.extend(extra_args or [])
+    log_path = os.path.join(rw, "..", "daemon.log")
+    log_file = open(log_path, "wb")
+    proc = subprocess.Popen(args, stdout=log_file, stderr=subprocess.STDOUT)
+    proc.daemon_log = log_path  # type: ignore[attr-defined]
+    DAEMON_LOG[0] = log_path
     for _ in range(50):
         if api("/health", port=port)[0] == 200:
             return proc
         if proc.poll() is not None:
-            raise AssertionError(f"daemon died: {proc.stdout.read().decode()}")
+            raise AssertionError(f"daemon died: {open(log_path).read()}")
         time.sleep(0.1)
-    raise AssertionError("daemon did not start")
+    raise AssertionError(f"daemon did not start: {open(log_path).read()}")
 
 
 def main():
@@ -221,6 +245,54 @@ def main():
         proc.wait(timeout=5)
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # ---- USB stick source (offline): /local lists, /install-local installs ----
+    tmp_usb = tempfile.mkdtemp(prefix="store-daemon-usb.")
+    rw_usb = os.path.join(tmp_usb, "rw")
+    os.makedirs(rw_usb)
+    stick = os.path.join(tmp_usb, "usb")
+    pkgs = os.path.join(stick, "scourge-packages")
+    os.makedirs(pkgs)
+    usb_marker = os.path.join(tmp_usb, "usb.marker")
+    usb_payload = make_payload(usb_marker)
+    with open(os.path.join(pkgs, "demo-2.0.tar.gz"), "wb") as fh:
+        fh.write(usb_payload)
+    with open(os.path.join(pkgs, "demo-2.0.json"), "w") as fh:
+        json.dump({"pkg": "demo-usb", "version": "2.0", "firmware": FW}, fh)
+    with open(os.path.join(pkgs, "demo-2.0.tar.gz.sha256"), "w") as fh:
+        fh.write(hashlib.sha256(usb_payload).hexdigest() + "  demo-2.0.tar.gz\n")
+    with open(os.path.join(pkgs, "broken-1.0.tar.gz"), "wb") as fh:
+        fh.write(usb_payload)
+    with open(os.path.join(pkgs, "broken-1.0.tar.gz.sha256"), "w") as fh:
+        fh.write("0" * 64 + "  broken-1.0.tar.gz\n")
+
+    proc_usb = start_daemon(rw_usb, allow_install=True, port=APP_PORT_USB,
+                            extra_args=["--local-dir", stick])
+    try:
+        status, body = api("/local", port=APP_PORT_USB)
+        assert status == 200, body
+        files = {p["file"]: p for p in body["packages"]}
+        assert set(files) == {"demo-2.0.tar.gz", "broken-1.0.tar.gz"}, body
+        assert files["demo-2.0.tar.gz"]["meta"]["pkg"] == "demo-usb"
+        assert files["demo-2.0.tar.gz"]["sha256_sidecar"] is True
+
+        status, body = api("/install-local?file=demo-2.0.tar.gz", "POST", port=APP_PORT_USB)
+        assert status == 200 and body["source"] == "usb", body
+        job = wait_job("installed", port=APP_PORT_USB)
+        assert job["package"] == "demo-usb", job
+        assert os.path.isfile(usb_marker), "USB installer did not run"
+
+        status, body = api("/install-local?file=broken-1.0.tar.gz", "POST", port=APP_PORT_USB)
+        assert status == 200, body
+        job = wait_job("failed", port=APP_PORT_USB)
+        assert "sha256 mismatch" in job["detail"], job
+
+        status, body = api("/install-local?file=../etc/passwd", "POST", port=APP_PORT_USB)
+        assert status == 400, body
+    finally:
+        proc_usb.terminate()
+        proc_usb.wait(timeout=5)
+        shutil.rmtree(tmp_usb, ignore_errors=True)
+
     # self-update: the app itself is a catalogue package ("marketplace")
     tmp_su = tempfile.mkdtemp(prefix="store-daemon-selfupdate.")
     rw_su = os.path.join(tmp_su, "rw")
@@ -236,19 +308,19 @@ def main():
         "size": len(payload_su),
         "installer_sha256": "",
     }
-    proc_su = start_daemon(rw_su, allow_install=False)
+    proc_su = start_daemon(rw_su, allow_install=False, port=APP_PORT_SU)
     try:
-        api("/pair?code=123456", "POST")
-        api("/refresh", "POST")
-        status, body = api("/status")
+        api("/pair?code=123456", "POST", port=APP_PORT_SU)
+        api("/refresh", "POST", port=APP_PORT_SU)
+        status, body = api("/status", port=APP_PORT_SU)
         assert status == 200, body
         assert body["version"], body
         assert body["self_update"] is True and body["self_version"] == "99.0.0", body
 
         # without allow_install it only stages - it must never restart itself
-        status, body = api("/self-update", "POST")
+        status, body = api("/self-update", "POST", port=APP_PORT_SU)
         assert status == 200 and body["started"] is True, body
-        job = wait_job("staged")
+        job = wait_job("staged", port=APP_PORT_SU)
         assert job["package"] == "marketplace", job
         assert os.path.isfile(os.path.join(rw_su, "stage", "marketplace", "payload", "demo.qml"))
         # staging must not have queued a report (nothing was installed)
@@ -263,12 +335,12 @@ def main():
     tmp_old = tempfile.mkdtemp(prefix="store-daemon-noupdate.")
     rw_old = os.path.join(tmp_old, "rw")
     os.makedirs(rw_old)
-    proc_old = start_daemon(rw_old, allow_install=False)
+    proc_old = start_daemon(rw_old, allow_install=False, port=APP_PORT_SU2)
     try:
-        api("/refresh", "POST")
-        status, body = api("/status")
+        api("/refresh", "POST", port=APP_PORT_SU2)
+        status, body = api("/status", port=APP_PORT_SU2)
         assert body["self_update"] is False, body
-        status, body = api("/self-update", "POST")
+        status, body = api("/self-update", "POST", port=APP_PORT_SU2)
         assert body["started"] is False and "already at" in body["detail"], body
     finally:
         proc_old.terminate()
@@ -286,12 +358,12 @@ def main():
         "sha256": hashlib.sha256(payload).hexdigest(),
         "installer_sha256": "",
     })
-    proc = start_daemon(rw, allow_install=False)
+    proc = start_daemon(rw, allow_install=False, port=APP_PORT_STAGE)
     try:
-        api("/pair?code=123456", "POST")
-        api("/refresh", "POST")
-        api("/install?pkg=demo", "POST")
-        job = wait_job("staged")
+        api("/pair?code=123456", "POST", port=APP_PORT_STAGE)
+        api("/refresh", "POST", port=APP_PORT_STAGE)
+        api("/install?pkg=demo", "POST", port=APP_PORT_STAGE)
+        job = wait_job("staged", port=APP_PORT_STAGE)
         assert "nothing was executed" in job["detail"], job
         assert not os.path.exists(marker)
         assert os.path.isfile(os.path.join(rw, "stage", "demo", "payload", "demo.qml"))
@@ -301,7 +373,8 @@ def main():
         hub.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)
 
-    print("PASS: store daemon (pair, refresh, catalog, install job, tampered artifact, staged-only)")
+    print("PASS: store daemon (pair, refresh, catalog, install job, usb packages, "
+          "tampered artifact, staged-only, self-update)")
     return 0
 
 

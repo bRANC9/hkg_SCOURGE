@@ -21,6 +21,7 @@
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -57,6 +58,8 @@
 
 static char g_rw[MAX_PATH] = "/rw_data/store";
 static char g_hub[MAX_PATH] = DEFAULT_HUB;
+/* Where the USB-stick packages live: <mount>/scourge-packages, tarballs. */
+static char g_local_dir[MAX_PATH] = "/media/usb";
 static char g_token[128];
 static char g_install_id[64];
 static char g_firmware[96];
@@ -250,6 +253,8 @@ static void load_state(void)
                 snprintf(g_region, sizeof(g_region), "%s", p + 7);
             else if (!strncmp(p, "gui=", 4))
                 snprintf(g_gui, sizeof(g_gui), "%s", p + 4);
+            else if (!strncmp(p, "local_dir=", 10))
+                snprintf(g_local_dir, sizeof(g_local_dir), "%s", p + 10);
         }
     }
     config_path(path, sizeof(path), "device.json");
@@ -671,6 +676,108 @@ static void ledger_add(const char *pkg, const char *version, const char *sha)
     }
 }
 
+/* -------------------------------------------------------------- usb packages
+ * Offline source: <stick>/scourge-packages/<name>.tar.gz (+ .json sidecar with
+ * pkg/version/sha256, + .sha256 file). Listed by /local, installed by
+ * /install-local. The WiFi/hub path (/refresh -> /install) is untouched: both
+ * sources feed the same stage_and_run() pipeline.
+ */
+static int dir_exists(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static void local_dir_for(char *out, size_t size)
+{
+    char path[MAX_PATH];
+
+    /* g_local_dir may be a mount point; accept both <mnt>/scourge-packages and
+     * the directory itself. No shell: this runs in the server process, where
+     * system() children are auto-reaped (SIGCHLD=SIG_IGN). */
+    snprintf(path, sizeof(path), "%s/scourge-packages", g_local_dir);
+    if (dir_exists(path)) {
+        snprintf(out, size, "%s", path);
+        return;
+    }
+    snprintf(out, size, "%s", g_local_dir);
+}
+
+static int has_tar_gz(const char *name)
+{
+    size_t len = strlen(name);
+    return len > 7 && !strcmp(name + len - 7, ".tar.gz");
+}
+
+static void local_list(char *out, size_t size)
+{
+    char dir[MAX_PATH];
+    char entry_json[MAX_PATH * 2], json_path[MAX_PATH], meta[MAX_BUF];
+    char sha_path[MAX_PATH], sha_buf[128], full[MAX_PATH * 2];
+    size_t used = 0;
+    DIR *dp;
+    struct dirent *de;
+    int first = 1;
+
+    local_dir_for(dir, sizeof(dir));
+    used += (size_t)snprintf(out + used, size - used, "{\"dir\":\"%s\",\"packages\":[", dir);
+    dp = opendir(dir);
+    if (dp) {
+        while ((de = readdir(dp)) && used + 1024 < size) {
+            const char *base = de->d_name;
+            if (base[0] == '.' || !has_tar_gz(base))
+                continue;
+            if (strstr(base, "..") || strchr(base, '\''))
+                continue;
+            snprintf(json_path, sizeof(json_path), "%s", base);
+            {
+                char *dot = strstr(json_path, ".tar.gz");
+                if (dot)
+                    snprintf(dot, sizeof(json_path) - (size_t)(dot - json_path), ".json");
+            }
+            snprintf(sha_path, sizeof(sha_path), "%s/%s.sha256", dir, base);
+            meta[0] = 0;
+            snprintf(full, sizeof(full), "%s/%s", dir, json_path);
+            if (read_file(full, meta, sizeof(meta))) {
+                /* sidecar files come with a trailing newline; JSON must not */
+                size_t l = strlen(meta);
+                while (l && (meta[l - 1] == '\n' || meta[l - 1] == '\r' || meta[l - 1] == ' '))
+                    meta[--l] = 0;
+            }
+            sha_buf[0] = 0;
+            if (read_file(sha_path, sha_buf, sizeof(sha_buf))) {
+                char *space = strchr(sha_buf, ' ');
+                if (space)
+                    *space = 0;
+                sha_buf[strcspn(sha_buf, "\r\n")] = 0;
+            }
+            if (!meta[0]) {
+                char slug[96];
+                snprintf(slug, sizeof(slug), "%s", base);
+                {
+                    char *dot = strstr(slug, ".tar.gz");
+                    if (dot)
+                        *dot = 0;
+                }
+                snprintf(meta, sizeof(meta), "{\"pkg\":\"%s\",\"version\":\"local\",\"sha256\":\"%s\"}",
+                         slug, sha_buf);
+            } else if (sha_buf[0] && !strstr(meta, "\"sha256\"")) {
+                size_t l = strlen(meta);
+                if (l > 2 && meta[l - 1] == '}') {
+                    meta[l - 1] = 0;
+                    snprintf(meta + l - 1, sizeof(meta) - l + 1, ",\"sha256\":\"%s\"}", sha_buf);
+                }
+            }
+            snprintf(entry_json, sizeof(entry_json), "%s{\"file\":\"%s\",\"sha256_sidecar\":%s,\"meta\":%s}",
+                     first ? "" : ",", base, sha_buf[0] ? "true" : "false", meta);
+            used += (size_t)snprintf(out + used, size - used, "%s", entry_json);
+            first = 0;
+        }
+        closedir(dp);
+    }
+    snprintf(out + used, size - used, "]}\n");
+}
+
 /* ------------------------------------------------------------------- routes */
 static void respond(int fd, int status, const char *body, const char *ctype)
 {
@@ -852,84 +959,60 @@ static int find_entry(const char *index, const char *slug, char *out, size_t siz
     return o > 2 ? 0 : -1;
 }
 
-static void install_worker(const char *slug)
+/* Extract a staged tarball and hand it to its own run_stuff.sh.
+ * Shared by the catalogue install and the USB-stick (local) install. */
+static void stage_and_run(const char *slug, const char *version, const char *sha,
+                          const char *artifact, const char *installer_sha, int is_self,
+                          long release_id)
 {
-    /* The server reaps children automatically (SIGCHLD=SIG_IGN); restore the
-     * default here or every system()/popen() in this child returns -1. */
-    signal(SIGCHLD, SIG_DFL);
-    char entry[MAX_BUF], version[64], url[1024], sha[80], installer_sha[80];
-    char index[MAX_BUF * 2], path[MAX_PATH], stage[MAX_PATH], cmd[MAX_PATH * 4];
-    char got[80], log_path[MAX_PATH];
-    long size;
+    char stage[MAX_PATH], cmd[MAX_PATH * 4], got[80], log_path[MAX_PATH];
     FILE *logf;
 
-    config_path(path, sizeof(path), "index.json");
-    if (!read_file(path, index, sizeof(index))) {
-        job_write("failed", "no cached index - refresh first", 0, slug);
+    snprintf(cmd, sizeof(cmd), "test -f '%s'", artifact);
+    if (system(cmd) != 0) {
+        job_write("failed", "artifact disappeared", 40, slug);
         _exit(1);
     }
-    if (find_entry(index, slug, entry, sizeof(entry)) != 0) {
-        job_write("failed", "package not in index", 0, slug);
-        _exit(1);
-    }
-    json_get_str(entry, "version", version, sizeof(version));
-    json_get_str(entry, "sha256", sha, sizeof(sha));
-    json_get_str(entry, "url", url, sizeof(url));
-    json_get_str(entry, "installer_sha256", installer_sha, sizeof(installer_sha));
-    size = json_get_int(entry, "size", 0);
-    if (!url[0] || !sha[0]) {
-        job_write("failed", "index entry has no artifact url/sha256", 0, slug);
-        _exit(1);
+    job_write("verifying", "sha256", 35, slug);
+    if (sha && sha[0]) {
+        if (sha256_of(artifact, got, sizeof(got)) != 0) {
+            job_write("failed", "sha256sum unavailable", 35, slug);
+            _exit(1);
+        }
+        if (strcasecmp(got, sha) != 0) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "sha256 mismatch: got %s want %s", got, sha);
+            job_write("failed", msg, 35, slug);
+            _exit(1);
+        }
+    } else {
+        job_write("verifying", "no sha256 sidecar - trusting the stick copy", 35, slug);
     }
 
     snprintf(stage, sizeof(stage), "%s/stage/%s", g_rw, slug);
     snprintf(cmd, sizeof(cmd), "rm -rf '%s' && mkdir -p '%s'", stage, stage);
     if (system(cmd) != 0) {
-        job_write("failed", "cannot create stage dir", 0, slug);
+        job_write("failed", "cannot create stage dir", 40, slug);
         _exit(1);
     }
-    snprintf(path, sizeof(path), "%s/artifact.bin", stage);
-
-    job_write("downloading", url, 5, slug);
-    if (http_download(url, path, g_token[0] ? g_token : NULL) != 0) {
-        job_write("failed", "download failed", 5, slug);
-        _exit(1);
-    }
-    job_write("verifying", "sha256", 35, slug);
-    if (sha256_of(path, got, sizeof(got)) != 0) {
-        job_write("failed", "sha256sum unavailable", 35, slug);
-        _exit(1);
-    }
-    if (strcasecmp(got, sha) != 0) {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "sha256 mismatch: got %s want %s", got, sha);
-        job_write("failed", msg, 35, slug);
-        unlink(path);
-        _exit(1);
-    }
-
     job_write("extracting", "tar", 50, slug);
-    snprintf(cmd, sizeof(cmd), "tar -xzf '%s' -C '%s' 2>/dev/null", path, stage);
+    snprintf(cmd, sizeof(cmd), "tar -xzf '%s' -C '%s' 2>/dev/null", artifact, stage);
     if (system(cmd) != 0) {
         job_write("failed", "tar failed", 50, slug);
         _exit(1);
     }
-    unlink(path);
 
     if (!g_allow_install) {
         job_write("staged", "allow_install=0: nothing was executed", 100, slug);
         ledger_add(slug, version, sha);
         _exit(0);
     }
-    if (!access(stage, F_OK) || 1) {
-        snprintf(cmd, sizeof(cmd), "test -f '%s/run_stuff.sh'", stage);
-        if (system(cmd) == 0 && installer_sha[0]) {
-            char isha[80];
-            snprintf(cmd, sizeof(cmd), "'%s/run_stuff.sh'", stage);
-            if (sha256_of(cmd, isha, sizeof(isha)) == 0 && strcasecmp(isha, installer_sha) != 0) {
-                job_write("failed", "installer sha256 mismatch", 55, slug);
-                _exit(1);
-            }
+    if (installer_sha && installer_sha[0]) {
+        char isha[80];
+        snprintf(cmd, sizeof(cmd), "'%s/run_stuff.sh'", stage);
+        if (sha256_of(cmd, isha, sizeof(isha)) == 0 && strcasecmp(isha, installer_sha) != 0) {
+            job_write("failed", "installer sha256 mismatch", 55, slug);
+            _exit(1);
         }
     }
 
@@ -953,14 +1036,14 @@ static void install_worker(const char *slug)
     job_write("installed", "run_stuff.sh finished", 100, slug);
 
     /* Report the result to the hub (best effort). A self-update restarts this
-     * service a moment later, so its report is queued on disk first and flushed
-     * on the next start (report.pending.json). */
+     * service a moment later, so its report is queued on disk and flushed on
+     * the next start (report.pending.json). */
     if (g_token[0]) {
-        char url[1024], body[512], *resp = NULL;
+        char url[1024], body[512], path[MAX_PATH], *resp = NULL;
         snprintf(body, sizeof(body),
                  "{\"release\":%ld,\"status\":\"ok\",\"artifact_sha256\":\"%s\"}",
-                 json_get_int(entry, "release_id", 0), sha);
-        if (!strcmp(slug, SELF_SLUG)) {
+                 release_id, sha ? sha : "");
+        if (is_self) {
             config_path(path, sizeof(path), "report.pending.json");
             write_file_atomic(path, body);
         } else {
@@ -969,8 +1052,117 @@ static void install_worker(const char *slug)
             free(resp);
         }
     }
-    (void)size;
     _exit(0);
+}
+
+/* Install a package that sits on a USB stick: no hub, no download. The sidecar
+ * JSON (same name, .json) supplies the package name/version, and its .sha256 a
+ * sidecar hash; without a hash we say so in the job detail. */
+static void install_worker_local(const char *file)
+{
+    signal(SIGCHLD, SIG_DFL);
+    char path[MAX_PATH], json[MAX_PATH], buf[MAX_BUF], slug[96] = "", version[64] = "";
+    char sha[80] = "", sidecar[MAX_PATH], tmp[256], dir[MAX_PATH];
+
+    if (strstr(file, "..") || strchr(file, '/')) {
+        job_write("failed", "invalid package name", 0, "local");
+        _exit(1);
+    }
+    local_dir_for(dir, sizeof(dir));
+    snprintf(path, sizeof(path), "%s/%s", dir, file);
+    if (access(path, R_OK) != 0) {
+        job_write("failed", "package not on the stick", 0, file);
+        _exit(1);
+    }
+    snprintf(slug, sizeof(slug), "%s", file);
+    {
+        char *dot = strstr(slug, ".tar.gz");
+        if (dot)
+            *dot = 0;
+        dot = strrchr(slug, '.');
+        if (dot && strchr(slug, '-') && strchr(slug, '-') < dot) {
+            /* keep "<pkg>-<version>" as the slug; the ledger is informational */
+        }
+    }
+
+    snprintf(json, sizeof(json), "%s", file);
+    {
+        char *dot = strstr(json, ".tar.gz");
+        if (dot)
+            snprintf(dot, sizeof(json) - (size_t)(dot - json), ".json");
+    }
+    snprintf(tmp, sizeof(tmp), "%s/%s", dir, json);
+    if (read_file(tmp, buf, sizeof(buf))) {
+        char name[96];
+        if (json_get_str(buf, "pkg", name, sizeof(name)) == 0 && name[0])
+            snprintf(slug, sizeof(slug), "%s", name);
+        json_get_str(buf, "version", version, sizeof(version));
+        json_get_str(buf, "sha256", sha, sizeof(sha));
+    }
+    snprintf(sidecar, sizeof(sidecar), "%s/%s.sha256", dir, file);
+    if (!sha[0] && read_file(sidecar, buf, sizeof(buf))) {
+        char *space = strchr(buf, ' ');
+        if (space)
+            *space = 0;
+        buf[strcspn(buf, "\r\n")] = 0;
+        snprintf(sha, sizeof(sha), "%s", buf);
+    }
+
+    job_write("installing", "local package from USB", 20, slug);
+    stage_and_run(slug, version, sha, path, "", 0, 0);
+}
+
+static void install_worker(const char *slug)
+{
+    /* The server reaps children automatically (SIGCHLD=SIG_IGN); restore the
+     * default here or every system()/popen() in this child returns -1. */
+    signal(SIGCHLD, SIG_DFL);
+    char entry[MAX_BUF], version[64], url[1024], sha[80], installer_sha[80];
+    char index[MAX_BUF * 2], path[MAX_PATH], stage[MAX_PATH], cmd[MAX_PATH * 4];
+    char got[80];
+    long size;
+    FILE *logf = NULL;
+
+    config_path(path, sizeof(path), "index.json");
+    if (!read_file(path, index, sizeof(index))) {
+        job_write("failed", "no cached index - refresh first", 0, slug);
+        _exit(1);
+    }
+    if (find_entry(index, slug, entry, sizeof(entry)) != 0) {
+        job_write("failed", "package not in index", 0, slug);
+        _exit(1);
+    }
+    json_get_str(entry, "version", version, sizeof(version));
+    json_get_str(entry, "sha256", sha, sizeof(sha));
+    json_get_str(entry, "url", url, sizeof(url));
+    json_get_str(entry, "installer_sha256", installer_sha, sizeof(installer_sha));
+    size = json_get_int(entry, "size", 0);
+    if (!url[0] || !sha[0]) {
+        job_write("failed", "index entry has no artifact url/sha256", 0, slug);
+        _exit(1);
+    }
+
+    /* Download next to the stage, not inside it: stage_and_run() clears the
+     * stage directory before extracting. */
+    snprintf(stage, sizeof(stage), "%s/download", g_rw);
+    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", stage);
+    if (system(cmd) != 0) {
+        job_write("failed", "cannot create download dir", 0, slug);
+        _exit(1);
+    }
+    snprintf(path, sizeof(path), "%s/%s.tar.gz", stage, slug);
+
+    job_write("downloading", url, 5, slug);
+    if (http_download(url, path, g_token[0] ? g_token : NULL) != 0) {
+        job_write("failed", "download failed", 5, slug);
+        _exit(1);
+    }
+
+    (void)size;
+    (void)got;
+    (void)logf;
+    stage_and_run(slug, version, sha, path, installer_sha, !strcmp(slug, SELF_SLUG),
+                  json_get_int(entry, "release_id", 0));
 }
 
 /* Flush a report that a self-update could not send before the restart. */
@@ -1067,6 +1259,32 @@ static void route(int fd, const char *method, const char *target, const char *bo
         respond(fd, 200, out, "application/json");
         return;
     }
+    if (!strcmp(path, "/local")) {
+        char listing[MAX_BUF * 3];
+        local_list(listing, sizeof(listing));
+        respond(fd, 200, listing, "application/json");
+        return;
+    }
+    if ((!strcmp(path, "/install-local") || !strcmp(path, "/install_local")) && !strcmp(method, "POST")) {
+        char file[256];
+        pid_t pid;
+
+        url_param(query, "file", file, sizeof(file));
+        if (!file[0] || strstr(file, "..") || strchr(file, '/')) {
+            respond(fd, 400, "{\"detail\":\"file required\"}\n", "application/json");
+            return;
+        }
+        job_write("starting", "local package", 1, file);
+        pid = fork();
+        if (pid == 0) {
+            setsid();
+            install_worker_local(file);
+            _exit(1);
+        }
+        snprintf(out, sizeof(out), "{\"started\":true,\"file\":\"%s\",\"source\":\"usb\"}\n", file);
+        respond(fd, 200, out, "application/json");
+        return;
+    }
     if ((!strcmp(path, "/self-update") || !strcmp(path, "/self_update")) && !strcmp(method, "POST")) {
         char offer[64];
         pid_t pid;
@@ -1141,6 +1359,8 @@ int main(int argc, char **argv)
             g_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--allow-install"))
             g_allow_install = 1;
+        else if (!strcmp(argv[i], "--local-dir") && i + 1 < argc)
+            snprintf(g_local_dir, sizeof(g_local_dir), "%s", argv[++i]);
         else if (!strcmp(argv[i], "--version")) {
             printf("store_daemon %s\n", STORE_BUILD_ID);
             return 0;

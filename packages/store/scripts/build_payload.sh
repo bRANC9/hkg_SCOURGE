@@ -59,6 +59,36 @@ EOF
 cp "$HERE/run_stuff.sh" "$STAGE/run_stuff.sh"
 chmod 755 "$STAGE/run_stuff.sh"
 
+# The stick also carries a local catalogue: /scourge-packages on the USB root is
+# what the Marketplace lists in its "USB packages" view (/local in the daemon).
+mkdir -p "$STAGE/scourge-packages"
+( cd "$STAGE" && python3 - "$STAGE" <<'PY'
+import hashlib
+import json
+import os
+import sys
+import tarfile
+
+stage = sys.argv[1]
+out = os.path.join(stage, "scourge-packages")
+name = "marketplace-0.2.0"
+target = os.path.join(out, name + ".tar.gz")
+with tarfile.open(target, "w:gz") as archive:
+    for root, _dirs, files in os.walk(os.path.join(stage, "payload")):
+        for f in sorted(files):
+            full = os.path.join(root, f)
+            archive.add(full, os.path.join("payload", os.path.relpath(full, os.path.join(stage, "payload"))))
+    archive.add(os.path.join(stage, "run_stuff.sh"), "run_stuff.sh")
+sha = hashlib.sha256(open(target, "rb").read()).hexdigest()
+with open(os.path.join(out, name + ".json"), "w") as fh:
+    json.dump({"pkg": "marketplace", "version": "0.2.0", "sha256": sha,
+               "notes": "SCOURGE Marketplace app payload"}, fh, indent=2)
+with open(os.path.join(out, name + ".tar.gz.sha256"), "w") as fh:
+    fh.write(f"{sha}  {name}.tar.gz\n")
+print("local catalogue:", name)
+PY
+)
+
 cat > "$STAGE/README.txt" <<'EOF'
 SCOURGE Marketplace agent (store_daemon)
 

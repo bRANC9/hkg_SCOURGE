@@ -31,6 +31,8 @@ surfaces that verbatim.
 | GET | `/catalog` | the cached index |
 | POST | `/install?pkg=slug` | start the install job (forked, non-blocking) |
 | GET | `/job` | `starting`/`downloading`/`verifying`/`extracting`/`installing`/`installed`/`staged`/`failed` + percent + detail |
+| GET | `/local` | packages found on a mounted USB stick (`<mount>/scourge-packages`) |
+| POST | `/install-local?file=<name>.tar.gz` | install one of those, offline |
 | POST | `/self-update` | install the `marketplace` package from the catalogue (see §4) |
 | GET | `/logs` | installer output (`run_stuff.sh`) |
 
@@ -70,7 +72,26 @@ with three differences:
 the store arms it. The previous binary is kept as `store_daemon.prev` by the
 installer for a manual rollback.
 
-## 5. Transport
+## 5. Two sources, one pipeline
+
+The app installs from **WiFi (the hub)** and from a **USB stick**, and both end
+in the same `stage_and_run()`: sha256 -> tar -> `run_stuff.sh` -> ledger ->
+report. Only the source differs.
+
+- **WiFi / hub**: `/refresh` caches the signed index, `/install?pkg=` downloads.
+- **USB / offline**: drop `<pkg>-<version>.tar.gz` (plus optional `.json` with
+  `pkg`/`version`/`sha256`, and a `.tar.gz.sha256`) into
+  `<stick>/scourge-packages/`; `/local` lists them (`file`, `sha256_sidecar`,
+  `meta`) and `/install-local?file=` installs one with no network at all. The
+  USB view works unpaired; the catalogue view needs pairing to queue.
+  A stick with no sidecar hash is installed with a warning row instead of a
+  silent trust.
+
+`packages/store/scripts/build_payload.sh` writes the app itself into
+`scourge-packages/` on the stick, so the installing stick doubles as an offline
+catalogue.
+
+## 6. Transport
 
 Plain `http://` in-process (POSIX sockets, no TLS, no libcurl). `https://`
 requires the hub to be reachable through a TLS terminator on the unit or a
@@ -78,7 +99,7 @@ future `STORE_FETCH_HELPER`; the logic is independent of the transport.
 DNS: the daemon resolves A records itself (`/etc/hosts`, then the
 `resolv.conf` nameserver) because a static glibc binary cannot use NSS.
 
-## 6. Safety
+## 7. Safety
 
 - installs are opt-in (`allow_install`), never on by default;
 - every artifact is sha256-verified against the signed index before execution;
@@ -86,7 +107,7 @@ DNS: the daemon resolves A records itself (`/etc/hosts`, then the
 - nothing touches firmware, the updater, bootloader or partitions;
 - the daemon binds `127.0.0.1` only.
 
-## 7. Tests
+## 8. Tests
 
 `tests/test_daemon.py` (host, no car): fake hub serves `register`, `pair`,
 `index` and `report`; the job downloads a real tarball, verifies sha256, extracts,

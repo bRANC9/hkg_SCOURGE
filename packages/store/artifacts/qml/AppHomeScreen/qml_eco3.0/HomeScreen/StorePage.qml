@@ -109,6 +109,25 @@ Item {
         })
     }
 
+    property var localPackages: []
+    property bool showLocal: false
+
+    function refreshLocal() {
+        get("/local", function (code, d) {
+            if (code !== 200 || !d || d.packages === undefined) {
+                localPackages = []
+                return
+            }
+            localPackages = d.packages
+        })
+    }
+
+    function installLocal(file) {
+        post("/install-local?file=" + encodeURIComponent(file), function () {
+            refreshStatus()
+        })
+    }
+
     function showPairing() {
         post("/refresh", function () {
             refreshStatus()
@@ -119,6 +138,7 @@ Item {
         if (visible) {
             refreshStatus()
             refreshCatalog()
+            refreshLocal()
         }
     }
 
@@ -237,6 +257,32 @@ Item {
                 }
 
                 Rectangle {
+                    id: usbButton
+                    width: 150
+                    height: 44
+                    anchors.right: refreshButton.left
+                    anchors.rightMargin: 10
+                    anchors.verticalCenter: parent.verticalCenter
+                    radius: 10
+                    color: root.showLocal ? "#1F6FEB" : "#232B33"
+
+                    QText {
+                        anchors.centerIn: parent
+                        text: root.showLocal ? "USB packages" : "Store packages"
+                        font.pixelSize: 18
+                        color: "#FFFFFF"
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            root.showLocal = !root.showLocal
+                            if (root.showLocal)
+                                root.refreshLocal()
+                        }
+                    }
+                }
+
+                Rectangle {
                     id: refreshButton
                     width: 170
                     height: 44
@@ -307,7 +353,7 @@ Item {
                 width: parent.width
                 height: 372
                 clip: true
-                model: root.packages
+                model: root.showLocal ? root.localPackages : root.packages
                 spacing: 10
 
                 delegate: Rectangle {
@@ -319,7 +365,9 @@ Item {
                     QText {
                         x: 20
                         y: 14
-                        text: modelData.pkg
+                        text: root.showLocal
+                              ? ((modelData.meta && modelData.meta.pkg) ? modelData.meta.pkg : modelData.file)
+                              : modelData.pkg
                         font.pixelSize: 26
                         textBold: true
                         color: "#FFFFFF"
@@ -327,16 +375,21 @@ Item {
                     QText {
                         x: 20
                         y: 50
-                        text: "v" + modelData.version + "  \u00b7  " + modelData.firmware +
-                              "  \u00b7  " + modelData.region + "  \u00b7  " + modelData.gui
+                        text: root.showLocal
+                              ? (modelData.file + "  \u00b7  USB stick")
+                              : ("v" + modelData.version + "  \u00b7  " + modelData.firmware +
+                                 "  \u00b7  " + modelData.region + "  \u00b7  " + modelData.gui)
                         font.pixelSize: 16
                         color: "#6E7780"
                     }
                     QText {
                         x: 20
                         y: 70
-                        text: (modelData.notes !== undefined && modelData.notes !== "")
-                              ? modelData.notes : "sha256 " + (modelData.artifact ? modelData.artifact.sha256.substring(0, 16) : "")
+                        text: root.showLocal
+                              ? (modelData.sha256_sidecar ? "sha256 sidecar verified" : "no sha256 sidecar")
+                              : ((modelData.notes !== undefined && modelData.notes !== "")
+                                 ? modelData.notes
+                                 : "sha256 " + (modelData.artifact ? modelData.artifact.sha256.substring(0, 16) : ""))
                         font.pixelSize: 14
                         color: "#4C555E"
                         width: parent.width - 260
@@ -355,15 +408,20 @@ Item {
 
                         QText {
                             anchors.centerIn: parent
-                            text: root.paired ? "Install" : "Pair first"
+                            text: root.showLocal ? "Install from USB" : (root.paired ? "Install" : "Pair first")
                             font.pixelSize: 20
                             color: "#FFFFFF"
                         }
                         MouseArea {
                             id: installArea
                             anchors.fill: parent
-                            enabled: root.paired
-                            onClicked: root.install(modelData.pkg)
+                            enabled: root.showLocal ? true : root.paired
+                            onClicked: {
+                                if (root.showLocal)
+                                    root.installLocal(modelData.file)
+                                else
+                                    root.install(modelData.pkg)
+                            }
                         }
                     }
                 }
