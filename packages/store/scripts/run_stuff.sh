@@ -65,6 +65,59 @@ if [ -n "$SMACK_SELF" ] && command -v chsmack >/dev/null 2>&1; then
     fi
 fi
 
+# ---- QML: Marketplace tile + page --------------------------------------
+QML_ROOT="${STORE_QML_ROOT:-/app/share/AppHomeScreen}"
+QML_DIR="$QML_ROOT/qml_eco3.0"
+ASSET_DIR="$QML_ROOT/store"
+ADV="$QML_DIR/HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
+qml_state="absent"
+if [ -d "$QML_DIR" ] && [ -f "$ADV" ]; then
+    mkdir -p "$ASSET_DIR" 2>/dev/null || true
+    for f in "$PAYLOAD/assets/store/"*.png; do
+        [ -f "$f" ] || continue
+        cp -f "$f" "$ASSET_DIR/$(basename "$f")" || fail "icon copy failed: $f"
+    done
+    chmod 644 "$ASSET_DIR/"*.png 2>/dev/null || true
+    chown 0:0 "$ASSET_DIR/"*.png 2>/dev/null || true
+
+    cp -f "$PAYLOAD/qml/AppHomeScreen/qml_eco3.0/HomeScreen/StorePage.qml" \
+          "$QML_DIR/HomeScreen/StorePage.qml" || fail "StorePage.qml copy failed"
+    cp -f "$PAYLOAD/qml/AppHomeScreen/qml_eco3.0/component/StoreTile.qml" \
+          "$QML_DIR/component/StoreTile.qml" || fail "StoreTile.qml copy failed"
+
+    # The home screen's Advanced file gets the tile only when the base variant
+    # matches one we shipped (the same detection the other packages use).
+    variant=""
+    for marker in HELLO_PAYLOAD_260128 WIFI_PAYLOAD_260128 BATTERY_PAYLOAD_260128 \
+                  BATTERY_TILE_PAYLOAD_260128 TWEAKS_PAYLOAD_260128; do
+        grep -q "$marker" "$ADV" 2>/dev/null && variant="$variant$(echo "$marker" | cut -d_ -f1 | tr 'A-Z' 'a-z')_"
+    done
+    [ -n "$variant" ] && variant="${variant%_}"
+    adv_src=""
+    for candidate in "$variant" "stock"; do
+        [ -n "$candidate" ] || continue
+        f="$PAYLOAD/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.$candidate.qml"
+        [ -f "$f" ] && adv_src="$f" && break
+    done
+    if [ -n "$adv_src" ] && ! grep -q 'STORE_PAYLOAD_260128' "$ADV" 2>/dev/null; then
+        cp -f "$ADV" "$RW_DIR/Advanced.before-store.qml" 2>/dev/null || true
+        cp -f "$ADV" "$BACKUP/Advanced.before-store.qml" 2>/dev/null || true
+        label=$(getfattr -n security.SMACK64 --only-values "$ADV" 2>/dev/null || true)
+        cp -f "$adv_src" "$ADV" || fail "home screen tile copy failed"
+        chmod 644 "$ADV" 2>/dev/null || true
+        chown 0:0 "$ADV" 2>/dev/null || true
+        [ -n "$label" ] && setfattr -n security.SMACK64 -v "$label" "$ADV" 2>/dev/null || true
+        qml_state="tile added (${adv_src##*.})"
+    elif grep -q 'STORE_PAYLOAD_260128' "$ADV" 2>/dev/null; then
+        qml_state="already present"
+    else
+        qml_state="no matching base - page installed, tile skipped"
+    fi
+    rm -rf /root/.cache/qtshadercache /tmp/qmlcache /tmp/qt-qml-cache 2>/dev/null || true
+else
+    qml_state="no home-screen QML on this unit"
+fi
+
 # ---- key + hub ---------------------------------------------------------
 for key in hub firmware region gui; do
     src="$PAYLOAD/$key.txt"
@@ -106,5 +159,6 @@ done
 
 log "installed daemon, service=$started, health=$healthy, smack=$smack_state"
 result "status=OK" "daemon=$started" "health=$healthy" "smack=$smack_state" \
+       "qml=$qml_state" \
        "hub=$(cat "$RW_DIR/hub" 2>/dev/null || echo unset)" \
        "listen=127.0.0.1:8092" "log=$LOG"

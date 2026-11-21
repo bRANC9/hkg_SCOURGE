@@ -63,5 +63,6 @@ packages/wifi1b/src/wifi1b_daemon
 packages/wifi1b/src/wifi1b_qmlpatch
 packages/wifi1b/artifacts/assets/wifi1b/
 packages/tweaks/src/tweaks_daemon
+packages/store/src/store_daemon
 packages/tweaks/src/tweaks_persist
 packages/tweaks/src/wrandr_wrapper

@@ -14,11 +14,27 @@ TARGET=${1:?usage: build_payload.sh /path/to/stick}
 echo "== daemon =="
 make -C "$ROOT/src"
 
+echo "== icons + QML =="
+python3 "$HERE/make_icons.py"
+python3 "$HERE/build_artifacts.py"
+
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/scourge-store.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
-mkdir -p "$STAGE/payload/bin" "$STAGE/payload/systemd" "$STAGE/backup"
+mkdir -p "$STAGE/payload/bin" "$STAGE/payload/systemd" "$STAGE/backup" \
+         "$STAGE/payload/assets/store" \
+         "$STAGE/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen" \
+         "$STAGE/payload/qml/AppHomeScreen/qml_eco3.0/component"
 
 cp "$ROOT/src/store_daemon" "$STAGE/payload/bin/store_daemon"
+cp "$ROOT"/artifacts/assets/store/*.png "$STAGE/payload/assets/store/"
+cp "$ROOT"/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/StorePage.qml \
+   "$STAGE/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/"
+cp "$ROOT"/artifacts/qml/AppHomeScreen/qml_eco3.0/component/StoreTile.qml \
+   "$STAGE/payload/qml/AppHomeScreen/qml_eco3.0/component/"
+if ls "$ROOT"/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.*.qml >/dev/null 2>&1; then
+    cp "$ROOT"/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.*.qml \
+       "$STAGE/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/"
+fi
 cat > "$STAGE/payload/systemd/store-daemon.service" <<'EOF'
 [Unit]
 Description=SCOURGE marketplace agent
