@@ -72,7 +72,29 @@ with three differences:
 the store arms it. The previous binary is kept as `store_daemon.prev` by the
 installer for a manual rollback.
 
-## 5. Two sources, one pipeline
+## 5. The home-screen base (tile patch)
+
+The StoreTile patch edits the owner's own `QHMI_HomeScreenMain_Advanced.qml`, so
+it needs that file as a **base** - never committed (`base/` is gitignored, like
+the other packages). Two ways to provide it:
+
+```sh
+# from an extracted rootfs (a stock home screen)
+SCOURGE_ROOTFS=/path/to/rootfs sh scripts/make_base.sh
+
+# from the car's current file - carries the Battery/WiFi/Tweaks markers
+sh scripts/make_base.sh --from-dump /path/to/QHMI_HomeScreenMain_Advanced.qml
+```
+
+The variant name comes from the payload markers in the file (`stock`, `hello`,
+`battery_tile_wifi`, …), which is what `build_artifacts.py` emits and what the
+installer looks for at install time. A base without the shared allocator (a
+plain stock screen) is **skipped with a warning**: the page and the daemon still
+install and the result says `page installed, tile skipped`. The installer never
+falls back to `stock` once any other payload marker is present, so it cannot
+wipe the Battery/WiFi/Tweaks tiles.
+
+## 6. Two sources, one pipeline
 
 The app installs from **WiFi (the hub)** and from a **USB stick**, and both end
 in the same `stage_and_run()`: sha256 -> tar -> `run_stuff.sh` -> ledger ->
@@ -91,7 +113,7 @@ report. Only the source differs.
 `scourge-packages/` on the stick, so the installing stick doubles as an offline
 catalogue.
 
-## 6. Transport
+## 7. Transport
 
 Plain `http://` in-process (POSIX sockets, no TLS, no libcurl). `https://`
 requires the hub to be reachable through a TLS terminator on the unit or a
@@ -99,7 +121,7 @@ future `STORE_FETCH_HELPER`; the logic is independent of the transport.
 DNS: the daemon resolves A records itself (`/etc/hosts`, then the
 `resolv.conf` nameserver) because a static glibc binary cannot use NSS.
 
-## 7. Safety
+## 8. Safety
 
 - installs are opt-in (`allow_install`), never on by default;
 - every artifact is sha256-verified against the signed index before execution;
@@ -107,7 +129,7 @@ DNS: the daemon resolves A records itself (`/etc/hosts`, then the
 - nothing touches firmware, the updater, bootloader or partitions;
 - the daemon binds `127.0.0.1` only.
 
-## 8. Tests
+## 9. Tests
 
 `tests/test_daemon.py` (host, no car): fake hub serves `register`, `pair`,
 `index` and `report`; the job downloads a real tarball, verifies sha256, extracts,

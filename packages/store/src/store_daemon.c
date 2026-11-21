@@ -301,6 +301,8 @@ static void save_device(const char *token, const char *install_id)
     write_file_atomic(path, body);
 }
 
+static void beep(int times);
+
 static void job_write(const char *state, const char *detail, int percent, const char *pkg)
 {
     char path[MAX_PATH], body[MAX_BUF], esc[512];
@@ -312,6 +314,14 @@ static void job_write(const char *state, const char *detail, int percent, const 
     config_path(path, sizeof(path), "job.json");
     write_file_atomic(path, body);
     logmsg("job %s %s (%d%%) %s", state, pkg ? pkg : "-", percent, detail ? detail : "");
+    /* Audible result, the same vocabulary as the other SCOURGE installers:
+     * 1 beep = installed, 2 = staged only, 3 = failed. */
+    if (!strcmp(state, "installed"))
+        beep(1);
+    else if (!strcmp(state, "staged"))
+        beep(2);
+    else if (!strcmp(state, "failed"))
+        beep(3);
 }
 
 /* ------------------------------------------------------------------- resolver
@@ -579,6 +589,32 @@ static int http_download(const char *url, const char *dest, const char *auth_tok
     fclose(f);
     free(data);
     return 0;
+}
+
+/* Audible status through the factory micom beeper (same call the other SCOURGE
+ * installers use: com.lge.car.micom.audio.SetBeepPlay). Strictly non-fatal. */
+static void beep(int times)
+{
+    char cmd[512];
+    int i;
+
+    for (i = 0; i < times; i++) {
+        snprintf(cmd, sizeof(cmd),
+                 "/usr/bin/dbus-send --system --print-reply --reply-timeout=1000 "
+                 "--dest=com.lge.car.micom /com/lge/car/micom "
+                 "com.lge.car.micom.audio.SetBeepPlay array:byte:0x00 >/dev/null 2>&1");
+        if (system(cmd) != 0) {
+            /* the system bus may still be coming up; one short retry */
+            usleep(300000);
+            snprintf(cmd, sizeof(cmd),
+                     "/bin/dbus-send --system --print-reply --reply-timeout=1000 "
+                     "--dest=com.lge.car.micom /com/lge/car/micom "
+                     "com.lge.car.micom.audio.SetBeepPlay array:byte:0x00 >/dev/null 2>&1");
+            (void)system(cmd);
+        }
+        if (i + 1 < times)
+            usleep(500000);
+    }
 }
 
 /* ------------------------------------------------------------- child helpers */
@@ -1033,11 +1069,11 @@ static void stage_and_run(const char *slug, const char *version, const char *sha
         }
     }
     ledger_add(slug, version, sha);
-    job_write("installed", "run_stuff.sh finished", 100, slug);
 
-    /* Report the result to the hub (best effort). A self-update restarts this
-     * service a moment later, so its report is queued on disk and flushed on
-     * the next start (report.pending.json). */
+    /* Report BEFORE announcing "installed": the state is what the UI poll sees,
+     * so it must not run ahead of the hub. A self-update restarts this service a
+     * moment later, so its report is queued on disk and flushed on the next
+     * start (report.pending.json). */
     if (g_token[0]) {
         char url[1024], body[512], path[MAX_PATH], *resp = NULL;
         snprintf(body, sizeof(body),
@@ -1052,6 +1088,7 @@ static void stage_and_run(const char *slug, const char *version, const char *sha
             free(resp);
         }
     }
+    job_write("installed", "run_stuff.sh finished", 100, slug);
     _exit(0);
 }
 

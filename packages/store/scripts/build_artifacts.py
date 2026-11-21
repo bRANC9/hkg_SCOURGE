@@ -9,7 +9,6 @@ insert one tile into the allocator and one full-screen page, marker
 tile placement is per-variant.
 """
 import os
-import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -62,6 +61,46 @@ TILE = """            StoreTile {
 """ % EMPTY_INDEX
 
 
+def insert_after_item(text, marker):
+    """Insert TILE right after the QML item whose first line contains `marker`.
+
+    Brace-counted (string literals are skipped) so nested items are copied
+    correctly. Returns None when the marker is absent.
+    """
+    at = text.find(marker)
+    if at < 0:
+        return None
+    brace = text.find("{", at)
+    if brace < 0:
+        return None
+    depth = 0
+    i = brace
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            i += 1
+            while i < len(text) and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                end = text.find("\n", i)
+                end = len(text) if end < 0 else end + 1
+                return text[:end] + TILE + text[end:]
+        i += 1
+    return None
+
+
+ANCHORS = [
+    "            RebootTile {\n                id: rebootTile",
+    "            TweaksTile {\n                id: tweaksTile",
+    "            QMenuPageAllowEmpty{\n                id: menuPage",
+    "            QMenuPageAllowEmpty {\n                id: menuPage",
+]
+
+
 def patch_advanced(variant):
     text = add_marker(read(os.path.join(BASE, variant, ADV)))
     if "signal storeClicked()" not in text:
@@ -71,13 +110,10 @@ def patch_advanced(variant):
         else:
             text = text.replace("    id: root\n", "    id: root\n    signal storeClicked()\n", 1)
     if "StoreTile" not in text:
-        # After the Reboot tile when present, else after Tweaks, else first.
-        for anchor in ("            RebootTile {\n                id: rebootTile",
-                       "            TweaksTile {\n                id: tweaksTile"):
-            if anchor in text:
-                end = text.index(anchor)
-                end = text.index("\n            }\n", end) + len("\n            }\n")
-                text = text[:end] + TILE + text[end:]
+        for anchor in ANCHORS:
+            patched = insert_after_item(text, anchor)
+            if patched is not None:
+                text = patched
                 break
         else:
             raise ValueError(f"no tile anchor in {variant}/{ADV}")
@@ -92,11 +128,17 @@ def main():
         src = os.path.join(BASE, variant, ADV)
         if not os.path.exists(src):
             continue
-        write(os.path.join(OUT, "HomeScreen", f"QHMI_HomeScreenMain_Advanced.{variant}.qml"),
-              patch_advanced(variant))
-    # The page and the tile are variant-independent.
-    shutil.copyfile(os.path.join(OUT, "HomeScreen", "StorePage.qml"),
-                    os.path.join(OUT, "HomeScreen", "StorePage.qml"))
+        try:
+            patched = patch_advanced(variant)
+        except ValueError as exc:
+            # A base without the shared allocator (a plain stock home screen)
+            # cannot take the tile. Ship no variant for it: the installer then
+            # reports "page installed, tile skipped" instead of risking a
+            # half-patched home screen.
+            print(f"skip {variant}: {exc}", file=sys.stderr)
+            continue
+        write(os.path.join(OUT, "HomeScreen", f"QHMI_HomeScreenMain_Advanced.{variant}.qml"), patched)
+    # The page and the tile are committed in artifacts/ and need no generation.
     print("store artifacts written to", OUT)
     return 0
 

@@ -87,18 +87,28 @@ if [ -d "$QML_DIR" ] && [ -f "$ADV" ]; then
 
     # The home screen's Advanced file gets the tile only when the base variant
     # matches one we shipped (the same detection the other packages use).
+    # Identify the live base from its payload markers. When ANY other payload is
+    # present we must never fall back to the stock variant: that would silently
+    # remove the Battery/WiFi/Tweaks tiles. No matching variant -> ship the page
+    # only and say so in the result file.
     variant=""
+    marked=0
     for marker in HELLO_PAYLOAD_260128 WIFI_PAYLOAD_260128 BATTERY_PAYLOAD_260128 \
-                  BATTERY_TILE_PAYLOAD_260128 TWEAKS_PAYLOAD_260128; do
-        grep -q "$marker" "$ADV" 2>/dev/null && variant="$variant$(echo "$marker" | cut -d_ -f1 | tr 'A-Z' 'a-z')_"
+                  BATTERY_TILE_PAYLOAD_260128 TWEAKS_PAYLOAD_260128 STORE_PAYLOAD_260128; do
+        if grep -q "$marker" "$ADV" 2>/dev/null; then
+            marked=1
+            [ "$marker" = "STORE_PAYLOAD_260128" ] && continue
+            variant="$variant$(echo "$marker" | cut -d_ -f1 | tr 'A-Z' 'a-z')_"
+        fi
     done
     [ -n "$variant" ] && variant="${variant%_}"
+    advanced_dir="$PAYLOAD/qml/AppHomeScreen/qml_eco3.0/HomeScreen"
     adv_src=""
-    for candidate in "$variant" "stock"; do
-        [ -n "$candidate" ] || continue
-        f="$PAYLOAD/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.$candidate.qml"
-        [ -f "$f" ] && adv_src="$f" && break
-    done
+    if [ -n "$variant" ] && [ -f "$advanced_dir/QHMI_HomeScreenMain_Advanced.$variant.qml" ]; then
+        adv_src="$advanced_dir/QHMI_HomeScreenMain_Advanced.$variant.qml"
+    elif [ "$marked" = 0 ] && [ -f "$advanced_dir/QHMI_HomeScreenMain_Advanced.stock.qml" ]; then
+        adv_src="$advanced_dir/QHMI_HomeScreenMain_Advanced.stock.qml"
+    fi
     if [ -n "$adv_src" ] && ! grep -q 'STORE_PAYLOAD_260128' "$ADV" 2>/dev/null; then
         cp -f "$ADV" "$RW_DIR/Advanced.before-store.qml" 2>/dev/null || true
         cp -f "$ADV" "$BACKUP/Advanced.before-store.qml" 2>/dev/null || true
