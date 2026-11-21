@@ -1,5 +1,9 @@
 # Store — Marketplace agent
 
+> Mirrored from `hkg_SCOURGE/packages/store` (the development tree). After
+> changing the app there, run `sh scripts/sync_app.sh` in the repo root;
+> `sh scripts/sync_app.sh --check` fails when the two trees drift.
+
 The head-unit side of the SCOURGE Hub marketplace. One static daemon on
 `127.0.0.1:8092`; the future **Marketplace tab** only calls it and draws the
 answers. See `SPEC.md` for the contract.
