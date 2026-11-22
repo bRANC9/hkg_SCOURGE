@@ -311,14 +311,29 @@ static void save_device(const char *token, const char *install_id)
 
 static void beep(int times);
 
+/* The only accepted shape for a package slug: it ends up in shell commands and
+ * in file names, so anything outside this set is refused outright. */
+static int slug_ok(const char *s)
+{
+    if (!s || !*s || s[0] == '.' || strlen(s) > 64)
+        return 0;
+    for (; *s; s++) {
+        if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+              (*s >= '0' && *s <= '9') || *s == '.' || *s == '_' || *s == '-'))
+            return 0;
+    }
+    return 1;
+}
+
 static void job_write(const char *state, const char *detail, int percent, const char *pkg)
 {
-    char path[MAX_PATH], body[MAX_BUF], esc[512];
+    char path[MAX_PATH], body[MAX_BUF], esc[512], esc_pkg[160];
 
     json_escape(detail ? detail : "", esc, sizeof(esc));
+    json_escape(pkg ? pkg : "", esc_pkg, sizeof(esc_pkg));
     snprintf(body, sizeof(body),
              "{\"state\":\"%s\",\"package\":\"%s\",\"percent\":%d,\"detail\":\"%s\",\"updated\":%ld}\n",
-             state, pkg ? pkg : "", percent, esc, (long)time(NULL));
+             state, esc_pkg, percent, esc, (long)time(NULL));
     config_path(path, sizeof(path), "job.json");
     write_file_atomic(path, body);
     logmsg("job %s %s (%d%%) %s", state, pkg ? pkg : "-", percent, detail ? detail : "");
@@ -648,10 +663,14 @@ static int http_request(const char *url, const char *method, const char *auth_to
              body ? body : "");
 
     {
+        static int tls_depth;
         int status = https_request(host, port, request, out, out_len, location, sizeof(location));
         /* GitHub serves release assets through a 302 to a short-lived
          * objects.githubusercontent.com URL, so the hop must be followed right
-         * away (the signed URL expires). */
+         * away (the signed URL expires) - bounded, or a redirect loop would
+         * exhaust the stack. */
+        if (status >= 300 && status < 400 && location[0] && tls_depth >= STORE_MAX_REDIRECTS)
+            return status;
         if (status >= 300 && status < 400 && location[0]) {
             char next[1500];
             if (!strncmp(location, "http://", 7) || !strncmp(location, "https://", 8))
@@ -663,7 +682,12 @@ static int http_request(const char *url, const char *method, const char *auth_to
             logmsg("tls redirect %d -> %s", status, next);
             free(*out);
             *out = NULL;
-            return http_request(next, method, auth_token, body, out, out_len);
+            tls_depth++;
+            {
+                int ret = http_request(next, method, auth_token, body, out, out_len);
+                tls_depth--;
+                return ret;
+            }
         }
         return status;
     }
@@ -1269,6 +1293,13 @@ static void stage_and_run(const char *slug, const char *version, const char *sha
     char stage[MAX_PATH], cmd[MAX_PATH * 4], got[80], log_path[MAX_PATH];
     FILE *logf;
 
+    /* Single choke point: the slug reaches system()/popen() and file names.
+     * The hub index and the USB sidecar are both untrusted input here. */
+    if (!slug_ok(slug)) {
+        job_write("failed", "invalid package slug", 0, slug);
+        _exit(1);
+    }
+
     snprintf(cmd, sizeof(cmd), "test -f '%s'", artifact);
     if (system(cmd) != 0) {
         job_write("failed", "artifact disappeared", 40, slug);
@@ -1546,8 +1577,8 @@ static void route(int fd, const char *method, const char *target, const char *bo
     if (!strcmp(path, "/install") && !strcmp(method, "POST")) {
         pid_t pid;
         url_param(query, "pkg", slug, sizeof(slug));
-        if (!slug[0]) {
-            respond(fd, 400, "{\"detail\":\"pkg required\"}\n", "application/json");
+        if (!slug_ok(slug)) {
+            respond(fd, 400, "{\"detail\":\"pkg required (A-Za-z0-9._- only)\"}\n", "application/json");
             return;
         }
         job_write("starting", "queued", 1, slug);
@@ -1564,8 +1595,8 @@ static void route(int fd, const char *method, const char *target, const char *bo
     if (!strcmp(path, "/versions")) {
         char pkg[64], url[1200], cache[MAX_PATH], *resp = NULL;
         url_param(query, "pkg", pkg, sizeof(pkg));
-        if (!pkg[0]) {
-            respond(fd, 400, "{\"detail\":\"pkg required\"}\n", "application/json");
+        if (!slug_ok(pkg)) {
+            respond(fd, 400, "{\"detail\":\"pkg required (A-Za-z0-9._- only)\"}\n", "application/json");
             return;
         }
         snprintf(url, sizeof(url), "%s/api/v1/versions/%s/%s/%s/%s", g_hub, g_firmware, g_region, g_gui, pkg);

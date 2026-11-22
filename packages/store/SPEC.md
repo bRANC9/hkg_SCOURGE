@@ -43,7 +43,10 @@ surfaces that verbatim.
 3. `sha256sum` compare - mismatch deletes the file and fails the job;
 4. `tar -xzf` into `stage/<pkg>/`;
 5. `installer_sha256` (when present) must match the extracted `run_stuff.sh`;
-6. `run_stuff.sh` runs with `USB_DIR` pointing at the stage, output to `install.log`;
+6. the slug must match `[A-Za-z0-9._-]+` and may not start with a dot - it is
+   the single choke point before any `system()`/`popen()` call, because both the
+   hub index and the USB sidecar are untrusted input;
+7. `run_stuff.sh` runs with `USB_DIR` pointing at the stage, output to `install.log`;
 7. ledger entry + `POST /api/v1/device/report` (best effort, `Device` token).
 
 `allow_install=0` stops after step 4 and reports `staged`: the payload is on the
@@ -156,8 +159,14 @@ Plain `http://` in-process (POSIX sockets, no TLS, no libcurl).
   hashed CAs) and the read timeout is `--tls-timeout` (default 15 s).
   A public hub at `https://hub.example` therefore needs no proxy or helper on the
   unit; plain `http://` stays for LAN/local use.
-  Integrity does not depend on TLS either way: the index is ECDSA-signed and
-  every artifact is sha256-checked, so a tampered plain-http answer is rejected.
+  **What the unit actually verifies today**: the artifact bytes against the
+  `sha256` carried in the *same* hub answer (`artifact.sha256`, plus
+  `installer_sha256` for `run_stuff.sh`), over TLS with `-verify_return_error`.
+  The index's ECDSA signature is produced by the hub and pinned for the
+  static/offline distribution, but the daemon does **not** verify it yet: today
+  the trust anchor is TLS + the device-scoped token, not the signature. Adding
+  `verify_payload()` before `/install` is the next step; until then do not claim
+  signature verification on the device side.
 DNS: the daemon resolves A records itself (`/etc/hosts`, then the
 `resolv.conf` nameserver) because a static glibc binary cannot use NSS.
 

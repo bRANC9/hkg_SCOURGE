@@ -341,6 +341,13 @@ def main():
 
         status, body = api("/install-local?file=../etc/passwd", "POST", port=APP_PORT_USB)
         assert status == 400, body
+
+        # untrusted input never reaches a shell: bad slugs are refused up front
+        for bad in ("a$(reboot)", "x;rm%20-rf%20%2F", ".hidden", "with%20space", "ok$IFS", "a%2Fb"):
+            status, body = api(f"/install?pkg={bad}", "POST", port=APP_PORT_USB)
+            assert status == 400, (bad, body)
+            status, body = api(f"/versions?pkg={bad}", port=APP_PORT_USB)
+            assert status == 400, (bad, body)
     finally:
         proc_usb.terminate()
         proc_usb.wait(timeout=5)
