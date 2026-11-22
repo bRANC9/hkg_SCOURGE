@@ -145,12 +145,12 @@ fetch_nudl() {
     version="$(lock_value version | sed 's/[[:space:]].*//' | tr -dc '0-9.')"
     [ -n "$version" ] || version="1.3.0"
     asset="$(nudl_asset "$version")"
-    want_zip="$(lock_value "sha256\\.$asset")"
-    want_bin="$(lock_value 'sha256\.nudl')"
+    want_zip="$(lock_value "files\\.$asset\\.sha256")"
+    want_bin="$(lock_value "files\\.${asset%.zip}\\.sha256")"
     if [ -z "$want_zip" ]; then
         echo "== no pinned release for $(uname -m) in config/third_party.lock" >&2
         echo "   expected asset: $asset" >&2
-        echo "   add 'sha256.$asset = <hash>' (or place the binary at $NUDL_BIN)." >&2
+        echo "   add 'files.$asset.sha256 = <hash>' (or place the binary at $NUDL_BIN)." >&2
         return 0
     fi
     zip="$(mktemp -d)/$asset"

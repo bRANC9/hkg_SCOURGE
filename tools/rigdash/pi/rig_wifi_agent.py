@@ -548,9 +548,10 @@ def mount_media(device: str) -> tuple[bool, str]:
     entry = known[device]
     if entry["mountpoint"]:
         return True, f"already mounted at {entry['mountpoint']}"
-    name = (entry["label"] or os.path.basename(device)).replace("/", "_") or "usb"
-    if name in (".", ".."):
-        name = "usb"   # a crafted label must not mount over /media or its parent
+    raw = (entry["label"] or os.path.basename(device) or "usb").strip()
+    name = raw.replace("/", "_")
+    if not name or name in (".", ".."):
+        name = "usb"   # an empty or crafted label must not mount over /media or its parent
     target = os.path.join("/media", name)
     try:
         os.makedirs(target, exist_ok=True)

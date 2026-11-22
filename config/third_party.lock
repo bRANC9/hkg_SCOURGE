@@ -33,9 +33,9 @@ files.pizero/nbdkit_toctou.py.sha256 = ccabd38ddf8da36c4ecf4e8763933a164138f5e20
 url       = https://github.com/chenxiaolong/nudl
 license   = GPL-3.0-only (fetched only)
 channel   = signed release binaries (verify per upstream VERIFY_SSH_SIGNATURES.md)
-version   = 1.3.0 (nudl-1.3.0-x86_64-unknown-linux-musl.zip)
-sha256.nudl-1.3.0-x86_64-unknown-linux-musl.zip = 66d0e1c6ab35a5ca372ed47125bbb633d9a5c995347651910b535caff94ad028
-sha256.nudl = 7c0c022013ef0449d5cc13b657e93983eb792e0e279ce947b2135e031498aecc
+version   = 1.3.0
+files.nudl-1.3.0-x86_64-unknown-linux-musl.zip.sha256 = 66d0e1c6ab35a5ca372ed47125bbb633d9a5c995347651910b535caff94ad028
+files.nudl-1.3.0-x86_64-unknown-linux-musl.sha256     = 7c0c022013ef0449d5cc13b657e93983eb792e0e279ce947b2135e031498aecc
 used_for  = downloading the official firmware package from the OEM's own
             update servers (same publicly available files as the official
             Navigation Updater, no login); nudl verify -d for offline checks
