@@ -77,11 +77,14 @@ libdeflate L10 → exact-size padding → TE2-encrypt with the stock envelope
 as metadata template) reproduces byte-identical artifacts. **Compare every
 artifact against this table; any mismatch means stop and investigate.**
 
-> **Build 6 is car-validated as of 2026-11-21.** A 2021 Ioniq 5 RWD installed
-> `out/stage1.te2` (`7f3b155e…`) through the TOCTOU rig — the run is in docs/17.
-> That hash is the one on the car; the table at the end of this section describes
-> what the current tree builds (`0d975468…`, after the message wording change),
-> and `config/firmware_locks.env` pins the latter.
+> **The 2026-11-21 car run validated the *previous* build-6 envelope.** A 2021
+> Ioniq 5 RWD installed `out/stage1.te2` (`7f3b155e…`) through the TOCTOU rig —
+> the run is in docs/17. The boot-message wording changed after that run, so the
+> table at the end of this section describes what the current tree builds
+> (`0d975468…`, offline-validated, preflight A–D green) and
+> `config/firmware_locks.env` pins that: the current envelope is **not yet
+> car-validated**. The car's `7f3b155e…` is recorded below the table as its own
+> line.
 > The build-6 column below is therefore what is on that car, and the build-5
 > values are the historical reference: the message refresh changes all patched
 > `.qm` files, so every rootfs-derived hash moved while the four payload
@@ -127,7 +130,7 @@ run confirms them.
 | `out/AppUpgrade.patched.te2` | sha256 | `9a0df0809a3f15c2d5f1d3e83c19ec0a27f336727e57e01bb2c5ae2e82783876` (unchanged) |
 | `out/package_second/IONIQ5_EU.ver` | size / sha256 | 2,469 / `e706e07e34c68501b52d22e6c4bb7e6b186c1e206f18c3e4a943da98764ff199` |
 | `out/package_wrapper/IONIQ5_EU.ver` | size / sha256 | 2,469 / `7203f8d68567e270a51f0d7e8cac6f25c570ace6dcca11cc9718f7fb1a210ab1` |
-| `out/usb.img` | size / sha256 | 28,894,603,492 / `288985aafe5c88190c518b47cfaaeb42d11b9c31879c47c5322b58f456b54b85` (stock, unchanged by the message) |
+| `out/usb.img` | size / sha256 | 28,894,603,492 / `288985aafe5c88190c518b47cfaaeb42d11b9c31879c47c5322b58f456b54b85` (stock; **reference only** — `mkfs.exfat` stamps a time-derived volume serial, so a rebuild differs in those bytes) |
 | `out/regions.json` | `off` / `len` | 5,505,024 / 879,126,179 (single extent, `benign_then_evil`, pass 2) |
 
 For the record, the envelope the car actually installed on 2026-11-21 was

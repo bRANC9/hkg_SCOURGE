@@ -85,9 +85,14 @@ NICK_RE = re.compile(r"(?<![A-Za-z])nick(?![A-Za-z])", re.IGNORECASE)
 # WiFi credentials are personal data of the same class as a home path: an SSID names a
 # person's network and a PSK is a shared secret. Documented *format* examples use
 # placeholders, so only values that look like real ones are flagged.
+# `\b` cannot sit before a token inside an underscored name (`WIFI_SSIDS=`,
+# `RIG_AP_SSID=`), so the alternatives carry their own boundary and those
+# spellings are listed. `=` only, not `:` — documentation writes
+# "WIFI_SSIDS: space-separated", and prose is not a credential; the carriers that
+# matter (.env, .sh, NetworkManager keyfiles) all assign with `=`.
 WIFI_RE = re.compile(
-    r"\b(?P<key>ssid|psk|passphrase|wifi[-_ ]?password)\s*[=:]\s*"
-    r"(?P<value>[^\s;#&]{6,64})", re.IGNORECASE)
+    r"(?<![A-Za-z0-9])(?P<key>rig_ap_ssid|wifi_?ssids|ssid|psk|passphrase|"
+    r"wifi[-_ ]?password)\s*=\s*(?P<value>[^\s;#&]{6,64})", re.IGNORECASE)
 # Only text/config carriers are scanned: in C/Python source the same tokens are
 # identifiers, format strings and fixtures, not credentials.
 WIFI_TEXT_SUFFIXES = (".md", ".txt", ".sample", ".conf", ".ini", ".env", ".yaml",
@@ -95,7 +100,7 @@ WIFI_TEXT_SUFFIXES = (".md", ".txt", ".sample", ".conf", ".ini", ".env", ".yaml"
 WIFI_PLACEHOLDERS = ("<", ">", "$", "{", "%", "your", "example", "changeme",
                      "placeholder", "redacted", "xxxx", "ssid", "psk",
                      "myhome", "fixture", "scourge-", "iphone", "dummy",
-                     "sample", "demo")
+                     "sample", "demo", "rig-setup")
 
 
 def wifi_scan_scope(path: str) -> bool:

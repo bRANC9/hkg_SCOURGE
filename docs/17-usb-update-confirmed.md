@@ -36,6 +36,12 @@ Head unit side, `/log_data/AppUpgrade/upgrade_log`: `mkfs.ext4` on
 slow the update: the head unit's decrypt → `zcat` → `tar` → ext4 pipeline is the
 limit, and its md5 sweep is the slowest single read at 4.7 MB/s.
 
+`smack_flag=present` is *not* a promotion of docs/08's gate 6: it records that
+the flag file and the patched setup script are on the unit, which is that gate's
+precondition. Gate 6 asks whether `chsmack`/`setfattr` actually work from the `_`
+label after boot, and no such attempt was run — that stays pending, one step
+closer.
+
 That the *installed* tree was the swapped one is visible without trusting the
 log: the engine reformatted the rootfs partition first, and the next boot's
 preflight shows `/etc/initial_root/{run_stuff_loader.sh,updater_guard.sh}` dated

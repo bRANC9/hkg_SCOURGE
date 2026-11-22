@@ -315,10 +315,9 @@ def rig_state() -> dict:
     usb = usb_state()
     services = {}
     for unit in ("rig-ap-fallback", "rig-wifi-agent", "nbdkit", "ssh"):
-        code, out = subprocess.run(  # noqa: PLW1510 - we want the status code
-            ["systemctl", "is-active", unit], capture_output=True, text=True
-        ), None
-        services[unit] = (code.stdout or "").strip() or "unknown"
+        proc = subprocess.run(["systemctl", "is-active", unit],
+                              capture_output=True, text=True)
+        services[unit] = (proc.stdout or "").strip() or "unknown"
     build = os.path.expanduser("~/scourge/build")
     artifacts = {}
     for name in ("usb.img", "stage1.te2", "regions.json"):
@@ -550,6 +549,8 @@ def mount_media(device: str) -> tuple[bool, str]:
     if entry["mountpoint"]:
         return True, f"already mounted at {entry['mountpoint']}"
     name = (entry["label"] or os.path.basename(device)).replace("/", "_") or "usb"
+    if name in (".", ".."):
+        name = "usb"   # a crafted label must not mount over /media or its parent
     target = os.path.join("/media", name)
     try:
         os.makedirs(target, exist_ok=True)

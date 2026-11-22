@@ -209,7 +209,9 @@ the two ways out instead:
   ```
 
   **Start tunnel** / **Stop tunnel** on the page run the same two `systemctl`
-  calls, token-gated like every other action. The unit retries every 10 s, so a
+  calls. They are not token-gated: the page has no token by design (`ab9b23b`) —
+  it trusts its network position, the owner's LAN or the setup AP, and `/connect`
+  still requires the AP passphrase. The unit retries every 10 s, so a
   dropped link or a WiFi roam costs nothing; with the file missing the unit never
   starts at all (`ConditionPathExists`), and the page says so instead of showing
   a dead button.

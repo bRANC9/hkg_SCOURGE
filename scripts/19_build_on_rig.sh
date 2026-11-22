@@ -73,7 +73,12 @@ if [ "$DRY" -eq 1 ]; then
     exit 0
 fi
 
+# rig.local.env (WiFi PSK, login and sudo passwords) and paths.local.env stay
+# here: the build chain on the board needs neither, and 17/18 keep secrets in
+# /etc/rig/wifi.env for the same reason. key.local deliberately travels — 02
+# needs the TE2 key on the board.
 rsync -a --relative -e 'ssh -o BatchMode=yes' \
+    --exclude=rig.local.env --exclude=paths.local.env \
     input scripts payload config third_party/ioniq5-usb-toctou \
     "$PI_USER@$PI_HOST:~/scourge/"
 

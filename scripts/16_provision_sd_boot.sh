@@ -50,9 +50,15 @@ done
     echo "config/rig.local.env is incomplete:$missing" >&2
     exit 1
 }
-for v in RIG_PASSWORD SSH_PUBKEY WIFI_PSK WIFI_SSIDS; do
+# The template wraps these in single quotes and the rendered file runs as root on
+# the unit's first boot, so a quote or a backslash cannot be allowed through: a
+# legal WPA2 PSK like `john's-net` would break the render.
+for v in RIG_PASSWORD SSH_PUBKEY WIFI_PSK WIFI_SSIDS WIFI_COUNTRY; do
     case "${!v}" in
-        *"<"*|*"@"*">"*) echo "$v still holds the example placeholder" >&2; exit 1 ;;
+        *"<"*|*"@"*">"*)
+            echo "$v still holds the example placeholder" >&2; exit 1 ;;
+        *"'"*|*'\\'*)
+            echo "$v contains a quote or backslash the template cannot render" >&2; exit 1 ;;
     esac
 done
 

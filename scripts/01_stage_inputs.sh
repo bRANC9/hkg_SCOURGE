@@ -71,8 +71,12 @@ if [ -n "${SRC_DIR:-}" ]; then
         "$GENUINE_ENVELOPE_SIZE" "" "$GENUINE_MD5"
     stage_and_gate "$SRC_DIR/AppUpgrade" "$INPUT_DIR/AppUpgrade.usb" \
         "USB wrapper container" "$WRAPPER_SIZE" "$WRAPPER_STOCK_SHA256" ""
+    # The .ver header carries an HMG package-id counter that moves between server
+    # repacks. Size/hash are not a hard gate here; 01b_audit_inputs.py verifies the
+    # header identity, the consumed rows' CRC32/size and this file's pinned
+    # revision (warning on a verified repack).
     stage_and_gate "$SRC_DIR/$VER_FILE" "$INPUT_DIR/$VER_FILE" \
-        ".ver" "$VER_STOCK_SIZE" "$VER_STOCK_SHA256" ""
+        ".ver" "" "" ""
     stage_and_gate "$SRC_DIR/.lge.upgrade.xml" "$INPUT_DIR/.lge.upgrade.xml" \
         ".lge.upgrade.xml" "" "$LGE_UPGRADE_XML_SHA256" ""
     # Full stock tree for the vanilla image / packages (24 GB+; optional for
@@ -85,14 +89,22 @@ if [ -n "${SRC_DIR:-}" ]; then
 fi
 
 echo
+echo "== firmware audit"
+PY="$PYTHON"; [ -x "$PY" ] || PY=python3
+"$PY" "$SCOURGE_ROOT/scripts/01b_audit_inputs.py" \
+    --layout staged --root "$INPUT_DIR" \
+    --locks "$SCOURGE_ROOT/config/firmware_locks.env"
+
+echo
 echo "== staged input gates:"
 [ -f "$INPUT_DIR/mango-rootfs.tar.gz" ] && \
     lock_check_or_die "$INPUT_DIR/mango-rootfs.tar.gz" "" "rootfs (md5)" 2>/dev/null || true
 md5sum "$INPUT_DIR/mango-rootfs.tar.gz" | grep -q "$GENUINE_MD5" && echo "  rootfs md5 OK"
 [ -f "$INPUT_DIR/AppUpgrade.usb" ] && \
     lock_check_or_die "$INPUT_DIR/AppUpgrade.usb" "$WRAPPER_STOCK_SHA256" "USB wrapper"
-[ -f "$INPUT_DIR/$VER_FILE" ] && \
-    lock_check_or_die "$INPUT_DIR/$VER_FILE" "$VER_STOCK_SHA256" ".ver"
+# .ver identity is checked by 01b_audit_inputs.py above (rows, not the
+# server-side package-id counter in the header).
+[ -f "$INPUT_DIR/$VER_FILE" ] && echo "  .ver audited"
 [ -f "$INPUT_DIR/.lge.upgrade.xml" ] && \
     lock_check_or_die "$INPUT_DIR/.lge.upgrade.xml" "$LGE_UPGRADE_XML_SHA256" ".lge.upgrade.xml"
 

@@ -11,7 +11,9 @@ EnvironmentFile=/etc/rig/wifi.env
 ExecStart=/usr/bin/python3 /usr/local/lib/rig/rig_wifi_agent.py --address 0.0.0.0 --port 80
 Restart=always
 RestartSec=5
-# The agent only answers while the rig is actually serving its AP.
+# The agent binds 0.0.0.0:80 on every boot: it answers on the owner's LAN as well
+# as on the setup AP, and that is deliberate (the page has no token, so its only
+# boundary is the network position).
 NoNewPrivileges=yes
 ProtectSystem=full
 ProtectHome=read-only
