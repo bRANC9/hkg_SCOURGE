@@ -622,13 +622,14 @@ static int http_request_plain(const char *url, const char *method, const char *a
  * the in-process client (which already follows proxy redirects). */
 static int parse_url_tls(const char *url, int *tls, char *host, size_t host_size, int *port,
                          char *path, size_t path_size);
-static int https_request(const char *host, int port, const char *request, char **out, size_t *out_len);
+static int https_request(const char *host, int port, const char *request, char **out, size_t *out_len,
+                         char *location, size_t location_size);
 
 static int http_request(const char *url, const char *method, const char *auth_token,
                         const char *body, char **out, size_t *out_len)
 {
     int tls = 0, port = 0;
-    char host[256], path[1024], request[2048];
+    char host[256], path[1024], request[2048], location[1024];
 
     if (parse_url_tls(url, &tls, host, sizeof(host), &port, path, sizeof(path)) != 0)
         return -2;
@@ -637,7 +638,7 @@ static int http_request(const char *url, const char *method, const char *auth_to
 
     snprintf(request, sizeof(request),
              "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
-             "Accept: application/json\r\n%s%s%s"
+             "Accept: */*\r\n%s%s%s"
              "Content-Length: %zu\r\n\r\n%s",
              method, path, host,
              auth_token ? "Authorization: Device " : "",
@@ -645,7 +646,27 @@ static int http_request(const char *url, const char *method, const char *auth_to
              auth_token ? "\r\n" : "",
              body ? strlen(body) : 0,
              body ? body : "");
-    return https_request(host, port, request, out, out_len);
+
+    {
+        int status = https_request(host, port, request, out, out_len, location, sizeof(location));
+        /* GitHub serves release assets through a 302 to a short-lived
+         * objects.githubusercontent.com URL, so the hop must be followed right
+         * away (the signed URL expires). */
+        if (status >= 300 && status < 400 && location[0]) {
+            char next[1500];
+            if (!strncmp(location, "http://", 7) || !strncmp(location, "https://", 8))
+                snprintf(next, sizeof(next), "%s", location);
+            else if (location[0] == '/')
+                snprintf(next, sizeof(next), "https://%s:%d%s", host, port, location);
+            else
+                return status;
+            logmsg("tls redirect %d -> %s", status, next);
+            free(*out);
+            *out = NULL;
+            return http_request(next, method, auth_token, body, out, out_len);
+        }
+        return status;
+    }
 }
 
 /* Download a URL into a file (artifacts). */
@@ -705,7 +726,8 @@ static void beep(int times)
  */
 
 
-static int parse_http_response(char *buf, size_t used, int *status, char **payload, size_t *payload_len)
+static int parse_http_response(char *buf, size_t used, int *status, char **payload, size_t *payload_len,
+                               char *location, size_t location_size)
 {
     char *end = strstr(buf, "\r\n\r\n");
     long content_length = -1;
@@ -717,6 +739,19 @@ static int parse_http_response(char *buf, size_t used, int *status, char **paylo
         return -1;
     if (sscanf(buf, "HTTP/%*d.%*d %d", status) != 1)
         *status = -1;
+    if (location && location_size) {
+        char *loc = strstr(buf, "\r\nLocation:");
+        location[0] = 0;
+        if (loc) {
+            size_t i = 0;
+            loc += 11;
+            while (*loc == ' ')
+                loc++;
+            while (*loc && *loc != '\r' && *loc != '\n' && i + 1 < location_size)
+                location[i++] = *loc++;
+            location[i] = 0;
+        }
+    }
     cl = strstr(buf, "\r\nContent-Length:");
     if (!cl)
         cl = strstr(buf, "\r\ncontent-length:");
@@ -754,7 +789,8 @@ static int parse_http_response(char *buf, size_t used, int *status, char **paylo
     return 0;
 }
 
-static int https_request(const char *host, int port, const char *request, char **out, size_t *out_len)
+static int https_request(const char *host, int port, const char *request, char **out, size_t *out_len,
+                         char *location, size_t location_size)
 {
     int to_child[2], from_child[2];
     pid_t pid;
@@ -833,7 +869,7 @@ static int https_request(const char *host, int port, const char *request, char *
         usleep(20000);
     }
 
-    if (parse_http_response(buffer, used, &status, &payload, &payload_len) != 0) {
+    if (parse_http_response(buffer, used, &status, &payload, &payload_len, location, location_size) != 0) {
         return status >= 0 ? status : -1;
     }
     *out = malloc(payload_len + 1);
@@ -1523,6 +1559,36 @@ static void route(int fd, const char *method, const char *target, const char *bo
         }
         snprintf(out, sizeof(out), "{\"started\":true,\"package\":\"%s\"}\n", slug);
         respond(fd, 200, out, "application/json");
+        return;
+    }
+    if (!strcmp(path, "/versions")) {
+        char pkg[64], url[1200], cache[MAX_PATH], *resp = NULL;
+        url_param(query, "pkg", pkg, sizeof(pkg));
+        if (!pkg[0]) {
+            respond(fd, 400, "{\"detail\":\"pkg required\"}\n", "application/json");
+            return;
+        }
+        snprintf(url, sizeof(url), "%s/api/v1/versions/%s/%s/%s/%s", g_hub, g_firmware, g_region, g_gui, pkg);
+        snprintf(cache, sizeof(cache), "%s/versions-%s.json", g_rw, pkg);
+        {
+            int status = http_request(url, "GET", g_token[0] ? g_token : NULL, NULL, &resp,
+                                      NULL);
+            if (status == 200 && resp) {
+                write_file_atomic(cache, resp);
+                respond(fd, 200, resp, "application/json");
+                free(resp);
+                return;
+            }
+            free(resp);
+        }
+        /* offline: serve the last known history */
+        {
+            char cached[MAX_BUF * 2];
+            if (read_file(cache, cached, sizeof(cached)))
+                respond(fd, 200, cached, "application/json");
+            else
+                respond(fd, 502, "{\"detail\":\"versions unavailable\"}\n", "application/json");
+        }
         return;
     }
     if (!strcmp(path, "/local")) {

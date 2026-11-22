@@ -111,6 +111,19 @@ Item {
 
     property var localPackages: []
     property bool showLocal: false
+    // Version history of the package whose "Versions" was tapped (from /versions).
+    property var versionRows: []
+    property string versionPkg: ""
+
+    function loadVersions(pkg) {
+        versionPkg = pkg
+        versionRows = []
+        get("/versions?pkg=" + encodeURIComponent(pkg), function (code, d) {
+            if (code !== 200 || !d || d.versions === undefined)
+                return
+            versionRows = d.versions
+        })
+    }
 
     function refreshLocal() {
         get("/local", function (code, d) {
@@ -378,9 +391,12 @@ Item {
                         text: root.showLocal
                               ? (modelData.file + "  \u00b7  USB stick")
                               : ("v" + modelData.version + "  \u00b7  " + modelData.firmware +
-                                 "  \u00b7  " + modelData.region + "  \u00b7  " + modelData.gui)
+                                 "  \u00b7  " + modelData.region + "  \u00b7  " + modelData.gui +
+                                 (modelData.verified === true
+                                  ? "  \u00b7  \u2713 " + (modelData.verified_devices || 0) + " car(s)"
+                                  : "  \u00b7  not verified yet"))
                         font.pixelSize: 16
-                        color: "#6E7780"
+                        color: modelData.verified === true ? "#8FCB9B" : "#6E7780"
                     }
                     QText {
                         x: 20
@@ -422,8 +438,57 @@ Item {
                                 else
                                     root.install(modelData.pkg)
                             }
+                            onPressAndHold: {
+                                if (!root.showLocal)
+                                    root.loadVersions(modelData.pkg)
+                            }
                         }
                     }
+                }
+            }
+
+            // Version history drawer: long-press Install on a row to open it.
+            Rectangle {
+                id: versionsDrawer
+                x: 0
+                y: 254
+                width: parent.width
+                height: 372
+                radius: 12
+                color: "#10161B"
+                visible: root.versionPkg !== ""
+                border.color: "#23303A"
+
+                QText {
+                    x: 20
+                    y: 10
+                    text: "Versions of " + root.versionPkg
+                    font.pixelSize: 18
+                    color: "#C9D3DC"
+                }
+                ListView {
+                    x: 0
+                    y: 44
+                    width: parent.width
+                    height: parent.height - 52
+                    clip: true
+                    model: root.versionRows
+                    delegate: Item {
+                        width: versionsDrawer.width
+                        height: 54
+                        QText {
+                            x: 20
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "v" + modelData.version + "  \u00b7  " + modelData.size_mb + " MB" +
+                                  "  \u00b7  \u2713 " + (modelData.verified_devices || 0) + " car(s)"
+                            font.pixelSize: 17
+                            color: "#E8EDF2"
+                        }
+                    }
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.versionPkg = ""
                 }
             }
 
