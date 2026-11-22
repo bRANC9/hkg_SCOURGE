@@ -107,6 +107,27 @@ python3 -B launch.py run --kernel compat --profile research \
   --scenario wifi-ui --share /path/to/wifi_app/out/usb --timeout 240
 ```
 
+## Java runtime package scenario
+
+`java-runtime` installs the real `packages/java` USB tree through its
+`run_stuff.sh`, exercises the Temurin 25 runtime (version, self-test, HTTP
+daemon, `jcmd` attach, reinstall/prune) and restores it. It needs a payload
+image, not a tools image:
+
+```sh
+# from the repo root
+sh packages/java/tests/build_vm_payload.sh
+
+# from tools/vm
+python3 -B launch.py run --profile research --scenario java-runtime \
+  --payload ../../packages/java/out/vm --timeout 420
+python3 -B launch.py run --kernel compat --profile research \
+  --scenario java-runtime --payload ../../packages/java/out/vm --timeout 420
+```
+
+Or from the package: `make -C packages/java vm-test`. The scenario is
+headless-only evidence; it makes no GUI or car claim.
+
 ## Daily workflow
 
 ```sh

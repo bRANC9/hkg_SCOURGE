@@ -95,6 +95,7 @@ repo.
 | Setup warns about a hash/CRC on a correct official package | `scripts/01b_audit_inputs.py` (docs/11); fix the stale pin, never the download |
 | To install the apps | docs/06 → docs/07 → `packages/compose.sh` |
 | To build a Rust app/daemon | docs/19 → `tools/rust/scripts/package_app.sh` |
+| To run a Java app/daemon | docs/21 → `packages/java` |
 | A custom firmware update on a rooted car | docs/08 (confirmed; docs/17 is the one-pager) |
 | To port to another firmware/region/car | docs/09 gates first; docs/10 only if hashes differ |
 | To build/fix a package's UI | `docs/ui/styleguide.md` → `deployment-modes.md` → `ux-patterns.md` → the overlay checklist, before writing any QML |
@@ -154,7 +155,7 @@ repo.
     material never gets our header.
 - Package installers follow the docs/06 house rules (manifest, stock-hash
   guards, backups, idempotency, explicit status lines).
-- Docs are numbered `docs/01–19`; UI research lives in `docs/ui/`.
+- Docs are numbered `docs/01–21`; UI research lives in `docs/ui/`.
 - Scripts are run with `sh`/`bash`/`python3` (do not rely on +x bits) —
   except the hooks under `scripts/githooks/`, which git itself executes
   and therefore must stay executable (`scripts/install_hooks.sh` restores

@@ -1,9 +1,8 @@
-# 07 — The packages (Battery, WiFi, Tweaks)
+# 07 — The packages (Battery, WiFi, Tweaks, Java, Rust)
 
 TARGET: Ioniq 5 Gen5W_L (Linux), firmware 260128 (EU), theme
-`qml_eco3.0`. All three packages deploy through the failsafe (docs/06);
-none of them flashes firmware, touches the updater, the bootloader, or
-partitions. **Status is marked per feature — these are research-quality
+`qml_eco3.0`. The packages deploy through the failsafe (docs/06); none of
+them flashes firmware, touches the updater, the bootloader, or partitions. **Status is marked per feature — these are research-quality
 packages under active development, not finished products.**
 
 ## Status matrix (2026-11, refreshed)
@@ -31,6 +30,7 @@ packages under active development, not finished products.**
 | Wifi1b | Standalone or side-by-side CarPlay AP/client app: static `wpa_supplicant`, own DHCP server/client, key-only dropbear on 2224, separate `/rw_data/wifi1b`, service and HTTP :8093; additive `Wifi1bPage`/`Wifi1bTile` on the canonical Battery/Tweaks/Reboot base | WIP — offline-tested; no car/iPhone validation |
 | Wifi1b | Wireless CarPlay research (C1–C3): bounded wire codec, bootstrap state machine, SPP RX hook and native/OEM auth probes | WIP — unit-tested source only; not activated by the installer, live ABI pending |
 | All | Install/restore/diag through the failsafe, base detection, coexistence | Proven pattern (combo v4 flow: install order battery → wifi → tweaks, reverse restore; Wifi1b standalone is battery → tweaks → wifi1b) |
+| Java | **Headless Temurin 25 runtime** for JAR apps/daemons; `/rw_data/java`, app JARs in `/rw_data/java-apps`, no GUI, no `javac` default | WIP — VM-validated (vendor + compat kernel); car-pending — `packages/java/` |
 
 Per-package detail: `packages/<pkg>/README.md` + `SPEC.md` + `docs/`.
 
@@ -50,15 +50,29 @@ installs) and pick the matching QML variant. Reboot ships inside the Tweaks
 package rather than as a fourth package, so selecting Tweaks also installs
 the Reboot tile and daemon endpoint.
 
+The optional **Java** package is a base runtime, not a UI app. It installs
+`/rw_data/java/{runtime-25.0.5.1+2,current,env.sh}`, creates
+`/rw_data/java-apps/` for user JARs, and installs an example systemd unit
+under the runtime's `examples/`; it does not add a tile, a service or a
+rootfs file. Restore removes the runtime but preserves the app directory.
+The runtime is headless (the vendor rootfs has no X11 libraries) and the
+default build has no `javac`. Full runbook: `docs/21-java-runtime.md`;
+package detail: `packages/java/README.md`.
+
 ## Build + install
 
 ```sh
 # one package
 sh packages/battery/scripts/build_payload.sh   # -> packages/battery/out/usb
+sh packages/java/scripts/build_payload.sh      # -> packages/java/out/usb
 
 # or the combo stick (asks which packages, builds, assembles MODE= master)
-sh packages/compose.sh /path/to/stick [battery,wifi,tweaks]
+sh packages/compose.sh /path/to/stick [battery,wifi,tweaks,java]
 ```
+
+The Java build fetches the pinned Temurin tarball into gitignored
+`third_party/temurin/` and verifies its sha256. For an offline build, pass
+`TEMURIN_TARBALL=/path/to/OpenJDK25U-jdk_x64_linux_hotspot_*.tar.gz`.
 
 Copy the contents to the root of a FAT/exFAT stick, plug it in, read
 `run_stuff_result.txt`. Restore: `MODE=restore` (combo) or rename
@@ -96,6 +110,12 @@ vehicle:
    preservation, the passwd/shadow templates, unit masking, and the
    no-systemd manual-start fallback all get exercised. Then
    `run_stuff_restore.sh` must return the stock hashes exactly.
+4. **Java runtime scenario.** `packages/java/tests/run_vm_test.sh` (or
+   `make -C packages/java vm-test`) runs `java-runtime` in Mode V and Mode C:
+   real installer, manifest/SHA-256 copy checks, `java -version`, a
+   headless self-test, an HTTP daemon with a second JVM client, `jcmd`
+   attach, reinstall/prune and restore. Mode V is the car-compatibility
+   evidence; Mode C is supporting evidence only.
 
 ## Binary toolchain policy
 
@@ -108,6 +128,7 @@ binary built on a modern host dies on-car. Policy:
 | battery/wifi/tweaks daemons | static via host gcc (validated on the vendor kernel in the VM; no NSS-dependent calls by design) | same static gate |
 | `tweaks_persist` | **deliberately dynamic** against vendor glibc 2.25 + `libpersistence_client_library.so.7` (it must call the vendor PCL); links against the extracted vendor rootfs (`SCOURGE_ROOTFS`) | vendor-interpreter check; pinned to 260128 |
 | Rust apps/daemons | **static musl** via the pinned host toolchain and `tools/rust/scripts/package_app.sh`; the unit gets only the binary + unit, never rustc/cargo | `readelf`: no `PT_INTERP`/`DT_NEEDED`; VM `rust-app` scenario |
+| Java runtime | **pinned third-party** Temurin `25.0.5.1+2`, `jlink` headless SE image (upstream glibc 2.17 baseline), fetched at build and never committed | `readelf` max `GLIBC <= 2.25`, non-GUI `NEEDED` resolution against `work/rootfs`, no symlinks, Mode V `java-runtime` scenario |
 
 ## Rust apps/daemons (WIP)
 

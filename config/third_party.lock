@@ -50,3 +50,30 @@ used_for  = packages/wifi static-musl SSH server (build_dropbear.sh)
 url       = https://data.iana.org/time-zones/
 license   = public domain
 used_for  = packages/tweaks automatic-DST zoneinfo (fetched at package build)
+
+[rust-toolchain]
+# Host-side Rust apps/daemons toolchain. Fetched only; never installed on the
+# head unit and never committed. The head unit receives static-musl binaries.
+url_base     = https://static.rust-lang.org/dist/2026-11-12
+version      = 1.100.0
+release_date = 2026-11-12
+commit       = 0ef1bc386059596dada8fb65b50425aab2ea637a
+host         = x86_64-unknown-linux-gnu
+target       = x86_64-unknown-linux-musl
+license      = MIT OR Apache-2.0 (fetched only; never copied into this repo)
+used_for     = tools/rust host build/package of static-musl apps and daemons
+rustc.url    = https://static.rust-lang.org/dist/2026-11-12/rustc-1.100.0-x86_64-unknown-linux-gnu.tar.xz
+rustc.sha256 = f1d0b1dec81dab6f523cd098507763487b0d4bd7fd2c87582f154128719be03b
+cargo.url    = https://static.rust-lang.org/dist/2026-11-12/cargo-1.100.0-x86_64-unknown-linux-gnu.tar.xz
+cargo.sha256 = 7e29ce07d7c6e92d1826870575ba27d57fff6cb3e754aa57d99099cb88fab35d
+std_gnu.url  = https://static.rust-lang.org/dist/2026-11-12/rust-std-1.100.0-x86_64-unknown-linux-gnu.tar.xz
+std_gnu.sha256 = 4591b6486594ded52ecd6135db95bf9355bbd3ca7a380888b141528bbcf9a5d4
+std_musl.url = https://static.rust-lang.org/dist/2026-11-12/rust-std-1.100.0-x86_64-unknown-linux-musl.tar.xz
+std_musl.sha256 = 9d5211bc7b40195f9700a6f9133831832a32f50d0e2a2c0ae8af801e7656de5c
+
+[temurin-jdk25]
+url       = https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5.1%2B2/OpenJDK25U-jdk_x64_linux_hotspot_25.0.5.1_2.tar.gz
+license   = GPL-2.0-only WITH Classpath-exception-2.0
+version   = 25.0.5.1+2
+sha256    = 760f91b22c3efc9bd1b64ff950598231be82928cc807e30691a0e7a2995a62c0
+used_for  = packages/java jlink headless runtime (fetched at package build; never committed)

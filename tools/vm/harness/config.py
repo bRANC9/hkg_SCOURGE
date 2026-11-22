@@ -15,7 +15,8 @@ SCENARIO_NAMES = ('boot', 'usb-discovery', 'dbus-ready', 'dmclient-events',
                   'updater-launch', 'stock-update-stage', 'storage-isolation', 'environment-audit', 'update-graphics',
                   'entropy-ready', 'vendor-lifecycle', 'applauncher-sigstub',
                   'vendor-lifecycle-sigstub', 'ui-smoke', 'wifi-ui',
-                  'can-smoke', 'vehicle-state', 'recovery-reboot', 'recovery-no-space',
+                  'can-smoke', 'java-runtime', 'vehicle-state',
+                  'recovery-reboot', 'recovery-no-space',
                   'recovery-corrupt-media', 'recovery-usb-removal',
                   'recovery-power-loss', 'vendor-systemd',
                   'vendor-systemd-dbus', 'vendor-esinit',
@@ -93,6 +94,8 @@ def scenario_command(scenario: dict, profile: dict, graphics: str = 'patched-off
         return (VM / 'probes' / 'rust-app.sh').read_text()
     if name == 'can-smoke':
         return (VM / 'probes' / 'can-smoke.sh').read_text()
+    if name == 'java-runtime':
+        return (VM / 'probes' / 'java-runtime.sh').read_text()
     if name == 'recovery-reboot':
         return ("echo 'HARNESS_CHECK reboot-marker PASS'; sync; reboot -f\n")
     if name == 'recovery-no-space':

@@ -39,7 +39,7 @@ removes the binary/unit while preserving app data.
 - **Static musl** (`x86_64-unknown-linux-musl`) is the default and the only
   supported deployment form. One self-contained file; no runtime package.
 - **Cargo release default** is used: symbols are kept for debugging. The
-  sample daemon is ~1.2 MiB unstripped; stripping gets it to ~0.85 MiB.
+  sample daemon is ~1.1 MiB unstripped; stripping gets it to ~0.85 MiB.
 - **Shared `libstd` is not supported**: Rust has no stable ABI, and the
   hashed `libstd-<hash>.so` would force on-unit runtime/version management.
 - A future per-app dynamic-glibc mode for vendor libraries is possible, but

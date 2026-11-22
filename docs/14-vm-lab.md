@@ -46,6 +46,12 @@ VM-validated (vendor kernel):
 - D-Bus service contracts; real AppLauncher/ApplicationManager/AppDMClient
   lifecycle; updater launch chain
 - package install/restore round-trips against the real QML tree
+- Java 25 runtime (`java-runtime`): the real package installer installs
+  Temurin `25.0.5.1+2` under `/rw_data/java`, then version, headless
+  self-test, HTTP daemon + second-JVM client + SIGTERM, `jcmd` attach,
+  reinstall/prune and restore pass on the vendor kernel (run
+  `1795311226052276579`); headless only, no X11/GUI; see
+  `docs/21-java-runtime.md`
 - update-engine state machines up to the device-credential gate
 - forced-reboot recovery smoke (marker + QEMU `-no-reboot` exit; one slice,
   not power-loss/corrupt-media coverage)
@@ -204,6 +210,8 @@ VM-validated (compat kernel):
 - vendor rootfs boot on a pinned modern kernel; `/dev/fb0` + `/dev/dri/card0`
 - Weston 1.10 DRM/pixman; visible Wayland probe; 1280×720 QMP screenshots
 - QML engine evaluation (`qmlscene`) and WiFi-payload QML-error capture
+- the same `java-runtime` scenario on the compat kernel (run
+  `1795311288097083935`); supporting evidence, not a stock-kernel claim
 - 9p host share, persistent state, VNC display, QMP click/key injection
 - HDA audio card + direct `hw:0,0` playback; opt-in restricted user net
 - visual-regression baselines/diffs and run management (list/show/extract/
@@ -283,6 +291,9 @@ available in Mode C; the vendor kernel stays input-free.
   (`HMIEVENTS`, `AppHome_Enum`); rendering the page needs the runtime.
 - Mode C SMACK (`lsm=smack`) approximates but does not reproduce 4.1.27
   policy semantics.
+- Java is headless-only: AWT/Swing request X11 libraries that the vendor
+  rootfs does not ship. The default runtime has no `javac`. Evidence is VM
+  only; car validation is pending.
 
 Every FAIL/timeout writes a failure bundle with dmesg, processes, mounts,
 Weston/QML/updater logs and the serial tail. Run management
