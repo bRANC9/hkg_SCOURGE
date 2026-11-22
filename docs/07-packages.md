@@ -32,6 +32,10 @@ packages under active development, not finished products.**
 | All | Install/restore/diag through the failsafe, base detection, coexistence | Proven pattern (combo v4 flow: install order battery → wifi → tweaks, reverse restore; Wifi1b standalone is battery → tweaks → wifi1b) |
 | Java | **Headless Temurin 25 runtime** for JAR apps/daemons; `/rw_data/java`, app JARs in `/rw_data/java-apps`, no GUI, no `javac` default | WIP — VM-validated (vendor + compat kernel); car-pending — `packages/java/` |
 
+The **Marketplace / store** app is deliberately not in this repository: it
+lives in `bRANC9/scourge-hub` under `app/`, which also builds and publishes its
+release zip. This tree keeps the car-side packages in the table above.
+
 Per-package detail: `packages/<pkg>/README.md` + `SPEC.md` + `docs/`.
 
 ## What each package installs
