@@ -3,8 +3,11 @@
 TARGET: Ioniq 5 Gen5W_L (Linux), firmware `NE_E.EUR.S5W_L.001.001.260128` (EU).
 
 The stage-1 firmware is the modified rootfs delivered by the TOCTOU rig
-(docs/01, docs/04, docs/05). **Build 5 is the car-validated image; build 6
-is the all-language boot-message refresh (WIP, offline-validated only).**
+(docs/01, docs/04, docs/05). **Build 5 is the image the 2026-11-15 car run installed through the ordinary
+USB updater; build 6
+is the all-language boot-message refresh: a 2026-11-21 run put its previous
+wording on the car (`7f3b155e…`), and the current tree builds `0d975468…`, which
+is offline-validated only until a car run of it lands.**
 Both builds carry:
 
 1. The **boot message** patched into every AppStandbyClock
@@ -80,20 +83,18 @@ artifact against this table; any mismatch means stop and investigate.**
 > **The 2026-11-21 car run validated the *previous* build-6 envelope.** A 2021
 > Ioniq 5 RWD installed `out/stage1.te2` (`7f3b155e…`) through the TOCTOU rig —
 > the run is in docs/17. The boot-message wording changed after that run, so the
-> table at the end of this section describes what the current tree builds
+> build-6 table further down describes what the current tree builds
 > (`0d975468…`, offline-validated, preflight A–D green) and
 > `config/firmware_locks.env` pins that: the current envelope is **not yet
-> car-validated**. The car's `7f3b155e…` is recorded below the table as its own
-> line.
-> The build-6 column below is therefore what is on that car, and the build-5
-> values are the historical reference: the message refresh changes all patched
-> `.qm` files, so every rootfs-derived hash moved while the four payload
-> binaries stayed byte-identical (see the table's payload rows).
-> `config/firmware_locks.env`'s `KNOWN_GOOD_*` pins now carry the validated
-> values, so a build that does not reproduce them stops here. The `.qm`-only SSH
-> refresh (`tools/deploy_boot_messages.sh`) does not use this table.
+> car-validated**. The car's `7f3b155e…` is recorded below the build-6 table as its own
+> line. The build-5 values remain the historical reference (the 2026-11-15
+> normal-USB run): the message refresh changes all patched `.qm` files, so every
+> rootfs-derived hash moved while the four payload binaries stayed byte-identical
+> (see the table's payload rows). A build that does not reproduce the
+> `KNOWN_GOOD_*` pins stops here. The `.qm`-only SSH refresh
+> (`tools/deploy_boot_messages.sh`) does not use this table.
 
-| Artifact | Property | Known-good value (build 5) |
+| Artifact | Property | Known-good value (build 5 — historical; the gate compares against the `KNOWN_GOOD_*` pins, see the build-6 table) |
 |---|---|---|
 | `out/stage1.te2` | size / sha256 | 879,126,179 / `d1eec7cb8861c25facb77a558348bfb648bbd7b72d30f16ad082145d19b21dde` |
 | `work/stage1.padded.tar.gz` | sha256 | `f66f1a9b91e7bef630b1ef0b0bbe74c740ccb25acdf93101ada96aa911ae275b` |
@@ -110,17 +111,18 @@ artifact against this table; any mismatch means stop and investigate.**
 Build-6 input: `config/messages.json` sha256
 `c202dc016f3465d41602bef66ff60375bb1186308a9bfd827cbc19310a97d269`. The wording
 changed after the 2026-11-21 run, so **the car carries the previous envelope**
-(`7f3b155e…`, the `f9929bf4…` text) and this table describes what the tree builds
-now. Any rebuild with a different `messages.json` moves every rootfs-derived hash
+(`7f3b155e…`, the `f9929bf4…` text) and the build-6 table below describes what the tree
+builds now. Any rebuild with a different `messages.json` moves every rootfs-derived hash
 below, which is precisely why the pins live in `config/firmware_locks.env` and not
 in a sentence.
 
 ### Build 6 measurements (offline-validated 2026-11-19; re-recorded 2026-11-21 after the message change)
 
 A full local run of the chain on the OEM 260128 package reproduced every
-payload binary byte-for-byte and produced the values below. The build-5 column
-above still describes the image on the car; these replace it only once a car
-run confirms them.
+payload binary byte-for-byte and produced the values below; they are
+offline-validated only — the car carries the previous wording envelope
+(`7f3b155e…`, see the callout above), not these values. A car run of the current
+tree is what promotes this table.
 
 | Artifact | Property | Measured value (build 6) |
 |---|---|---|
