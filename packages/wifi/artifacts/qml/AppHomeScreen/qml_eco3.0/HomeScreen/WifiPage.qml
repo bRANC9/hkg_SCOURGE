@@ -45,11 +45,8 @@ Item {
                && AppHomeModel.sysPopupShowing)
 
     function open() {
-        if (atOtherApp) {
-            requested = false
-            visible = false
-            return
-        }
+        // A stale AppHomeModel.isAtOtherApp must not swallow the tap: the flag
+        // is only refreshed by code we replace.  Open, then re-check (below).
         openSerial++
         requested = true
         visible = true
@@ -70,10 +67,6 @@ Item {
     onVisibleChanged: {
         console.log("[WifiPage] visible=" + visible + " requested=" + requested
                     + " atOtherApp=" + atOtherApp + " serial=" + openSerial)
-        if (visible && atOtherApp) {
-            close()
-            return
-        }
         if (visible && !requested) {
             // Compatibility for a host that assigns .visible = true instead
             // of calling open().  Re-arm the page exactly once.
@@ -89,13 +82,22 @@ Item {
     }
 
     onRequestedChanged: {
-        if (requested && !atOtherApp && !visible)
+        if (requested && !visible)
             visible = true
         else if (!requested && visible)
             visible = false
     }
 
-    onAtOtherAppChanged: if (atOtherApp) close()
+    onAtOtherAppChanged: if (atOtherApp) autoClose()
+
+    // Auto-close events only count once the overlay has been up briefly.  The
+    // home screen we replaced is what maintained AppHomeModel's flags, so some
+    // of them are stale and fired a few hundred ms after open, shutting the
+    // page immediately.  Genuine navigation still closes it.
+    function autoClose() {
+        if (Date.now() - openedAt < 1200) return
+        close()
+    }
 
     // Steering-wheel Home/Star is a session-bus event; the daemon tails it
     // and bumps home_seq.  Any navigation or foreground change also closes
@@ -103,13 +105,13 @@ Item {
     // screen's own back affordance, not the steering-wheel key.
     Connections {
         target: (typeof AppHomeModel !== "undefined") ? AppHomeModel : null
-        onButtonBackClicked: root.close()
-        onSwitchToOtherApp: root.close()
-        onIsAtOtherAppChanged: if (AppHomeModel.isAtOtherApp) root.close()
-        onCurrentScreenChanged: root.close()
-        onCurrentHomeAdvancedPageIdxChanged: root.close()
-        onRequestHomeByPPChanged: if (AppHomeModel.requestHomeByPP) root.close()
-        onSysPopupShowingChanged: if (AppHomeModel.sysPopupShowing) root.close()
+        onButtonBackClicked: root.autoClose()
+        onSwitchToOtherApp: root.autoClose()
+        onIsAtOtherAppChanged: if (AppHomeModel.isAtOtherApp) root.autoClose()
+        onCurrentScreenChanged: root.autoClose()
+        onCurrentHomeAdvancedPageIdxChanged: root.autoClose()
+        onRequestHomeByPPChanged: if (AppHomeModel.requestHomeByPP) root.autoClose()
+        onSysPopupShowingChanged: if (AppHomeModel.sysPopupShowing) root.autoClose()
     }
 
     function acceptHome(d) {
@@ -551,6 +553,40 @@ Item {
                 selected: root.currentTab === 3
                 onClicked: root.currentTab = 3
             }
+            WifiButton {
+                width: 170
+                label: "Android Auto"
+                selected: root.currentTab === 4
+                onClicked: { root.currentTab = 4; root.aaCheck() }
+            }
+        }
+
+        // One action row for the whole page: importing from USB and saving the
+        // log bundle are page-level, not per-tab, and the three identical copies
+        // that used to live in Status/Client/CarPlay AP were the same POST.
+        Row {
+            x: 800
+            y: 104
+            spacing: 10
+
+            WifiButton {
+                width: 190
+                label: "Import USB"
+                buttonEnabled: root.serviceOk
+                onClicked: root.post("/import")
+            }
+            WifiButton {
+                width: 170
+                label: "Save logs"
+                buttonEnabled: root.serviceOk
+                onClicked: root.post("/logs/dump")
+            }
+            WifiButton {
+                width: 190
+                label: root.showKeypad ? "Hide keypad" : "Manual join"
+                buttonEnabled: true
+                onClicked: root.showKeypad = !root.showKeypad
+            }
         }
 
         // ================= STATUS ====================================
@@ -667,18 +703,7 @@ Item {
                     buttonEnabled: root.serviceOk
                     onClicked: root.post("/mode?value=carplay")
                 }
-                WifiButton {
-                    width: 220
-                    label: "Import USB"
-                    buttonEnabled: root.serviceOk
-                    onClicked: root.post("/import")
-                }
-                WifiButton {
-                    width: 200
-                    label: "Save logs"
-                    buttonEnabled: root.serviceOk
-                    onClicked: root.post("/logs/dump")
-                }
+                // Import USB / Save logs live in the shared action row above.
             }
 
             Rectangle {
@@ -904,12 +929,7 @@ Item {
                     buttonEnabled: root.serviceOk
                     onClicked: root.post("/client/disconnect")
                 }
-                WifiButton {
-                    width: 220
-                    label: "Import USB"
-                    buttonEnabled: root.serviceOk
-                    onClicked: root.post("/import")
-                }
+                // Import USB is in the shared action row above.
             }
 
             Rectangle {
@@ -938,35 +958,56 @@ Item {
                     clip: true
                     model: root.networks
                     delegate: Rectangle {
-                        width: 1120
-                        height: 44
-                        color: "transparent"
-                        QText {
-                            x: 8
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: 760
-                            text: modelData.ssid
-                            font.pixelSize: 24
-                            color: "#FFFFFF"
-                            elide: Text.ElideRight
-                        }
-                        QText {
-                            x: 780
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: 120
-                            text: modelData.security
-                            font.pixelSize: 22
-                            color: "#9A9A9A"
-                        }
-                        QText {
-                            x: 910
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: 180
-                            text: modelData.signal + " dBm"
-                            font.pixelSize: 22
-                            color: "#9A9A9A"
-                        }
-                    }
+                      width: 1120
+                      height: 44
+                      color: "transparent"
+                      QText {
+                          x: 8
+                          anchors.verticalCenter: parent.verticalCenter
+                          width: 520
+                          text: modelData.ssid
+                          font.pixelSize: 24
+                          color: "#FFFFFF"
+                          elide: Text.ElideRight
+                      }
+                      QText {
+                          x: 540
+                          anchors.verticalCenter: parent.verticalCenter
+                          width: 100
+                          text: modelData.security
+                          font.pixelSize: 22
+                          color: "#9A9A9A"
+                      }
+                      // Band and channel come from the scan frequency: the whole
+                      // point of listing networks is knowing which one is 5 GHz.
+                      QText {
+                          x: 650
+                          anchors.verticalCenter: parent.verticalCenter
+                          width: 92
+                          text: (modelData.band !== undefined && modelData.band !== "?")
+                                ? modelData.band + " GHz" : "\u2014"
+                          font.pixelSize: 22
+                          color: modelData.band === "5" ? "#4FC3F7" : "#9A9A9A"
+                      }
+                      QText {
+                          x: 748
+                          anchors.verticalCenter: parent.verticalCenter
+                          width: 86
+                          text: modelData.channel ? "ch " + modelData.channel : ""
+                          font.pixelSize: 22
+                          color: "#9A9A9A"
+                      }
+                      QText {
+                          x: 840
+                          anchors.verticalCenter: parent.verticalCenter
+                          width: 270
+                          text: (modelData.signal || 0) + " dBm"
+                                + "  " + ((modelData.signal || -99) >= -60 ? "strong"
+                                         : (modelData.signal || -99) >= -75 ? "ok" : "weak")
+                          font.pixelSize: 22
+                          color: (modelData.signal || -99) >= -70 ? "#8BC34A" : "#FFB300"
+                      }
+                  }
                 }
 
                 QText {
@@ -982,8 +1023,210 @@ Item {
             }
         }
 
-        // ================= CARPLAY ===================================
-        Item {
+        // ---- manual join (on-screen keyboard) ------------------------
+        // The head unit has no hardware keyboard, so the entry field and the
+          // keypad are the same widget: tap the field, then the keys.  The key
+          // is held in memory only for the POST and is never written to a file.
+          property string manualSsid: ""
+          property string manualPsk: ""
+          property string keyTarget: "ssid"
+          // Declared on the page root: the Manual join button and the overlay both
+          // bind to it.  Without the property the Item stayed visible for ever,
+          // and the keypad covered the page on the car (2026-11-23).
+          property bool shiftOn: false
+          property bool showKeypad: false
+
+          // ---- Android Auto readiness (same radio, second consumer) ------
+          property string aaVerdict: ""
+          property string aaApSsid: ""
+          property string aaApIp: ""
+          property bool aaApReady: false
+          property int aaBand: 0
+          property int aaChannel: 0
+          property bool aaBluez: false
+          property bool aaVbtd: false
+
+          function aaCheck() {
+              get("/aa/check", function(xhr) {
+                  if (xhr.status !== 200) return
+                  try {
+                      var d = JSON.parse(xhr.responseText)
+                      if (d.ap) {
+                          aaApReady = d.ap.ready === true
+                          aaApSsid = d.ap.ssid || ""
+                          aaApIp = d.ap.ip || ""
+                          aaBand = d.ap.band || 0
+                          aaChannel = d.ap.channel || 0
+                      }
+                      if (d.bt) { aaBluez = d.bt.bluez === true; aaVbtd = d.bt.vbtd === true }
+                      aaVerdict = d.verdict || ""
+                  } catch (e) {}
+              })
+          }
+
+
+          function keyAppend(c) {
+              if (keyTarget === "psk") {
+                if (manualPsk.length < 63) manualPsk += c
+            } else {
+                if (manualSsid.length < 32) manualSsid += c
+            }
+          }
+          function keyBackspace() {
+            if (keyTarget === "psk") manualPsk = manualPsk.substring(0, manualPsk.length - 1)
+            else manualSsid = manualSsid.substring(0, manualSsid.length - 1)
+          }
+          function manualJoin() {
+            if (manualSsid.length < 1) { root.message = "Type the network name first" ; return }
+            root.post("/client/pair?ssid=" + encodeURIComponent(manualSsid)
+                      + "&psk=" + encodeURIComponent(manualPsk))
+            manualPsk = ""
+          }
+
+          // An overlay, not a tab section: the Client tab is already full, and a
+          // keypad that covers the list while typing is what a phone does too.
+          Item {
+            x: 0
+            y: 170
+            width: 720
+            height: 440
+            z: 6
+            visible: root.showKeypad === true
+
+            Rectangle {
+                width: 1180
+                height: 60
+                radius: 12
+                color: "#1B1B1B"
+                QText {
+                    x: 16; anchors.verticalCenter: parent.verticalCenter
+                    text: "Network"; font.pixelSize: 22; color: "#9A9A9A"
+                }
+                Rectangle {
+                    x: 120; y: 10; width: 520; height: 40; radius: 8
+                    color: root.keyTarget === "ssid" ? "#263238" : "#161616"
+                    border.color: root.keyTarget === "ssid" ? "#4FC3F7" : "#333333"
+                    border.width: 2
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: root.keyTarget = "ssid"
+                    }
+                    QText {
+                        x: 10; anchors.verticalCenter: parent.verticalCenter
+                        width: 490
+                        text: root.manualSsid !== "" ? root.manualSsid : "tap to type the SSID"
+                        font.pixelSize: 24
+                        color: root.manualSsid !== "" ? "#FFFFFF" : "#666666"
+                        elide: Text.ElideRight
+                    }
+                }
+                QText {
+                    x: 660; anchors.verticalCenter: parent.verticalCenter
+                    text: "Key"; font.pixelSize: 22; color: "#9A9A9A"
+                }
+                Rectangle {
+                    x: 730; y: 10; width: 300; height: 40; radius: 8
+                    color: root.keyTarget === "psk" ? "#263238" : "#161616"
+                    border.color: root.keyTarget === "psk" ? "#4FC3F7" : "#333333"
+                    border.width: 2
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: root.keyTarget = "psk"
+                    }
+                    QText {
+                        x: 10; anchors.verticalCenter: parent.verticalCenter
+                        width: 270
+                        text: root.manualPsk !== ""
+                              ? new Array(root.manualPsk.length + 1).join("*")
+                              : "(open network if empty)"
+                        font.pixelSize: 24
+                        color: root.manualPsk !== "" ? "#FFFFFF" : "#666666"
+                        elide: Text.ElideRight
+                    }
+                }
+                WifiButton {
+                    x: 1040; y: 10; width: 130; height: 40
+                    label: "Join"
+                    buttonEnabled: root.serviceOk && root.manualSsid !== ""
+                    onClicked: root.manualJoin()
+                }
+            }
+
+            // QWERTY, three letter rows plus a control row.  Keys are plain
+            // rectangles: no focus widgets, so nothing can steal the touch.
+            // Nested Repeaters: the inner one must read the OUTER model's string
+              // through a property on the row delegate.  Using modelData inside
+              // the inner delegate drew the inner index instead of a character
+              // (the keypad showed 0 1 2 3 … on the car).
+              Repeater {
+                  model: ["1234567890.", "qwertyuiop_", "asdfghjkl-", "zxcvbnm"]
+                  delegate: Row {
+                      property string keyRow: modelData
+                      x: 0
+                      y: 72 + index * 52
+                      spacing: 6
+                      Repeater {
+                          model: keyRow.length
+                          delegate: Rectangle {
+                              property string keyChar: keyRow.charAt(index)
+                              width: 60
+                              height: 46
+                              radius: 8
+                            color: "#232323"
+                            QText {
+                                anchors.centerIn: parent
+                                text: root.shiftOn ? keyChar.toUpperCase() : keyChar
+                                  font.pixelSize: 24
+                                  color: "#FFFFFF"
+                              }
+                              MouseArea {
+                                anchors.fill: parent
+                                  onClicked: root.keyAppend(root.shiftOn ? keyChar.toUpperCase() : keyChar)
+                              }
+                          }
+                      }
+                  }
+            }
+
+            Row {
+                x: 0
+                y: 300
+                spacing: 6
+                Rectangle {
+                    width: 150; height: 46; radius: 8
+                    color: root.shiftOn ? "#0E5C8A" : "#232323"
+                    QText { anchors.centerIn: parent; text: "Shift"; font.pixelSize: 22; color: "#FFFFFF" }
+                    MouseArea { anchors.fill: parent; onClicked: root.shiftOn = !root.shiftOn }
+                }
+                Rectangle {
+                    width: 200; height: 46; radius: 8; color: "#232323"
+                    QText { anchors.centerIn: parent; text: "Space"; font.pixelSize: 22; color: "#FFFFFF" }
+                    MouseArea { anchors.fill: parent; onClicked: root.keyAppend(" ") }
+                }
+                Rectangle {
+                    width: 160; height: 46; radius: 8; color: "#232323"
+                    QText { anchors.centerIn: parent; text: "Delete"; font.pixelSize: 22; color: "#FFFFFF" }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: root.keyBackspace()
+                        onPressAndHold: { root.manualPsk = ""; root.manualSsid = "" }
+                    }
+                }
+                QText {
+                    x: 540; anchors.verticalCenter: parent.verticalCenter
+                    width: 620
+                    text: root.keyTarget === "psk"
+                          ? "Typing: key (8-63 characters, or the 64 hex digits)"
+                          : "Typing: network name (1-32 bytes)"
+                    font.pixelSize: 20
+                    color: "#7A7A7A"
+                    elide: Text.ElideRight
+                }
+            }
+          }
+
+          // ================= CARPLAY ===================================
+          Item {
             id: carplayTab
             x: 0
             y: 170
@@ -1133,12 +1376,7 @@ Item {
                     buttonEnabled: root.serviceOk
                     onClicked: root.post("/carplay/stop")
                 }
-                WifiButton {
-                    width: 210
-                    label: "Import USB"
-                    buttonEnabled: root.serviceOk
-                    onClicked: root.post("/import")
-                }
+                // Import USB is in the shared action row above.
             }
 
             QText {
@@ -1468,6 +1706,124 @@ Item {
             }
         }
     }
+
+        // ================= ANDROID AUTO ==============================
+        // Same radio, second consumer: wireless AA needs the 5 GHz AP + DHCP we
+        // already own, plus a Bluetooth RFCOMM bootstrap this unit cannot do (no
+        // BlueZ, only the vendor vbtd).  The tab starts the neutral AP and shows
+        // the measured verdict, so both can be tested from one screen.
+        Item {
+            id: aaTab
+            x: 0
+            y: 170
+            width: 1180
+            height: 450
+            visible: root.currentTab === 4
+
+            Rectangle {
+                x: 0
+                y: 0
+                width: 570
+                height: 250
+                radius: 14
+                color: "#1B1B1B"
+                border.color: "#333333"
+                border.width: 1
+
+                QText {
+                    x: 24; y: 18
+                    text: "Android Auto access point"
+                    font.pixelSize: 24; color: "#FFFFFF"
+                }
+                QText {
+                    x: 24; y: 60
+                    width: 520
+                    text: "Ready: " + (root.aaApReady ? "yes" : "no")
+                          + "   ·   SSID: " + (root.aaApSsid !== "" ? root.aaApSsid : "—")
+                    font.pixelSize: 21; color: "#B0B0B0"
+                    elide: Text.ElideRight
+                }
+                QText {
+                    x: 24; y: 92
+                    width: 520
+                    text: "Band: " + (root.aaBand === 2 ? "5 GHz" : root.aaBand === 1 ? "2.4 GHz" : "—")
+                          + "   ·   ch " + (root.aaChannel > 0 ? root.aaChannel : "—")
+                          + "   ·   IP: " + (root.aaApIp !== "" ? root.aaApIp : "—")
+                    font.pixelSize: 21; color: "#B0B0B0"
+                    elide: Text.ElideRight
+                }
+                QText {
+                    x: 24; y: 124
+                    width: 520
+                    text: "Bluetooth: BlueZ " + (root.aaBluez ? "present" : "absent")
+                          + "   ·   vendor vbtd " + (root.aaVbtd ? "running" : "stopped")
+                    font.pixelSize: 21
+                    color: root.aaBluez ? "#8BC34A" : "#FFB300"
+                    elide: Text.ElideRight
+                }
+
+                Row {
+                    x: 24; y: 164
+                    spacing: 10
+                    WifiButton {
+                        width: 200
+                        label: root.aaApReady ? "Restart AA AP" : "Start AA AP"
+                        buttonEnabled: root.serviceOk
+                        onClicked: {
+                            root.post("/ap/start?ssid=SCOURGE-AA&channel=36")
+                            root.aaCheck()
+                        }
+                    }
+                    WifiButton {
+                        width: 140
+                        label: "Stop AP"
+                        buttonEnabled: root.serviceOk
+                        onClicked: { root.post("/carplay/stop"); root.aaCheck() }
+                    }
+                    WifiButton {
+                        width: 140
+                        label: "Re-check"
+                        buttonEnabled: true
+                        onClicked: root.aaCheck()
+                    }
+                }
+            }
+
+            Rectangle {
+                x: 610
+                y: 0
+                width: 570
+                height: 250
+                radius: 14
+                color: "#1B1B1B"
+                border.color: "#333333"
+                border.width: 1
+
+                QText {
+                    x: 24; y: 18
+                    text: "Verdict"
+                    font.pixelSize: 24; color: "#FFFFFF"
+                }
+                QText {
+                    x: 24; y: 60
+                    width: 520
+                    text: root.aaVerdict !== "" ? root.aaVerdict : "press Re-check"
+                    font.pixelSize: 21
+                    color: root.aaVerdict === "aa-wireless-possible" ? "#8BC34A"
+                           : root.aaVerdict === "" ? "#7A7A7A" : "#FFB300"
+                    wrapMode: Text.WordWrap
+                }
+                QText {
+                    x: 24; y: 120
+                    width: 520
+                    text: "Without BlueZ the RFCOMM bootstrap cannot run on this unit, so "
+                          + "wireless AA needs the bridge board (docs/18 route B). The AP "
+                          + "half is still the useful test: it is what the phone would join."
+                    font.pixelSize: 19; color: "#7A7A7A"
+                    wrapMode: Text.WordWrap
+                }
+            }
+        }
 
     ListModel { id: consoleModel }
 

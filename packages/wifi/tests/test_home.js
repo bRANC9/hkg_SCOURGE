@@ -43,7 +43,11 @@ for (const width of [1280, 1920]) {
   if (width >= 1700) assert(exitX + 170 < width - 436);
 }
 assert.match(qml, /id: closeButton\s+objectName: "wifiExit"\s+z: 10/);
-assert.match(qml, /onSysPopupShowingChanged: if \(AppHomeModel.sysPopupShowing\) root.close\(\)/);
+// Auto-close handlers go through autoClose(): the replaced home screen leaves
+// AppHomeModel flags stale, and the raw close() shut the page a few hundred ms
+// after open (2026-11-22, "a wifi app pár pillanat után bezáródik").
+assert.match(qml, /function autoClose\(\)/);
+assert.match(qml, /onSysPopupShowingChanged: if \(AppHomeModel.sysPopupShowing\) root.autoClose\(\)/);
 let requests = 0;
 function XHR() {
   this.open = (method, url) => { this.url = url; };

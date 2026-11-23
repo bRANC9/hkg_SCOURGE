@@ -1510,15 +1510,57 @@ static void stop_wpa_supplicant(void)
 
 static void ensure_wpa_conf(void)
 {
-    /* Deliberately no network blocks: association is driven by ConnMan or
-     * wpa_cli.  The OEM /etc/wpa_supplicant.conf has key_mgmt=NONE, which
-     * makes the supplicant auto-associate to any open network. */
-    if (!file_exists(WPA_CONF))
-        write_file_atomic(WPA_CONF,
-                          "ctrl_interface=/var/run/wpa_supplicant\n"
-                          "ctrl_interface_group=0\n"
-                          "update_config=0\n"
-                          "ap_scan=1\n", 0644);
+    /* The supplicant is our association owner (ConnMan has no wifi technology
+     * here: supplicantmanager is masked, so `connmanctl technologies` lists
+     * cellular only).  That means the network blocks have to live in this file,
+     * rendered from the same config the UI edits.  Rewrite only when the content
+     * changes: a needless write makes the supplicant reload and drop the link. */
+    char want[4096] = "";
+    size_t at = (size_t)0;
+    int n = snprintf(want, sizeof(want),
+                     "# SCOURGE generated - do not edit\n"
+                     "ctrl_interface=/var/run/wpa_supplicant\n"
+                     "ctrl_interface_group=0\n"
+                     "update_config=0\n"
+                     "ap_scan=1\n");
+    if (n < 0) return;
+    at = (size_t)n;
+    /* Client mode: ConnMan owns the networks (it adds them through D-Bus), so the
+     * file must NOT carry network blocks - a network here fights its service and
+     * ConnMan answers with Interface.Disconnect. */
+    for (int i = 0; g_cfg.mode != MODE_CLIENT && i < net_total() && at + 320 < sizeof(want); i++) {
+        const char *ssid = net_ssid(i);
+        const char *psk = net_psk(i);
+        if (!ssid[0]) continue;
+        bool hex = strlen(psk) == 64;
+        for (const char *p = psk; hex && *p; p++)
+            if (!isxdigit((unsigned char)*p)) hex = false;
+        char esc[256];
+        size_t e = 0;
+        for (const char *p = ssid; *p && e + 3 < sizeof(esc); p++) {
+            if (*p == '"' || *p == '\\') esc[e++] = '\\';
+            esc[e++] = *p;
+        }
+        esc[e] = 0;
+        if (!psk[0])
+            n = snprintf(want + at, sizeof(want) - at,
+                         "network={\n\tssid=\"%s\"\n\tkey_mgmt=NONE\n\tpriority=%d\n}\n",
+                         esc, 10 - i);
+        else if (hex)
+            n = snprintf(want + at, sizeof(want) - at,
+                         "network={\n\tssid=\"%s\"\n\tpsk=%s\n\tkey_mgmt=WPA-PSK\n\tpriority=%d\n}\n",
+                         esc, psk, 10 - i);
+        else
+            n = snprintf(want + at, sizeof(want) - at,
+                         "network={\n\tssid=\"%s\"\n\tpsk=\"%s\"\n\tkey_mgmt=WPA-PSK\n\tpriority=%d\n}\n",
+                         esc, psk, 10 - i);
+        if (n < 0) break;
+        at += (size_t)n;
+    }
+    char cur[4096] = "";
+    read_file(WPA_CONF, cur, sizeof(cur));
+    if (strcmp(cur, want) != 0)
+        write_file_atomic(WPA_CONF, want, 0600);
 }
 
 static bool start_wpa_supplicant_args(const char *driver)
@@ -1556,12 +1598,28 @@ static bool start_wpa_supplicant_args(const char *driver)
         dup2(nul, STDIN_FILENO); dup2(log, STDOUT_FILENO); dup2(log, STDERR_FILENO);
         close(log); close(nul);
         char drv[64]; snprintf(drv, sizeof(drv), "-D%s", driver ? driver : "");
-        if (driver && *driver)
-            execl("/usr/sbin/wpa_supplicant", "wpa_supplicant", "-u", drv,
-                  "-iwlan0", "-c" WPA_CONF, "-O" WPA_CTRL_DIR, (char *)NULL);
-        else
-            execl("/usr/sbin/wpa_supplicant", "wpa_supplicant", "-u",
-                  "-iwlan0", "-c" WPA_CONF, "-O" WPA_CTRL_DIR, (char *)NULL);
+        /* -u ONLY in client mode.  There it is the whole point: ConnMan finds the
+         * supplicant on D-Bus, powers the wifi technology through it and runs its
+         * built-in DHCP - the vendor model, and the only way this unit gets a
+         * lease (there is no udhcpc/dhcpcd/dhclient on it at all).  In AP mode we
+         * keep the D-Bus handle out: ConnMan would otherwise grab the AP
+         * interface and disconnect it. */
+        const char *dbusarg = (g_cfg.mode == MODE_CLIENT) ? "-u" : NULL;
+        if (driver && *driver) {
+            if (dbusarg)
+                execl("/usr/sbin/wpa_supplicant", "wpa_supplicant", dbusarg, drv,
+                      "-iwlan0", "-c" WPA_CONF, "-O" WPA_CTRL_DIR, (char *)NULL);
+            else
+                execl("/usr/sbin/wpa_supplicant", "wpa_supplicant", drv,
+                      "-iwlan0", "-c" WPA_CONF, "-O" WPA_CTRL_DIR, (char *)NULL);
+        } else {
+            if (dbusarg)
+                execl("/usr/sbin/wpa_supplicant", "wpa_supplicant", dbusarg,
+                      "-iwlan0", "-c" WPA_CONF, "-O" WPA_CTRL_DIR, (char *)NULL);
+            else
+                execl("/usr/sbin/wpa_supplicant", "wpa_supplicant",
+                      "-iwlan0", "-c" WPA_CONF, "-O" WPA_CTRL_DIR, (char *)NULL);
+        }
         _exit(127);
     }
     char pidbuf[64]; snprintf(pidbuf, sizeof(pidbuf), "%d\n", (int)pid);
@@ -1653,10 +1711,49 @@ static int wifi_power_state(void)
     return -1;
 }
 
-static bool wifi_powered(void) { return wifi_power_state() == 1; }
-
 /* Load the driver, evict the OEM manager, and leave a supplicant under our
  * control.  Used by scan, client connect and CarPlay AP start. */
+/* Client mode: ConnMan owns association and DHCP (client_connman_agent feeds it
+ * the PSK), so our own supplicant must NOT run.  Two supplicants on one
+ * interface is exactly what the unit showed: ConnMan's plugin disconnects the
+ * foreign one ("[ Disconnect ] wpas_dbus_handler_disconnect", locally_generated)
+ * while ours leaves its control socket dead, so the next status read sees no
+ * association and the watchdog re-applies in a loop.  Load the driver, unblock
+ * the radio, hand the technology to ConnMan and stop there. */
+static bool ensure_station_ready(void)
+{
+    if (!iface_present() && !load_driver()) {
+        set_msg("bcmdhd/wlan0 not available");
+        return false;
+    }
+    sh("rfkill unblock all 2>/dev/null");
+    if (g_cfg.mode == MODE_CLIENT) {
+        /* Client mode belongs to the vendor pair: ConnMan powers the wifi
+         * technology, associates through the supplicant supplicantmanager gives
+         * it, and runs its own DHCP.  Never stop that manager here - doing so
+         * removed ConnMan's supplicant and the radio never associated at all. */
+        if (!ensure_connman())
+            log_msg("connman not active; continuing");
+        /* Unmask as well as start: the installer may have masked the pair before
+         * the mode was known, and a masked unit cannot be started. */
+        sh("systemctl unmask supplicantmanager.path supplicantmanager.service 2>/dev/null");
+        sh("systemctl daemon-reload 2>/dev/null");
+        /* Bring up OUR supplicant with -u so ConnMan can adopt it: with the OEM
+         * manager masked even after unmask attempts, this is the only supplicant
+         * ConnMan will ever see. */
+        iface_up();
+        start_wpa_supplicant_args("nl80211,wext");
+        sh("connmanctl enable wifi 2>/dev/null");
+        return true;
+    }
+    stop_oem_wifi();
+    if (!ensure_connman())
+        log_msg("connman not active; continuing");
+    iface_up();
+    sh("connmanctl enable wifi 2>/dev/null");
+    return true;
+}
+
 static bool ensure_wifi_ready(void)
 {
     if (!iface_present() && !load_driver()) {
@@ -1664,20 +1761,50 @@ static bool ensure_wifi_ready(void)
         return false;
     }
     sh("rfkill unblock all 2>/dev/null");
+    if (g_cfg.mode == MODE_CLIENT) {
+        /* Same rule as ensure_wifi_ready(): in client mode the vendor manager
+         * stays alive, because ConnMan needs it for the technology. */
+        if (!ensure_connman())
+            log_msg("connman not active; continuing");
+        /* Unmask as well as start: the installer may have masked the pair before
+         * the mode was known, and a masked unit cannot be started. */
+        sh("systemctl unmask supplicantmanager.path supplicantmanager.service 2>/dev/null");
+        sh("systemctl daemon-reload 2>/dev/null");
+        sh("systemctl start supplicantmanager.path 2>/dev/null");
+        sh("systemctl start supplicantmanager.service 2>/dev/null");
+        iface_up();
+        sh("connmanctl enable wifi 2>/dev/null");
+        return true;
+    }
     stop_oem_wifi();
     if (!ensure_connman())
         log_msg("connman not active; continuing");
     iface_up();
     if (!ensure_wpa_supplicant())
         return false;
+    /* ConnMan has no wifi technology on this unit (the OEM supplicantmanager is
+     * masked, so `connmanctl technologies` lists cellular only): waiting for
+     * Powered=True could only ever time out, which is the "WiFi technology did
+     * not power on" loop the UI showed.  The radio being up and our supplicant
+     * answering is what this function has to guarantee. */
     sh("connmanctl enable wifi 2>/dev/null");
-    for (int i = 0; i < 20; i++) {
-        if (wifi_powered()) return true;
-        usleep(250000);
+    int st = wifi_power_state();
+    if (st == 1) {
+        sh("wpa_cli -p " WPA_CTRL_DIR " -i wlan0 reconfigure >/dev/null 2>&1");
+        return wpa_ping();
     }
-    log_msg("wifi technology not powered after enable");
-    set_msg("WiFi technology did not power on");
-    return false;
+    if (st == 0) {
+        /* The technology exists and ConnMan refuses to power it: a real failure. */
+        set_msg("WiFi technology did not power on");
+        return false;
+    }
+    /* st == -1: there is no wifi technology at all on this unit (the OEM
+     * supplicantmanager is masked and ConnMan never creates one).  Waiting for
+     * Powered=True here could only time out - that was the "WiFi technology did
+     * not power on" loop.  The radio being up and our supplicant answering is
+     * what this function can require. */
+    log_msg("connman reports no wifi technology; continuing on the supplicant alone");
+    return wpa_ping();
 }
 
 static bool decode_control_ssid(char *out, size_t n, const char *value)
@@ -1844,6 +1971,15 @@ static void ap_evidence(const char *stage, const ap_probe_t *p)
 
 /* Call only for an explicit stop or after actual absence, never as a
  * response to Tethering=False on an otherwise working AP. */
+/* True when wlan0 reports a managed station: no AP is running on it.  Used as
+ * the teardown proof when ConnMan, which used to own `tether wifi off`, has no
+ * wifi technology at all on this unit. */
+static bool iw_type_managed(void)
+{
+    char info[2048];
+    return sh_out(info, sizeof(info), "iw dev wlan0 info 2>/dev/null") == 0 &&
+           strstr(info, "type managed") != NULL;
+}
 static bool ap_disable(bool explicit_stop)
 {
     if (!explicit_stop) {
@@ -1854,13 +1990,37 @@ static bool ap_disable(bool explicit_stop)
             return false;
         }
     }
+    /* No AP running and wlan0 already a managed station?  Then the interface
+     * bounce below must be skipped: it dropped the association on every apply -
+     * the link came up between watchdog ticks and was killed again before it
+     * could take a lease.  The tether call stays: it is what tells ConnMan to
+     * stop offering an AP, and skipping it used to break the AP contract. */
+    bool already_ok = false;
+    {
+        ap_probe_t quick;
+        ap_probe(&quick);
+        already_ok = (quick.state == AP_ABSENT && iw_type_managed());
+    }
     int rc = sh("connmanctl tether wifi off 2>/dev/null");
+    /* Our own teardown: with no ConnMan wifi technology, `tether wifi off` is a
+     * no-op, so the AP stayed up and client mode reported "AP teardown not
+     * confirmed".  Stop the AP daemons and bounce the interface - but only when
+     * an AP is actually present (see the fast path above). */
+    if (!already_ok) {
+        sh("killall hostapd dnsmasq 2>/dev/null");
+        sh("ip link set wlan0 down 2>/dev/null");
+        usleep(700000);
+        sh("ip link set wlan0 up 2>/dev/null");
+    }
     int absent = 0;
     int64_t deadline = now_ms() + 6000;
     ap_probe_t p;
     for (int i = 0; i < 14 && !g_stop && now_ms() < deadline; i++) {
         ap_probe(&p);
-        if (p.state == AP_ABSENT) {
+        /* Proof of absence: the AP probe says gone, or the interface is a
+         * managed station again.  ConnMan owns nothing here, so its tether
+         * command cannot be the only evidence. */
+        if (p.state == AP_ABSENT || iw_type_managed()) {
             if (++absent >= 2) return true;
         } else absent = 0;
         usleep(500000);
@@ -2860,9 +3020,123 @@ static void write_status(void);
 /* In client mode an address alone is not proof of connection: a leftover AP
  * address (10.42.0.1) or another interface's address must not count.  Require
  * an actual 4-way-handshake-complete association via the supplicant. */
+/* Nobody hands us a lease: ConnMan has no wifi technology here.  busybox
+ * udhcpc needs a script to apply the result, so generate one next to the
+ * config and try the other clients before giving up. */
+static bool dhcp_acquire(void)
+{
+    char ip[64];
+    if (wlan_ip(ip, sizeof(ip))) return true;
+    /* /tmp, not /rw_data: a script in /rw_data needs the right SMACK exec label
+     * and busybox udhcpc refuses to run it otherwise (silent, exit 1). */
+    write_file_atomic("/tmp/scourge-udhcpc.sh",
+                      "#!/bin/sh\n"
+                      "case \"$1\" in\n"
+                      "  bound|renew)\n"
+                        "    ip addr flush dev \"$interface\" 2>/dev/null || ifconfig \"$interface\" 0.0.0.0\n"
+                      "    ip addr add \"$ip/$mask\" dev \"$interface\" 2>/dev/null || ifconfig \"$interface\" \"$ip\" netmask \"$mask\"\n"
+                      "    [ -n \"$router\" ] && { ip route replace default via \"${router%% *}\" dev \"$interface\" 2>/dev/null || route add default gw \"${router%% *}\" dev \"$interface\"; }\n"
+                      "    ;;\n"
+                      "esac\n", 0755);
+    chmod("/tmp/scourge-udhcpc.sh", 0755);
+    static const char *tools[] = {
+        "udhcpc -i wlan0 -s /tmp/scourge-udhcpc.sh -q -n -t 5 -T 3",
+        "busybox udhcpc -i wlan0 -s /tmp/scourge-udhcpc.sh -q -n -t 5 -T 3",
+        "dhcpcd -4 -t 10 -1 wlan0",
+        "dhclient -1 -4 wlan0",
+    };
+    {
+        char have[256], tmp[512];
+        int rc0 = sh_out(tmp, sizeof(tmp), "command -v udhcpc dhcpcd dhclient busybox 2>&1");
+        snprintf(have, sizeof(have), "%s", tmp);
+        for (char *p = have; *p; p++) if (*p == '\n') *p = ' ';
+        log_msg("dhcp: clients rc=%d %s", rc0, have);
+    }
+    for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
+        int rc = sh("%s >/tmp/dhcp.log 2>&1", tools[i]);
+        if (wlan_ip(ip, sizeof(ip))) {
+            log_msg("dhcp: wlan0 lease %s via %s", ip, tools[i]);
+            return true;
+        }
+        char tail[200];
+        log_tail("/tmp/dhcp.log", tail, sizeof(tail));
+        log_msg("dhcp: %s failed rc=%d %s", tools[i], rc, tail);
+    }
+    /* Last resort: a static address from config.conf (static_ip, optionally
+     * static_gw).  This build has no dhcpcd at all, so without it the unit can
+     * associate and still be unreachable. */
+    /* Plain files, not config keys: the daemon REWRITES config.conf from its own
+     * struct on every save, which silently dropped static_ip/static_gw before
+     * they could ever be applied. */
+    char ipcfg[64] = "", gw[64] = "";
+    read_file(APP_DIR "/static_ip", ipcfg, sizeof(ipcfg));
+    read_file(APP_DIR "/static_gw", gw, sizeof(gw));
+    char *tp;
+    for (tp = ipcfg; *tp && *tp != ' ' && *tp != '\n' && *tp != '\r'; tp++) ;
+    *tp = 0;
+    for (tp = gw; *tp && *tp != ' ' && *tp != '\n' && *tp != '\r'; tp++) ;
+    *tp = 0;
+    if (ipcfg[0] && strchr(ipcfg, '/')) {
+        sh("ip addr flush dev wlan0 2>/dev/null");
+        int rc2 = sh("ip addr add %s dev wlan0", ipcfg);
+        if (rc2 == 0 && gw[0]) sh("ip route replace default via %s dev wlan0", gw);
+        if (wlan_ip(ip, sizeof(ip))) {
+            log_msg("dhcp: static wlan0 address %s (gw=%s)", ipcfg, gw[0] ? gw : "none");
+            return true;
+        }
+        log_msg("dhcp: static %s failed rc=%d", ipcfg, rc2);
+    }
+    log_msg("dhcp: no lease on wlan0 (tools present: see daemon.log)");
+    return false;
+}
+
+/* Radio-level truth: `iw dev wlan0 link` reports the association even when our
+ * supplicant is not the owner of the link.  On this unit that happened - the
+ * status showed ssid/signal while wpa_state stayed DISCONNECTED - which made
+ * the daemon believe none of the configured networks were visible and tear the
+ * link down again and again. */
+static bool iw_link_ssid(char *out, size_t n)
+{
+    char buf[4096];
+    if (sh_out(buf, sizeof(buf), "iw dev wlan0 link 2>/dev/null") != 0) return false;
+    const char *p = strstr(buf, "SSID: ");
+    if (!p) return false;
+    p += 6;
+    size_t i = 0;
+    while (*p && *p != '\n' && i + 1 < n) out[i++] = *p++;
+    out[i] = 0;
+    while (i > 0 && (out[i - 1] == ' ' || out[i - 1] == '\r')) out[--i] = 0;
+    return i > 0;
+}
+
+/* SSID compare that tolerates the whitespace an imported wifi.txt can carry:
+ * the association was up ("iw dev wlan0 link" showed SSID Franci_wifi) while
+ * the daemon insisted none of the configured networks was visible, because the
+ * configured value had a trailing space/CR. */
+static bool ssid_same(const char *a, const char *b)
+{
+    while (*a == ' ' || *a == '\t') a++;
+    while (*b == ' ' || *b == '\t') b++;
+    size_t la = strlen(a), lb = strlen(b);
+    while (la && (a[la - 1] == ' ' || a[la - 1] == '\t' || a[la - 1] == '\r')) la--;
+    while (lb && (b[lb - 1] == ' ' || b[lb - 1] == '\t' || b[lb - 1] == '\r')) lb--;
+    return la == lb && la > 0 && !memcmp(a, b, la);
+}
+
+static bool iw_link_any_configured(void)
+{
+    char ssid[160];
+    if (!iw_link_ssid(ssid, sizeof(ssid))) return false;
+    for (int i = 0; i < WIFI_NETS_MAX; i++)
+        if (net_ssid(i)[0] && ssid_same(ssid, net_ssid(i))) return true;
+    return false;
+}
+
 static bool client_associated(void)
 {
-    return wpa_state_completed();
+    /* The supplicant state alone is not authoritative: another owner can hold
+     * the link while our control socket reports DISCONNECTED. */
+    return wpa_state_completed() || iw_link_any_configured();
 }
 
 static bool client_service_ready(const char *service, const char *ip)
@@ -3023,7 +3297,25 @@ static bool client_connect(void)
             return false;
         }
     }
-    if (!ensure_wifi_ready()) {
+    /* Already associated? Then leave the link alone and just take an address.
+     * The teardown path below bounces wlan0 and would drop a working link - that
+     * is what kept the association flapping every watchdog tick. */
+    {
+        char ip[64] = "";
+        if (client_associated()) {
+            if (wlan_ip(ip, sizeof(ip))) {
+                set_msg("client connected to '%s' (%s)", net_ssid(g_client_net), ip);
+                return true;
+            }
+            if (dhcp_acquire()) {
+                wlan_ip(ip, sizeof(ip));
+                set_msg("client connected to '%s' (%s)", net_ssid(g_client_net), ip);
+                return true;
+            }
+            log_msg("client: link is up but no address yet; continuing without teardown");
+        }
+    }
+    if (!ensure_station_ready()) {
         set_msg("client: WiFi stack not ready");
         return false;
     }
@@ -3047,8 +3339,40 @@ static bool client_connect(void)
     char service[256];
     bool found = client_connman_find(service, sizeof(service));
     if (!found) {
-        set_msg("client: none of the %d configured network%s visible; hidden-network provisioning is not supported",
-                net_total(), net_total() == 1 ? "" : "s");
+        /* No ConnMan wifi technology on this unit: the profiles live in our own
+         * supplicant config (ensure_wpa_conf), so wait for the association there
+         * and take the lease ourselves. */
+        bool assoc = false;
+        for (int i = 0; i < 120 && !g_stop; i++) {
+            if (client_associated()) { assoc = true; break; }
+            usleep(500000);
+        }
+        /* The link can appear at the very end of the wait (the log shows the
+         * SSIDs matching only then), so re-check the radio instead of trusting
+         * the loop result. */
+        if ((assoc || iw_link_any_configured()) && dhcp_acquire()) {
+            char ip[64] = "";
+            wlan_ip(ip, sizeof(ip));
+            set_msg("client connected to '%s' (%s)", net_ssid(g_client_net), ip);
+            return true;
+        }
+        /* Say what the radio actually sees, so the mismatch is readable from the
+         * log instead of guessed. */
+        {
+            char live[160] = "";
+            if (iw_link_ssid(live, sizeof(live)) && live[0])
+                log_msg("client: iw link SSID '%s' vs configured '%s' (match=%d)",
+                        live, net_ssid(0), ssid_same(live, net_ssid(0)));
+            else
+                log_msg("client: no iw link and no supplicant completion; configured '%s'",
+                        net_ssid(0));
+        }
+        if (iw_link_any_configured())
+            set_msg("client: associated to '%s' but no address (no DHCP client on this unit; set static_ip)",
+                    net_ssid(g_client_net));
+        else
+            set_msg("client: none of the %d configured network%s visible; hidden-network provisioning is not supported",
+                    net_total(), net_total() == 1 ? "" : "s");
         return false;
     }
     if (client_associated() && client_wait_ip(service, 2)) return true;
@@ -3424,10 +3748,12 @@ static bool ssh_start(void)
         ready = p.state == AP_READY;
         if (ready) str_copy(ip, sizeof(ip), p.ip);
     } else if (g_cfg.wlan_on && g_cfg.mode == MODE_CLIENT && client_associated() && wlan_ip(ip, sizeof(ip))) {
-        char services[16384], service[256];
-        ready = sh_out(services, sizeof(services), "connmanctl services 2>/dev/null") == 0 &&
-                find_connected_service(services, service, sizeof(service)) &&
-                client_service_ready(service, ip);
+        /* An associated link with an IPv4 address IS the ready state here.
+         * The old extra check demanded that ConnMan report the service ready -
+         * but this unit has no wifi technology at all (supplicantmanager is
+         * masked), so its service list never contains our network and SSH stayed
+         * deferred forever with "requested WLAN role/address not ready". */
+        ready = true;
     }
     if (!ready) {
         ssh_stop();
@@ -4203,6 +4529,20 @@ static void write_status(void)
 
 static void write_status(void);
 
+/* 2.4/5 GHz split and the channel number, both from a scan frequency in MHz:
+ * this is the only place the UI's band label can come from. */
+static const char *band_label(int freq)
+{
+    return freq >= 5000 ? "5" : (freq >= 2400 ? "2.4" : "?");
+}
+
+static int band_channel(int freq)
+{
+    return freq >= 5000 ? (freq - 5000) / 5 : (freq > 2407 ? (freq - 2407) / 5 : 0);
+}
+
+static void write_status(void);
+
 static void scan_networks(char *out, size_t n)
 {
     if (radio_begin("wifi_daemon", true) != 1) {
@@ -4281,6 +4621,12 @@ static void scan_networks(char *out, size_t n)
             const char *ssid = fields[4];
             if (!ssid[0]) continue;
             int sig = atoi(fields[2]);
+            /* The list is what the UI shows, so carry the band facts with it:
+             * scan_results gives the frequency in MHz, and that is the only
+             * place the 2.4/5 GHz split can come from. */
+            int freq = atoi(fields[1]);
+            const char *band = band_label(freq);
+            int chan = band_channel(freq);
             const char *flags = fields[3];
             const char *sec = strstr(flags, "WPA2") ? "WPA2" :
                               strstr(flags, "WPA") ? "WPA" :
@@ -4290,8 +4636,9 @@ static void scan_networks(char *out, size_t n)
             json_escape(sec_e, sizeof(sec_e), sec);
             if (count) used += (size_t)snprintf(out + used, n - used, ",");
             used += (size_t)snprintf(out + used, n - used,
-                                     "{\"ssid\":\"%s\",\"signal\":%d,\"security\":\"%s\"}",
-                                     ssid_e, sig, sec_e);
+                                     "{\"ssid\":\"%s\",\"signal\":%d,\"security\":\"%s\","
+                                     "\"freq\":%d,\"band\":\"%s\",\"channel\":%d}",
+                                     ssid_e, sig, sec_e, freq, band, chan);
             count++;
             if (used > n - 512) break;
         }
@@ -4325,7 +4672,8 @@ static void scan_networks(char *out, size_t n)
                 json_escape(ssid_e, sizeof(ssid_e), ssid);
                 if (count) used += (size_t)snprintf(out + used, n - used, ",");
                 used += (size_t)snprintf(out + used, n - used,
-                                         "{\"ssid\":\"%s\",\"signal\":0,\"security\":\"?\"}",
+                                         "{\"ssid\":\"%s\",\"signal\":0,\"security\":\"?\","
+                                         "\"freq\":0,\"band\":\"?\",\"channel\":0}",
                                          ssid_e);
                 *end = saved;
                 count++;
@@ -4885,6 +5233,124 @@ static void http_handle(int fd)
             snprintf(body, sizeof(body), "{\"ok\":true,\"wlan_on\":%s}\n",
                      g_cfg.wlan_on ? "true" : "false");
         }
+    } else if (!strcmp(method, "GET") && !strcmp(path, "/aa/check")) {
+        /* Android Auto readiness, measured rather than assumed.  Wireless AA
+         * needs a 5 GHz AP with DHCP (we can do that) AND a Bluetooth RFCOMM
+         * bootstrap (this unit has no BlueZ: only the vendor vbtd runs), so the
+         * verdict says which half is missing instead of guessing. */
+        ap_probe_t ap;
+        ap_probe(&ap);
+        char ap_ssid[96];
+        int tether = tethering_state(ap_ssid, sizeof(ap_ssid));
+        bool bluezd = sh("command -v bluetoothd >/dev/null 2>&1") == 0;
+        bool vbtd = sh("pidof vbtd >/dev/null 2>&1") == 0;
+        bool ap_ready = ap.state == AP_READY && tether == 1;
+        const char *verdict = bluezd ? (ap_ready ? "aa-wireless-possible"
+                                                  : "aa-wireless-needs-ap")
+                                     : "aa-wireless-blocked-no-bluez-bridge-required";
+        char ssid_e[192], ip_e[128], cp_e[192];
+        json_escape(ssid_e, sizeof(ssid_e), ap_ssid[0] ? ap_ssid : g_cfg.cp_ssid);
+        json_escape(ip_e, sizeof(ip_e), ap.ip);
+        json_escape(cp_e, sizeof(cp_e), g_cfg.cp_ssid);
+        snprintf(body, sizeof(body),
+                 "{\"ok\":true,\"ap\":{\"state\":%d,\"ready\":%s,\"ssid\":\"%s\",",
+                 (int)ap.state, ap_ready ? "true" : "false", ssid_e);
+        size_t used = strlen(body);
+        snprintf(body + used, sizeof(body) - used,
+                 "\"ip\":\"%s\",\"band\":%d,\"channel\":%d},\"bt\":{\"bluez\":%s,",
+                 ip_e, g_cfg.cp_band, g_cfg.cp_channel, bluezd ? "true" : "false");
+        used = strlen(body);
+        snprintf(body + used, sizeof(body) - used,
+                 "\"vbtd\":%s},\"configured_ssid\":\"%s\",\"verdict\":\"%s\"}\n",
+                 vbtd ? "true" : "false", cp_e, verdict);
+    } else if (!strcmp(method, "POST") && !strcmp(path, "/client/pair")) {
+        /* Manual join from the on-screen keyboard: the same validation the
+         * import path applies, so a typo cannot store a key that can never
+         * associate.  The passphrase is never logged and never echoed back. */
+        char ssid[64] = "", psk[128] = "";
+        bool ok = query_get(query, "ssid", ssid, sizeof(ssid));
+        query_get(query, "psk", psk, sizeof(psk));
+        size_t slen = strlen(ssid), plen = strlen(psk);
+        bool hexkey = plen == 64 && strspn(psk, "0123456789abcdefABCDEF") == 64;
+        if (!ok || slen < 1 || slen > 32) {
+            code = 400;
+            snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"SSID must be 1-32 bytes\"}\n");
+        } else if (plen && !hexkey && (plen < 8 || plen > 63)) {
+            code = 400;
+            snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"key must be 8-63 characters or 64 hex\"}\n");
+        } else {
+            int slot = -1;
+            for (int i = 0; i < WIFI_NETS_MAX; i++)
+                if (net_ssid(i)[0] && !strcmp(net_ssid(i), ssid)) { slot = i; break; }
+            if (slot < 0)
+                for (int i = 0; i < WIFI_NETS_MAX; i++)
+                    if (!net_ssid(i)[0]) { slot = i; break; }
+            if (slot < 0) {
+                code = 409;
+                snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"network list is full; remove one first\"}\n");
+            } else {
+                set_net_ssid(slot, ssid);
+                set_net_psk(slot, psk);
+                g_cfg.net_count = net_total();
+                if (slot == 0) { str_copy(g_cfg.ssid, sizeof(g_cfg.ssid), ssid);
+                                 str_copy(g_cfg.psk, sizeof(g_cfg.psk), psk); }
+                if (!config_save()) {
+                    code = 500;
+                    snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"cannot persist\"}\n");
+                } else {
+                    /* Our supplicant config carries these in AP mode; the client
+                     * owner is ConnMan, which reads the credential from the agent
+                     * flow, so nothing secret goes into a file here. */
+                    g_cfg.mode = MODE_CLIENT;
+                    g_cfg.wlan_on = true;
+                    apply_mode(false);
+                    log_msg("client: manual join requested for ssid slot %d (key %s)",
+                            slot, plen ? "set" : "open");
+                    snprintf(body, sizeof(body),
+                             "{\"ok\":true,\"slot\":%d,\"ssid\":\"%s\",\"key_set\":%s}\n",
+                            slot, ssid, plen ? "true" : "false");
+                }
+            }
+        }
+    } else if (!strcmp(method, "POST") && !strcmp(path, "/ap/start")) {
+        /* Neutral access point, not tied to CarPlay: Android Auto's wireless path
+         * needs exactly this (5 GHz AP + DHCP) and its bootstrap brings its own
+         * credentials, so the AP must be testable without the CarPlay label. */
+        char ssid[64] = "", psk[128] = "", ch[16] = "";
+        if (query_get(query, "ssid", ssid, sizeof(ssid)) && strlen(ssid) >= 1 &&
+            strlen(ssid) <= 32)
+            str_copy(g_cfg.cp_ssid, sizeof(g_cfg.cp_ssid), ssid);
+        if (query_get(query, "psk", psk, sizeof(psk)) && psk[0]) {
+            bool hexkey = strlen(psk) == 64 && strspn(psk, "0123456789abcdefABCDEF") == 64;
+            if (!hexkey && (strlen(psk) < 8 || strlen(psk) > 63)) {
+                code = 400;
+                snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"key must be 8-63 characters or 64 hex\"}\n");
+                goto ap_start_done2;
+            }
+            str_copy(g_cfg.cp_psk, sizeof(g_cfg.cp_psk), psk);
+        }
+        if (query_get(query, "channel", ch, sizeof(ch)) && atoi(ch) > 0) {
+            g_cfg.cp_channel = atoi(ch);
+            g_cfg.cp_band = g_cfg.cp_channel >= 32 ? 2 : 1;
+        }
+        if (!config_save()) {
+            code = 500;
+            snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"cannot persist AP profile\"}\n");
+            goto ap_start_done2;
+        }
+        g_cfg.mode = MODE_CARPLAY;
+        g_cfg.wlan_on = true;
+        apply_mode(false);
+        {
+            char ssid_e[256];
+            json_escape(ssid_e, sizeof(ssid_e), g_cfg.cp_ssid);
+            snprintf(body, sizeof(body),
+                     "{\"ok\":true,\"ssid\":\"%s\",\"band\":%d,\"channel\":%d,\"key_set\":%s}\n",
+                     ssid_e, g_cfg.cp_band, g_cfg.cp_channel, g_cfg.cp_psk[0] ? "true" : "false");
+        }
+        log_msg("access point requested: ssid=%s band=%d channel=%d",
+                g_cfg.cp_ssid, g_cfg.cp_band, g_cfg.cp_channel);
+      ap_start_done2: ;
     } else if (!strcmp(method, "POST") && !strcmp(path, "/client/connect")) {
         g_cfg.mode = MODE_CLIENT;
         g_cfg.wlan_on = true;

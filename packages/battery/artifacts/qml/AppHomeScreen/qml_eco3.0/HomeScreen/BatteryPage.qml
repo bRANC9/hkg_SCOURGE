@@ -24,11 +24,24 @@ Item {
     property bool atOtherApp: typeof AppHomeModel !== "undefined"
                                ? AppHomeModel.isAtOtherApp : false
     property int homeSeq: 0
+    // -1 = adopt the next value read from the daemon as the baseline.
+    property int homeSeqBaseline: -1
     property string homeSource: "none"
     property int lastAppKey: -1
     property bool homeMonitor: false
 
-    visible: requested && !atOtherApp
+    visible: requested
+    property double openedAt: 0
+
+    // A stale AppHomeModel.isAtOtherApp used to hide the page for good: the
+    // flag is only cleared by code we replaced, which is also why it must not
+    // close the page a moment after it opens.  Auto-close events only count
+    // once the overlay has been up briefly; genuine navigation still closes.
+    function autoClose() {
+        if (Date.now() - openedAt < 1200) return
+        close()
+    }
+    onAtOtherAppChanged: if (root.atOtherApp) root.autoClose()
     focus: visible
     /* Stock rule: never fight a system popup for input (styleguide §4.6). */
     enabled: !(typeof AppHomeModel !== "undefined"
@@ -36,6 +49,8 @@ Item {
 
     function open() {
         requested = true
+        homeSeqBaseline = -1
+        openedAt = Date.now()
         refresh()
     }
     function close() {
@@ -48,13 +63,15 @@ Item {
     // any navigation event also closes the overlay.
     Connections {
         target: (typeof AppHomeModel !== "undefined") ? AppHomeModel : null
-        onButtonBackClicked: root.close()
-        onIsAtOtherAppChanged: if (AppHomeModel.isAtOtherApp) root.close()
-        onCurrentScreenChanged: root.close()
-        onCurrentHomeAdvancedPageIdxChanged: root.close()
-        onRequestHomeByPPChanged: if (AppHomeModel.requestHomeByPP) root.close()
+        onButtonBackClicked: root.autoClose()
+        onIsAtOtherAppChanged: if (AppHomeModel.isAtOtherApp) root.autoClose()
+        onCurrentScreenChanged: root.autoClose()
+        onCurrentHomeAdvancedPageIdxChanged: root.autoClose()
+        onRequestHomeByPPChanged: if (AppHomeModel.requestHomeByPP) root.autoClose()
     }
-    onHomeSeqChanged: if (homeSeq > 0) close()
+    // home_seq is the daemon's cumulative Home/Star counter, so a bare
+    // `homeSeq > 0` closed the page the instant open()'s own refresh landed.
+    // Close only on a change seen after open (handled in refresh()).
 
     // ---- daemon state (I-CAN) ----------------------------------------
     property bool serviceOk: false
@@ -311,7 +328,15 @@ Item {
         dumpState = d.dump_state || "idle"
         dumpMessage = d.dump_message || ""
         dumpDir = d.dump_dir || ""
-        homeSeq = (typeof d.home_seq === "number") ? d.home_seq : 0
+        var _seq = (typeof d.home_seq === "number") ? d.home_seq : 0
+        // Cumulative counter: only a GROWTH after open is a Home/Star press.
+        // The file mirror can lag the HTTP status, and a drop must not close.
+        if (homeSeqBaseline < 0 || _seq < homeSeqBaseline) homeSeqBaseline = _seq
+        else if (_seq > homeSeqBaseline) {
+            homeSeqBaseline = _seq
+            if (requested) close()
+        }
+        homeSeq = _seq
         homeSource = d.home_source || "none"
         lastAppKey = (typeof d.last_app_key === "number") ? d.last_app_key : -1
         homeMonitor = d.home_monitor === true

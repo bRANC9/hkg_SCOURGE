@@ -1,0 +1,64 @@
+# Properties and signals the previewed page assigns/connects on vendor components
+# that the preview only stubs.  Each line is emitted verbatim inside every stub:
+# the page has to load, the values do not matter for layout.
+property var textBold: false
+property var checked: false
+property var pressed: false
+property var checkedColor: "#4FC3F7"
+property var bgColor: "#1E1E1E"
+property var radius: 6
+property var source: ""
+property var selected: false
+property var label: ""
+property var level: 0
+property var on: false
+signal clicked()
+signal pressAndHold()
+signal toggled(bool checked)
+signal released()
+property var switchEnabled: undefined
+property var buttonEnabled: undefined
+property var onCommitted: undefined
+property var interactive: undefined
+property var value: undefined
+property var valueText: undefined
+property var themeSource: undefined
+signal closed()
+signal closePopupFinish()
+signal popupFinished()
+property var currentIndex: 0
+property var zone: 0
+signal selected(var index)
+property var botImages: []
+property var topImages: []
+property var imageSource: ""
+property var itemWidth: 0
+property var itemHeight: 0
+property var currentZone: 0
+property var middleImages: []
+property var rowCount: 0
+property var columnCount: 0
+property var highlightIndex: 0
+property var textList: []
+property var btnHeight: 0
+property var btnWidth: 0
+property var popupWidth: 0
+property var popupHeight: 0
+property var title: ""
+property var description: ""
+signal btnRelease()
+signal btnPress()
+signal activated()
+property var normalImage: ""
+property var pressImage: ""
+property var disableImage: ""
+property var labelColor: "#FFFFFF"
+property var labelFontSize: 22
+property var buttonWidth: 0
+property var buttonHeight: 0
+property var visibleText: ""
+property var labelSize: 22
+property var textPixelSize: 22
+property var horizontalAlignment: 0
+property var verticalAlignment: 0
+property var wrapMode: 0

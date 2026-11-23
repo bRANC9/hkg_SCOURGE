@@ -563,6 +563,28 @@ Item {
             }
         }
 
+        // One action row for the whole page: importing from USB and saving the
+        // log bundle are page-level actions, and the three identical copies that
+        // used to sit in Status/Client/CarPlay AP were the same POST.
+        Row {
+            x: 800
+            y: 104
+            spacing: 10
+
+            Wifi1bButton {
+                width: 190
+                label: "Import USB"
+                buttonEnabled: root.serviceOk
+                onClicked: root.post("/import")
+            }
+            Wifi1bButton {
+                width: 170
+                label: "Save logs"
+                buttonEnabled: root.serviceOk
+                onClicked: root.post("/logs/dump")
+            }
+        }
+
         // ================= STATUS ====================================
         Item {
             id: statusTab
@@ -677,18 +699,7 @@ Item {
                     buttonEnabled: root.serviceOk
                     onClicked: root.post("/mode?value=carplay")
                 }
-                Wifi1bButton {
-                    width: 220
-                    label: "Import USB"
-                    buttonEnabled: root.serviceOk
-                    onClicked: root.post("/import")
-                }
-                Wifi1bButton {
-                    width: 200
-                    label: "Save logs"
-                    buttonEnabled: root.serviceOk
-                    onClicked: root.post("/logs/dump")
-                }
+                // Import USB / Save logs live in the shared action row above.
             }
 
             Rectangle {
@@ -914,12 +925,7 @@ Item {
                     buttonEnabled: root.serviceOk
                     onClicked: root.post("/client/disconnect")
                 }
-                Wifi1bButton {
-                    width: 220
-                    label: "Import USB"
-                    buttonEnabled: root.serviceOk
-                    onClicked: root.post("/import")
-                }
+                // Import USB is in the shared action row above.
             }
 
             Rectangle {
@@ -1167,12 +1173,7 @@ Item {
                     buttonEnabled: root.serviceOk
                     onClicked: root.post("/carplay/stop")
                 }
-                Wifi1bButton {
-                    width: 210
-                    label: "Import USB"
-                    buttonEnabled: root.serviceOk
-                    onClicked: root.post("/import")
-                }
+                // Import USB is in the shared action row above.
             }
 
             QText {

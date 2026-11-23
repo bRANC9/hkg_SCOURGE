@@ -1,0 +1,20 @@
+# Vendor component types the previewed page instantiates but that live in another
+# payload (or in the head unit binary).  Each is stubbed as an empty Item inside
+# the preview jail: the preview measures and paints boxes, not the vendor art.
+WifiSwitch
+WifiButton
+WifiTile
+BatterySwitch
+QButton
+Q_ThemeImage
+AmbientSlider
+AmbientSlider
+TweaksZonePicker
+QHMI_ToggleButton
+QPopupAnimationItem
+QVerticalButton
+TweaksButton
+TweaksSwitch
+Wifi1bButton
+Wifi1bSwitch
+ListModel

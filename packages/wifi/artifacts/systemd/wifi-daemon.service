@@ -9,7 +9,28 @@ ConditionPathExists=/rw_data/wifi/wifi_daemon
 [Service]
 Type=simple
 UMask=0077
+# /var/run is a tmpfs and the control-socket directory used to be created by the
+# OEM supplicantmanager, which we mask.  Without the directory wpa_supplicant
+# cannot publish its socket and every wpa_cli call fails with "non-global
+# ctrl_ifname: wlan0"; the daemon then loops "control socket missing".
+# PID1 creates it before ExecStart (SMACK-safe, unlike a mkdir from our label),
+# and keeps it across the daemon's own restarts.
+RuntimeDirectory=wpa_supplicant
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=restart
 Environment=PATH=/bin:/sbin:/usr/bin:/usr/sbin
+# The Broadcom module (bcmdhd) registers wlan0 about 110 s after boot on this
+# unit - measured by the 2026-11-22 radio probe, dmesg "Register interface
+# [wlan0]". A daemon started before that finds no interface, exits, and the
+# installer's short verify window reports "build identity did not match".
+# Wait for the interface here instead of hoping: bounded, and the daemon still
+# starts on units where the radio is genuinely absent (it then reports that).
+# Load the radio ourselves before waiting for it: on this unit the OEM stack
+# brings bcmdhd up ~111 s after boot (dmesg "Register interface [wlan0]" at
+# 111.24 s), while the firmware download itself takes ~0.5 s - so the delay is
+# when the module gets loaded, not how long it takes. modprobe is idempotent.
+ExecStartPre=/sbin/modprobe bcmdhd
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -e /sys/class/net/wlan0 ] && [ $i -lt 180 ]; do sleep 2; i=$((i+2)); done'
 ExecStart=/bin/sh -c 'exec /rw_data/wifi/wifi_daemon --port 8090 --status-file /rw_data/wifi/status.json >> /rw_data/wifi/daemon.log 2>&1'
 Restart=always
 RestartSec=3

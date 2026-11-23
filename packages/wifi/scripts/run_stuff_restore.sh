@@ -26,6 +26,41 @@ THEME="component/common/Q_ThemeImage.qml"
 
 mkdir -p "$RW_DIR" 2>/dev/null
 : > "$LOG" 2>/dev/null
+probe_radio() {   # probe_radio <label> - one bounded report, no guessing later
+    _p="$USB_DIR/wifi_probe.txt"
+    {
+        echo "=== SCOURGE radio probe: ${1:-?} ($(date -u 2>/dev/null))"
+        echo "--- uptime"; cut -d' ' -f1 /proc/uptime 2>&1
+        echo "--- net devices"; ls /sys/class/net 2>&1
+        echo "--- wlan0 link"; ip link show wlan0 2>&1 | head -n 6; ifconfig wlan0 2>&1 | head -n 6
+        echo "--- operstate"; cat /sys/class/net/wlan0/operstate 2>&1
+        echo "--- iw dev"; iw dev 2>&1 | head -n 16
+        echo "--- rfkill"; [ -e /dev/rfkill ] && rfkill list 2>&1 | head -n 12 || echo "no /dev/rfkill in this kernel"
+        echo "--- modules"; lsmod 2>/dev/null | grep -E '^(bcmdhd|dhd|brcmfmac|brcmutil|cfg80211|bluetooth|btusb|hci)' | head -n 12
+        echo "--- wifi firmware load (dmesg)"; dmesg 2>/dev/null | grep -iE 'register interface|firmware version = wl|dhd_bus_download' | tail -n 6
+        echo "--- time to wlan0"; dmesg 2>/dev/null | sed -n 's/^\[ *\([0-9.]*\)\].*Register interface \[wlan0\].*/registered_at=\1s/p' | tail -n 1
+        echo "--- bluetooth state"; (hciconfig -a 2>/dev/null || true) | head -n 8
+        echo "--- bluetooth connections"; (hcitool con 2>/dev/null || true) | head -n 6
+        echo "--- bluetooth nodes"; ls /sys/class/bluetooth 2>&1; hciconfig -a 2>&1 | head -n 8
+        echo "--- dmesg (net/bt)"; dmesg 2>/dev/null | grep -iE 'brcmfmac|wlan|bluetooth|hci0|firmware' | tail -n 12
+        echo "--- services"
+        for _u in connman supplicantmanager.service supplicantmanager.path wifi-daemon.service; do
+            printf '%s active=%s enabled=%s\n' "$_u" "$(systemctl is-active "$_u" 2>/dev/null)" "$(systemctl is-enabled "$_u" 2>/dev/null)"
+        done
+        echo "--- connman technologies"; connmanctl technologies 2>&1 | head -n 12
+        echo "--- connman state"; connmanctl state 2>&1 | head -n 4
+        echo "--- our daemon pid"; pidof wifi_daemon 2>&1
+        systemctl show -p MainPID -p ExecMainStatus wifi-daemon.service 2>&1
+        echo "--- status.json"; head -c 400 "$RW_DIR/status.json" 2>&1; echo
+        echo "--- daemon.log tail"; tail -n 12 "$RW_DIR/daemon.log" 2>&1
+        echo "--- journal"; journalctl -u wifi-daemon.service -n 15 --no-pager 2>&1 | tail -n 15
+        echo "--- smack of binary"; getfattr -n security.SMACK64 --only-values "$RW_DIR/wifi_daemon" 2>&1
+        echo "--- listening ports"; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -E ':(809[0-9]|2222)' 2>&1
+        echo
+    } >> "$_p" 2>&1
+    sync 2>/dev/null || true
+}
+
 log() { echo "$(date -u 2>/dev/null) $*" >> "$LOG" 2>/dev/null; }
 result() {
     { echo "WIFI_RESTORE"; echo "time=$(date -u 2>/dev/null)"; echo "usb=$USB_DIR"; echo "$@"; } > "$OUT" 2>&1
@@ -63,7 +98,11 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl disable wifi-daemon.service 2>/dev/null || true
 fi
 if [ -x "$RW_DIR/wifi_daemon" ]; then
-    "$RW_DIR/wifi_daemon" --mode off >> "$LOG" 2>&1 || fail "network cleanup failed; preserving runtime files"
+    # Best effort: a daemon that cannot take the radio down must not stop the
+    # rest of the restore (QML, OEM unmask, connman). The 2026-11-22 run failed
+    # here and left the unit with no radio owner at all.
+    "$RW_DIR/wifi_daemon" --mode off >> "$LOG" 2>&1 || \
+        log "warning: wifi_daemon --mode off failed; continuing with the restore"
 fi
 for p in /proc/[0-9]*; do
     executable=$(readlink "$p/exe" 2>/dev/null || true)
@@ -274,6 +313,18 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload 2>/dev/null || true
     state=$(cat "$RW_DIR/backup/supplicantmanager.path.state" 2>/dev/null || true)
     case "$state" in enabled|static|indirect) systemctl start supplicantmanager.path 2>/dev/null || true;; esac
+    # Unmasking the units is not enough: the installer also ran
+    # "connmanctl disable wifi", so without this the OEM manager is unmasked but
+    # its radio is still off - the head unit then behaves as if it had no WiFi
+    # (and no Bluetooth, which shares the module) at all.
+    if command -v connmanctl >/dev/null 2>&1; then
+        connmanctl enable wifi >> "$LOG" 2>&1 || log "warning: connmanctl enable wifi failed"
+        log "connman wifi re-enabled after restore"
+        probe_radio "restore: after connman re-enable"
+    fi
+# RUN_DIR is not always set (the stage runs under `set -u` from the bundle and
+    # from the test harness), and an unset var aborted the whole restore.
+    rm -f "${RUN_DIR:-$RW_DIR}/wifi/active" 2>/dev/null || true
 fi
 sync
 

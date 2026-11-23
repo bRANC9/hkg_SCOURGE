@@ -26,6 +26,11 @@ set -u
 umask 077
 PATH="${WIFI_PATH:-/bin:/sbin:/usr/bin:/usr/sbin}"
 USB_DIR="${USB_DIR:-/media/usb}"
+STICK_ROOT="${SCOURGE_STICK_DIR:-$USB_DIR}"
+# The root bundle passes USB_DIR=<this stage dir> and SCOURGE_STICK_DIR=<stick
+# root>.  Files the user drops on the stick (authorized_keys, wifi.txt, static_ip,
+# no_ui_restart) live at the ROOT, so they must be read from there - reading them
+# from USB_DIR silently found nothing and the flags never applied.
 PAYLOAD="$USB_DIR/payload"
 BACKUP="$USB_DIR/backup"
 QML_ROOT="${WIFI_QML_ROOT:-/app/share/AppHomeScreen}"
@@ -51,6 +56,111 @@ mkdir -p "$RW_DIR/backup" 2>/dev/null
 mkdir -p "$RW_DIR/bin" 2>/dev/null
 mkdir -p "$RW_DIR/ssh" 2>/dev/null
 : > "$LOG" 2>/dev/null
+
+probe_aa() {   # read-only AA/projection facts for the Android Auto work
+    _p="${SCOURGE_STICK_DIR:-$USB_DIR}/aa_probe.txt"
+    {
+        echo "=== SCOURGE AA probe ($(date -u 2>/dev/null))"
+        echo "--- wpa_cli status"
+        (wpa_cli -i wlan0 status 2>&1 || echo "wpa_cli failed") | head -n 12
+        echo "--- wlan0 addr"; ip -4 addr show wlan0 2>&1 | head -n 6
+        echo "--- ap bssid (what the bootstrap advertises)"
+        _apmac=""
+        if command -v wpa_cli >/dev/null 2>&1; then
+            _apmac=$(wpa_cli -i wlan0 status 2>/dev/null | sed -n 's/^bssid=//p' | head -n 1)
+        fi
+        if [ -n "$_apmac" ]; then
+            echo "bssid_from=wpa_cli value=$_apmac (this is the AP BSSID)"
+        else
+            echo "bssid_from=wpa_cli empty (supplicant not in AP mode or no control socket)"
+        fi
+        echo "wlan0_mac=$(cat /sys/class/net/wlan0/address 2>/dev/null)   <-- WiFi/AP MAC, NOT the BT MAC"
+        ifconfig wlan0 2>/dev/null | grep -i HWaddr
+        echo "--- bt addresses (for comparison, from sysfs)"
+        for _h in /sys/class/bluetooth/*; do
+            [ -e "$_h/address" ] || continue
+            echo "  $(basename "$_h") address=$(cat "$_h/address" 2>/dev/null)"
+        done
+        echo "--- our AP config (what the bootstrap must advertise)"
+        grep -E '^(carplay_|wifi_mode|mode=|wlan_on|ssh=)' "$RW_DIR/config.conf" 2>/dev/null | head -n 20
+        echo "--- bluetooth processes"
+        ps 2>/dev/null | grep -i -E 'vbtd|bluetooth' | grep -v grep | head -n 10
+        echo "--- /sys/class/bluetooth"; ls /sys/class/bluetooth 2>&1
+        echo "--- bluez presence"
+        systemctl status bluetooth 2>/dev/null | head -n 3
+        ls /usr/libexec/bluetooth 2>/dev/null || echo "no /usr/libexec/bluetooth"
+        ls /usr/lib/bluetooth 2>/dev/null | head -n 5
+        if command -v bluetoothd >/dev/null 2>&1; then ls -l "$(command -v bluetoothd)"; else echo "no bluetoothd in PATH"; fi
+        ps 2>/dev/null | grep -i vbtd | grep -v grep | head -n 3
+        echo "--- vendor bt binaries"
+        ls /app/bin 2>/dev/null | grep -i -E 'bt|blue' | head -n 10
+        echo "--- hciconfig"; (command -v hciconfig >/dev/null 2>&1 && hciconfig -a || echo "no hciconfig") 2>&1 | head -n 20
+        echo "--- sdptool"; (command -v sdptool >/dev/null 2>&1 && sdptool browse local || echo "no sdptool") 2>&1 | head -n 30
+        echo "--- bt services"
+        for _u in bluetooth btd vbtd bluetoothd; do printf '%s active=%s\n' "$_u" "$(systemctl is-active "$_u" 2>/dev/null)"; done
+        echo "--- projection binaries"
+        ls /app/bin 2>/dev/null | grep -i -E 'projection|auto|carplay' | head -n 12
+        (sha256sum /app/bin/AppProjection 2>/dev/null || echo "no /app/bin/AppProjection")
+        echo "--- session bus AA names (3 s)"
+        ( dbus-monitor --session 2>&1 & _dp=$!; sleep 3; kill -TERM "$_dp" 2>/dev/null ) | grep -m3 -i 'android_auto' || echo "no android_auto on the session bus"
+        echo "--- platform"
+        uname -a 2>&1; (ldd --version 2>&1 | head -n 1)
+        df -h /rw_data 2>&1; ls -la /rw_data 2>&1 | head -n 6
+        echo "--- 5 GHz support"
+        echo "5ghz_channel_lines=$(iw list 2>/dev/null | grep -c -i '5[0-9][0-9][0-9] MHz')"
+        echo "--- ap interface candidates (which iface can host the AP)"
+        echo "net_devices=$(ls /sys/class/net 2>/dev/null | tr '\n' ' ')"
+        iw dev 2>&1 | head -n 40
+        echo "--- wlan0 info"; iw dev wlan0 info 2>&1 | head -n 8
+        echo "--- AP mode supported?"
+        iw list 2>/dev/null | grep -m1 -A3 -i 'valid interface combinations' | head -n 6
+    } >> "$_p" 2>&1
+    sync 2>/dev/null || true
+}
+
+probe_radio() {   # probe_radio <label> - one bounded report, no guessing later
+    # Write to the STICK ROOT: the stage dir is wiped by the next bundle copy, and
+    # that is exactly how the report for a failed run disappeared.
+    _p="${SCOURGE_STICK_DIR:-$USB_DIR}/wifi_probe.txt"
+    {
+        echo "=== SCOURGE radio probe: ${1:-?} ($(date -u 2>/dev/null))"
+        echo "--- uptime"; cut -d' ' -f1 /proc/uptime 2>&1
+        echo "--- net devices"; ls /sys/class/net 2>&1
+        echo "--- wlan0 link"; ip link show wlan0 2>&1 | head -n 6; ifconfig wlan0 2>&1 | head -n 6
+        echo "--- operstate"; cat /sys/class/net/wlan0/operstate 2>&1
+        echo "--- iw dev"; iw dev 2>&1 | head -n 16
+        echo "--- rfkill"; [ -e /dev/rfkill ] && rfkill list 2>&1 | head -n 12 || echo "no /dev/rfkill in this kernel"
+        echo "--- modules"; lsmod 2>/dev/null | grep -E '^(bcmdhd|dhd|brcmfmac|brcmutil|cfg80211|bluetooth|btusb|hci)' | head -n 12
+        echo "--- wifi firmware load (dmesg)"; dmesg 2>/dev/null | grep -iE 'register interface|firmware version = wl|dhd_bus_download' | tail -n 6
+        echo "--- module load timing"
+        dmesg 2>/dev/null | grep -iE 'bcmdhd|dhdpcie' | sed -n 's/^\[ *\([0-9.]*\)\].*/  \1s/p' | head -n 6
+        echo "--- who loads bcmdhd"; grep -rl 'bcmdhd' /etc/modules /etc/modules-load.d /etc/modprobe.d 2>/dev/null | head -n 5
+        echo "--- time to wlan0"; dmesg 2>/dev/null | sed -n 's/^\[ *\([0-9.]*\)\].*Register interface \[wlan0\].*/registered_at=\1s/p' | tail -n 1
+        echo "--- bluetooth state"; (hciconfig -a 2>/dev/null || true) | head -n 8
+        echo "--- bluetooth connections"; (hcitool con 2>/dev/null || true) | head -n 6
+        echo "--- bluetooth nodes"; ls /sys/class/bluetooth 2>&1; hciconfig -a 2>&1 | head -n 8
+        echo "--- dmesg (net/bt)"; dmesg 2>/dev/null | grep -iE 'brcmfmac|wlan|bluetooth|hci0|firmware' | tail -n 12
+        echo "--- services"
+        for _u in connman supplicantmanager.service supplicantmanager.path wifi-daemon.service; do
+            printf '%s active=%s enabled=%s\n' "$_u" "$(systemctl is-active "$_u" 2>/dev/null)" "$(systemctl is-enabled "$_u" 2>/dev/null)"
+        done
+        echo "--- connman technologies"; connmanctl technologies 2>&1 | head -n 12
+        echo "--- connman state"; connmanctl state 2>&1 | head -n 4
+        echo "--- our daemon pid"; pidof wifi_daemon 2>&1
+        systemctl show -p MainPID -p ExecMainStatus wifi-daemon.service 2>&1
+        echo "--- status.json"; head -c 400 "$RW_DIR/status.json" 2>&1; echo
+        echo "--- dhcp clients"; (command -v udhcpc dhcpcd dhclient 2>/dev/null || echo none); command -v busybox 2>/dev/null
+        echo "--- wlan0 ip"; ip -4 addr show wlan0 2>&1 | grep -E "inet |state " | head -n 3
+        echo "--- dhcp/static lines"
+        grep -iE "dhcp:|static|iw link SSID" "$RW_DIR/daemon.log" 2>/dev/null | tail -n 20
+        echo "--- daemon.log tail"; tail -n 60 "$RW_DIR/daemon.log" 2>&1
+        echo "--- journal"; journalctl -u wifi-daemon.service -n 15 --no-pager 2>&1 | tail -n 15
+        echo "--- smack of binary"; getfattr -n security.SMACK64 --only-values "$RW_DIR/wifi_daemon" 2>&1
+        echo "--- listening ports"; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -E ':(809[0-9]|2222)' 2>&1
+        echo
+    } >> "$_p" 2>&1
+    sync 2>/dev/null || true
+}
 
 log() {
     echo "$(date -u 2>/dev/null) $*" >> "$LOG" 2>/dev/null
@@ -274,15 +384,24 @@ fi
 
 log "variants: adv=$adv_variant wide=$wide_variant all=$all_variant setup=$setup_variant custom=$custom_variant"
 
+# The page and its components are this package's own artifacts and must be
+# there. The home-screen VARIANTS are per installed-package combination, and a
+# build only carries the ones somebody had a base for: a missing variant must not
+# fail the stage (that would leave the daemon uninstalled), it ships the page and
+# reports the tile as skipped, exactly like the store installer does.
+for selected in HomeScreen/WifiPage.qml component/WifiTile.qml component/WifiSwitch.qml component/WifiButton.qml; do
+    [ -f "$PAYLOAD/qml/AppHomeScreen/qml_eco3.0/$selected" ] || fail "selected QML missing: $selected"
+done
+variant_missing=""
 for selected in \
     "HomeScreen/QHMI_HomeScreenMain_Advanced.$adv_variant.qml" \
     "HomeScreen/QHMI_HomeScreenMain_Wide.$wide_variant.qml" \
     "HomeScreen/Screen_HomeScreen_AllMenus.$all_variant.qml" \
     "HomeScreen/Screen_HomeScreen_Submenu_Setup.$setup_variant.qml" \
-    "component/QCustomizedMenuListAllowEmpty.$custom_variant.qml" \
-    HomeScreen/WifiPage.qml component/WifiTile.qml component/WifiSwitch.qml component/WifiButton.qml; do
-    [ -f "$PAYLOAD/qml/AppHomeScreen/qml_eco3.0/$selected" ] || fail "selected QML missing: $selected"
+    "component/QCustomizedMenuListAllowEmpty.$custom_variant.qml"; do
+    [ -f "$PAYLOAD/qml/AppHomeScreen/qml_eco3.0/$selected" ] || variant_missing="$variant_missing $selected"
 done
+[ -z "$variant_missing" ] || log "WARNING: no home-screen variant for this unit, tile skipped:$variant_missing"
 [ -s "$PAYLOAD/build-id.txt" ] || fail "build-id.txt missing"
 BUILD_ID=$(cat "$PAYLOAD/build-id.txt")
 
@@ -607,30 +726,136 @@ ssh_port=2222
 EOF
     chmod 600 "$RW_DIR/config.conf" 2>/dev/null || true
 fi
-
-if [ -f "$USB_DIR/authorized_keys" ]; then
-    cp -f "$USB_DIR/authorized_keys" "$RW_DIR/ssh/authorized_keys" 2>/dev/null || true
-    chmod 600 "$RW_DIR/ssh/authorized_keys" 2>/dev/null || true
-    cp -f "$USB_DIR/authorized_keys" "$RW_DIR/home/.ssh/authorized_keys" 2>/dev/null || true
-    chmod 600 "$RW_DIR/home/.ssh/authorized_keys" 2>/dev/null || true
-    log "imported authorized_keys"
+# Force the SSH switch from what the stick asked for, whether or not the config
+# already existed: set_key keeps the rest of the file intact.
+if [ "${ssh_wanted:-0}" != 0 ] && [ -f "$RW_DIR/config.conf" ]; then
+    if grep -q '^ssh=' "$RW_DIR/config.conf" 2>/dev/null; then
+        sed -i "s/^ssh=.*/ssh=1/" "$RW_DIR/config.conf" 2>/dev/null || true
+    else
+        printf 'ssh=1\n' >> "$RW_DIR/config.conf" 2>/dev/null || true
+    fi
+    log "config ssh=1 (ssh_wanted=$ssh_wanted)"
 fi
+
+ssh_wanted=0
+_ac_src=""
+[ -f "$STICK_ROOT/authorized_keys" ] && _ac_src="$STICK_ROOT/authorized_keys"
+[ -z "$_ac_src" ] && [ -f "$USB_DIR/authorized_keys" ] && _ac_src="$USB_DIR/authorized_keys"
+if [ -n "$_ac_src" ]; then
+    cp -f "$_ac_src" "$RW_DIR/ssh/authorized_keys" 2>/dev/null || true
+    chmod 600 "$RW_DIR/ssh/authorized_keys" 2>/dev/null || true
+    cp -f "$_ac_src" "$RW_DIR/home/.ssh/authorized_keys" 2>/dev/null || true
+    chmod 600 "$RW_DIR/home/.ssh/authorized_keys" 2>/dev/null || true
+    # Key-only login, so enabling it here exposes nothing that the stick did not
+    # already carry - and it is the only way to debug the unit when the WiFi page
+    # itself refuses to open (2026-11-22: the page is exactly what we needed to
+    # reach the switch through). ssh=1 is written into config.conf below.
+    ssh_wanted=1
+    log "authorized_keys imported; SSH requested (key-only)"
+fi
+# The password account (car/electric) stays off unless asked for. ssh=1 with keys
+# present means key-only; the daemon enables password auth separately.
+if [ -f "$USB_DIR/ssh_enable" ]; then
+    ssh_wanted=1
+    [ ! -f "$USB_DIR/ssh_password_ok" ] || ssh_wanted=2
+    log "ssh_enable on the stick: SSH requested (password auth: $([ "$ssh_wanted" = 2 ] && echo yes || echo no))"
+fi
+# Static address for the case where the unit associates but has no DHCP client
+# at all (2026-11-22: "dhcpcd: command not found" on the head unit).  Put a file
+# named static_ip on the stick, e.g. "192.168.1.60/24", optionally static_gw.
+for _k in static_ip static_gw; do
+[ -f "$STICK_ROOT/$_k" ] || continue
+_v=$(tr -d " \t\r\n" < "$STICK_ROOT/$_k" 2>/dev/null | head -c 64)
+[ -n "$_v" ] || continue
+if grep -q "^$_k=" "$RW_DIR/config.conf" 2>/dev/null; then
+    sed -i "s|^$_k=.*|$_k=$_v|" "$RW_DIR/config.conf" 2>/dev/null || true
+else
+    printf "%s=%s\n" "$_k" "$_v" >> "$RW_DIR/config.conf" 2>/dev/null || true
+fi
+log "config $_k=$_v"
+    # The daemon reads these as plain files (it rewrites config.conf from its own
+    # struct, which used to drop the keys), so keep both copies.
+    printf "%s\n" "$_v" > "$RW_DIR/$_k" 2>/dev/null || true
+done
 # Import before the service starts.  Import is best-effort: the daemon may
 # not be able to persist config in the installer context, but an existing
 # /rw_data/wifi/config.conf is still usable and the UI can import again later.
-if [ -f "$USB_DIR/wifi.txt" ]; then
-    cp -f "$USB_DIR/wifi.txt" "$RW_DIR/wifi.txt" 2>/dev/null || true
+# The user's network list lives at the STICK ROOT (that is where the docs and the
+# UI tell them to put it); the stage dir copy is only a fallback.  Reading the
+# wrong one meant edits to wifi.txt were ignored and stale networks survived.
+_wifi_src=""
+[ -f "$STICK_ROOT/wifi.txt" ] && _wifi_src="$STICK_ROOT/wifi.txt"
+[ -z "$_wifi_src" ] && [ -f "$USB_DIR/wifi.txt" ] && _wifi_src="$USB_DIR/wifi.txt"
+if [ -n "$_wifi_src" ]; then
+    log "importing network list from $_wifi_src"
+    cp -f "$_wifi_src" "$RW_DIR/wifi.txt" 2>/dev/null || true
     chmod 600 "$RW_DIR/wifi.txt" 2>/dev/null || true
     if [ -x "$RW_DIR/wifi_daemon" ]; then
         if "$RW_DIR/wifi_daemon" --import-file "$RW_DIR/wifi.txt" >> "$LOG" 2>&1; then
             wifi_import=OK
         else
-            wifi_import=FAIL
-            log "WARNING: wifi.txt import failed; keeping existing config (UI can import later)"
+            # The import runs before the radio exists (~110 s after boot), and the
+            # daemon refuses to persist a client profile when it cannot see wlan0.
+            # The file is in /rw_data/wifi/wifi.txt either way, and the master
+            # retries the import at the end of the run once the daemon is up
+            # (wifi_import_late=), so this is deferred, not failed.
+            wifi_import=deferred
+            log "WARNING: wifi.txt import deferred (daemon not ready); master retries after the stages"
         fi
     else
         wifi_import=no-daemon
     fi
+fi
+
+# wifi.txt only carries credentials: the client mode and the radio switch are
+# config keys, and the shipped default is mode=off / wlan_on=0. Importing a
+# network without flipping them leaves wlan0 DOWN with a perfectly healthy daemon
+# (2026-11-22: daemon_verify=ok, wifi_import=OK, wlan0 state DOWN, no address).
+if [ -f "$RW_DIR/wifi.txt" ] && [ -f "$RW_DIR/config.conf" ]; then
+    for _kv in mode=client wlan_on=1 boot_off=0; do
+        _k=${_kv%%=*}; _v=${_kv#*=}
+        if grep -q "^$_k=" "$RW_DIR/config.conf" 2>/dev/null; then
+            sed -i "s/^$_k=.*/$_k=$_v/" "$RW_DIR/config.conf" 2>/dev/null || true
+        else
+            printf '%s\n' "$_kv" >> "$RW_DIR/config.conf" 2>/dev/null || true
+        fi
+    done
+    chmod 600 "$RW_DIR/config.conf" 2>/dev/null || true
+    log "config forced for client mode: mode=client wlan_on=1 boot_off=0"
+fi
+# ConnMan stays the association/DHCP owner in this app, and its WiFi technology
+# ships POWERED OFF: with it off, wlan0 comes up but never associates and never
+# gets an address (2026-11-22 probe: "Powered = False", wlan0 UP, no IPv4, no ssh).
+# The stock pair is ConnMan + supplicantmanager: ConnMan powers the technology and
+# asks that manager for a supplicant. Our installer masks the manager so it cannot
+# fight for the control socket, but then ConnMan has nothing to power the radio
+# with - the probe shows "Powered = False" and wlan0 up with no association.
+# Unmask it for this boot only (the restore puts the masked state back) and start
+# the path unit, then let ConnMan take over.
+if command -v systemctl >/dev/null 2>&1; then
+    for _u in supplicantmanager.service supplicantmanager.path; do
+        systemctl unmask --runtime "$_u" >> "$LOG" 2>&1 || true
+    done
+    systemctl start supplicantmanager.path >> "$LOG" 2>&1 || \
+        systemctl start supplicantmanager.service >> "$LOG" 2>&1 || true
+    log "supplicantmanager unmasked (runtime) and started for this boot"
+fi
+if command -v connmanctl >/dev/null 2>&1; then
+    _en=$(connmanctl enable wifi 2>&1)
+    case "$_en" in
+        ""|Enabled*|*ready*) log "connmanctl enable wifi: ok ($_en)" ;;
+        *)
+            # ConnMan refuses to power the technology when its own supplicant never
+            # came up (typical right after the installer masked the OEM manager).
+            # One restart makes ConnMan spawn its supplicant again.
+            log "connmanctl enable wifi: '$_en' - restarting connman and retrying"
+            systemctl restart connman >> "$LOG" 2>&1 || true
+            sleep 3
+            _en2=$(connmanctl enable wifi 2>&1)
+            log "connmanctl enable wifi (retry): $_en2"
+            ;;
+    esac
+    log "connman wifi technology: $(connmanctl technologies 2>/dev/null | grep -A2 'technology/wifi' | tr '\n' ' ')"
 fi
 
 # ---- QML ---------------------------------------------------------------
@@ -671,11 +896,15 @@ install_qml() {
 }
 
 Q="$PAYLOAD/qml/AppHomeScreen/qml_eco3.0"
-install_qml "$Q/HomeScreen/QHMI_HomeScreenMain_Advanced.$adv_variant.qml" "$cur_adv" "$cur_adv"
-install_qml "$Q/HomeScreen/QHMI_HomeScreenMain_Wide.$wide_variant.qml" "$cur_wide" "$cur_wide"
-install_qml "$Q/HomeScreen/Screen_HomeScreen_AllMenus.$all_variant.qml" "$cur_all" "$cur_all"
-install_qml "$Q/HomeScreen/Screen_HomeScreen_Submenu_Setup.$setup_variant.qml" "$cur_setup" "$cur_setup"
-install_qml "$Q/component/QCustomizedMenuListAllowEmpty.$custom_variant.qml" "$cur_custom" "$cur_custom"
+install_variant() {   # install_variant <src> <dst> <label>
+    [ -f "$1" ] || return 0
+    install_qml "$1" "$2" "$3"
+}
+install_variant "$Q/HomeScreen/QHMI_HomeScreenMain_Advanced.$adv_variant.qml" "$cur_adv" "$cur_adv"
+install_variant "$Q/HomeScreen/QHMI_HomeScreenMain_Wide.$wide_variant.qml" "$cur_wide" "$cur_wide"
+install_variant "$Q/HomeScreen/Screen_HomeScreen_AllMenus.$all_variant.qml" "$cur_all" "$cur_all"
+install_variant "$Q/HomeScreen/Screen_HomeScreen_Submenu_Setup.$setup_variant.qml" "$cur_setup" "$cur_setup"
+install_variant "$Q/component/QCustomizedMenuListAllowEmpty.$custom_variant.qml" "$cur_custom" "$cur_custom"
 if ! grep -q 'indexOf("file://")' "$cur_theme" 2>/dev/null; then
     install_qml "$Q/component/common/Q_ThemeImage.qml" "$cur_theme" "$cur_theme"
 fi
@@ -702,8 +931,26 @@ if command -v systemctl >/dev/null 2>&1; then
     systemctl stop supplicantmanager.path 2>/dev/null || true
     systemctl stop supplicantmanager.service 2>/dev/null || true
     # supplicantmanager is Restart=always behind a path watcher; stopping it
-    # only makes it respawn and steal /var/run/wpa_supplicant/wlan0.  Mask
-    # both units persistently.  run_stuff_restore.sh unmasks them again.
+    # only makes it respawn and steal /var/run/wpa_supplicant/wlan0.
+    #
+    # But it is ALSO what ConnMan asks for a supplicant: with it masked, ConnMan
+    # has no wifi technology at all (connmanctl technologies lists cellular
+    # only), so it can neither power the radio, nor associate, nor run its
+    # built-in DHCP - and "no DHCP client exists on this unit" is a dead end.
+    # Client mode therefore hands wifi back to the vendor pair and only keeps it
+    # away in AP mode, where our own supplicant owns wlan0.
+    _want_mode=$(sed -n 's/^mode=//p' "$RW_DIR/config.conf" 2>/dev/null | head -n 1)
+    if [ "$_want_mode" = "client" ]; then
+        for unit in supplicantmanager.path supplicantmanager.service; do
+            systemctl unmask "$unit" >> "$LOG" 2>&1 || true
+            systemctl enable "$unit" >> "$LOG" 2>&1 || true
+        done
+        systemctl start supplicantmanager.path >> "$LOG" 2>&1 || \
+            systemctl start supplicantmanager.service >> "$LOG" 2>&1 || true
+        systemctl daemon-reload >> "$LOG" 2>&1 || true
+        log "client mode: supplicantmanager left enabled (ConnMan owns wifi + DHCP); want_mode=$_want_mode"
+        oem_mask=ok
+    else
     oem_mask=ok
     for unit in supplicantmanager.path supplicantmanager.service; do
         state="$RW_DIR/backup/$unit.state"
@@ -716,7 +963,30 @@ if command -v systemctl >/dev/null 2>&1; then
     rm -f /tmp/no_unece 2>/dev/null || true
     systemctl daemon-reload >> "$LOG" 2>&1 || true
 fi
+fi   # client mode keeps supplicantmanager, AP mode masks it
 [ "$oem_mask" = ok ] || fail "OEM manager masking failed: $oem_mask"
+
+# ConnMan's wifi plugin stays active even with the technology Powered=False, and
+# it calls Interface.Disconnect over D-Bus on any supplicant it can reach: the
+# supplicant log shows CONNECTED to the AP immediately followed by
+# "wpas_dbus_handler_disconnect" and reason=3 locally_generated=1, in a loop.
+# Our supplicant no longer publishes on D-Bus (no -u), and the technology is
+# switched off here too.  Cellular is untouched - it is the unit's only uplink.
+if command -v connmanctl >/dev/null 2>&1; then
+    # Keep the technology POWERED: client mode hands the interface to ConnMan
+    # (its agent flow does the association and the DHCP lease), so Powered=False
+    # made every apply fail with "WiFi technology did not power on".  What we
+    # must prevent is ConnMan taking over OUR supplicant, and that is done in the
+    # daemon: client mode no longer starts one.
+    connmanctl enable wifi >> "$LOG" 2>&1 || log "connmanctl enable wifi failed"
+    log "connman wifi powered=$(connmanctl technologies 2>/dev/null | \
+        sed -n '/\/technology\/wifi/,/Powered/p' | sed -n 's/.*Powered = //p' | head -n 1)"
+fi
+
+# Belt and braces for the current boot: the unit's RuntimeDirectory covers future
+# starts, but the directory is on tmpfs and may be gone right now.
+mkdir -p /var/run/wpa_supplicant 2>/dev/null && chmod 755 /var/run/wpa_supplicant 2>/dev/null
+log "ctrl dir /var/run/wpa_supplicant: $(ls -ld /var/run/wpa_supplicant 2>&1)"
 
 daemon_status="not-started"
 rm -f "$RW_DIR/status.json" 2>/dev/null || fail "cannot clear old daemon status"
@@ -735,6 +1005,42 @@ log "daemon=$daemon_status"
 [ "$daemon_status" = systemd-ok ] || fail "daemon did not start through systemd: $daemon_status"
 
 io_restore_root || fail "cannot restore root mount state"
+# ---- address fallback ---------------------------------------------------
+# The association is ours (our supplicant holds the link), but nothing hands out
+# a lease on this unit.  Record which clients exist and, when every one is
+# missing or fails, apply the static address from config.conf (fed from the
+# static_ip / static_gw files on the stick) so a successful association is
+# enough to reach the unit.
+_dhcp_bins=$(command -v udhcpc dhcpcd dhclient 2>/dev/null | tr '\n' ' ')
+log "dhcp clients: ${_dhcp_bins:-none}busybox=$(command -v busybox 2>/dev/null)"
+_static_ip=$(sed -n 's/^static_ip=//p' "$RW_DIR/config.conf" 2>/dev/null | head -n 1)
+# Iteration speed matters more than patience: with no DHCP client and no static
+# address there is nothing to wait for, so the 90 s report wait below is skipped
+# too (it burned three minutes per run for an address that could not arrive).
+_have_dhcp=1
+[ -n "$_dhcp_bins" ] || [ -x /bin/busybox ] || _have_dhcp=0
+if [ "$_have_dhcp" = 0 ] && [ -z "$_static_ip" ]; then
+    log "no dhcp client and no static_ip: skipping the address wait"
+else
+    _ipwait=0
+    while [ "$_ipwait" -lt 30 ]; do
+        ip -4 addr show wlan0 2>/dev/null | grep -q "inet " && break
+        _ipwait=$((_ipwait + 1))
+        sleep 1
+    done
+fi
+_static_gw=$(sed -n 's/^static_gw=//p' "$RW_DIR/config.conf" 2>/dev/null | head -n 1)
+if ! ip -4 addr show wlan0 2>/dev/null | grep -q "inet " && [ -n "$_static_ip" ]; then
+    case "$_static_ip" in */*) _cidr=$_static_ip ;; *) _cidr=$_static_ip/24 ;; esac
+    ip addr flush dev wlan0 >> "$LOG" 2>&1 || true
+    if ip addr add "$_cidr" dev wlan0 >> "$LOG" 2>&1; then
+        [ -n "$_static_gw" ] && ip route replace default via "$_static_gw" dev wlan0 >> "$LOG" 2>&1 || true
+        log "static address applied: $_cidr gw=${_static_gw:-none}"
+    else
+        log "static address FAILED: $_cidr"
+    fi
+fi
+log "wlan0 addr: $(ip -4 addr show wlan0 2>/dev/null | grep "inet " | tr '\n' ' ')"
 
 # ---- restart AppHomeScreen --------------------------------------------
 io_capture_qml "$QML_DIR" "$USB_DIR/qml_after" || log "WARNING: QML after-snapshot unavailable"
@@ -754,7 +1060,12 @@ if [ -n "$launcher_pid" ] && [ -r "/proc/$launcher_pid/environ" ]; then
         [ -n "$val" ] && export "$var=$val"
     done
 fi
-if command -v dbus-send >/dev/null 2>&1; then
+if [ -f "${SCOURGE_STICK_DIR:-$USB_DIR}/no_ui_restart" ]; then
+    # Iterating on the daemon only? The UI restart costs ~10 s and the QML is
+    # unchanged, so let the stick say so.
+    restart="skipped-flag verified=1"
+    log "UI restart skipped: no_ui_restart on the stick"
+elif command -v dbus-send >/dev/null 2>&1; then
     dbus-send --session --type=method_call --dest=com.lge.avn.applauncher /Request \
         com.lge.avn.applauncher.request.terminate int32:11 >> "$LOG" 2>&1 || true
     sleep 2
@@ -771,46 +1082,180 @@ if command -v dbus-send >/dev/null 2>&1; then
 else
     restart="dbus-send-missing"
 fi
-if [ "$restart" != "dbus-ok" ]; then
-    for p in /proc/[0-9]*; do
-        [ -r "$p/comm" ] || continue
-        if [ "$(cat "$p/comm" 2>/dev/null)" = "AppHomeScreen" ]; then
-            kill -TERM "${p#/proc/}" 2>/dev/null || true
-        fi
-    done
-    restart="$restart (killed AppHomeScreen; reboot if UI does not return)"
-fi
+case "$restart" in
+    skipped-flag*|dbus-ok) : ;;
+    *)
+        for p in /proc/[0-9]*; do
+            [ -r "$p/comm" ] || continue
+            if [ "$(cat "$p/comm" 2>/dev/null)" = "AppHomeScreen" ]; then
+                kill -TERM "${p#/proc/}" 2>/dev/null || true
+            fi
+        done
+        restart="$restart (killed AppHomeScreen; reboot if UI does not return)"
+        ;;
+esac
 # The new QML is only live once AppHomeScreen has actually restarted.  The
 # daemon updates via systemd, but the UI process keeps the old QML in
 # memory, so verify and tell the user when a reboot is required.
-sleep 3
-new_home_pid=$(pidof AppHomeScreen 2>/dev/null || true)
-if [ -n "$new_home_pid" ] && [ "$new_home_pid" != "$old_home_pid" ]; then
-    restart="$restart verified=1"
-else
-    restart="$restart verified=0 REBOOT_REQUIRED"
-fi
+case "$restart" in
+    skipped-flag*) : ;;
+    *)
+        sleep 3
+        new_home_pid=$(pidof AppHomeScreen 2>/dev/null || true)
+        if [ -n "$new_home_pid" ] && [ "$new_home_pid" != "$old_home_pid" ]; then
+            restart="$restart verified=1"
+        else
+            restart="$restart verified=0 REBOOT_REQUIRED"
+        fi
+        ;;
+esac
 log "restart=$restart"
 sync
 
-# A running PID alone is not proof of the deployed daemon version.
+# A running PID alone is not proof of the deployed daemon version. The daemon has
+# to come up, write status.json with THIS build id, and its /proc/PID/exe has to
+# be the payload binary. Waiting long is cheap; failing the stage after the files
+# are already installed is not: it stopped the combo before tweaks and left the
+# unit half-verified (see the 2026-11-22 run, "build identity did not match").
+# The radio itself is the bottleneck: bcmdhd registers wlan0 ~110 s after boot
+# (2026-11-22 probe, dmesg "Register interface [wlan0]"), and the unit's
+# ExecStartPre waits for it too. So verify over three minutes, not thirty
+# seconds - but give up 20 s after the interface appeared and still nothing,
+# because that is a real failure and not a timing one.
+# Load the radio ourselves first: modprobe is idempotent and takes ~1 s, while
+# waiting for the OEM to load it costs ~110 s of boot time.  The unit file does
+# the same in ExecStartPre, so this only moves the moment it happens.
+if [ ! -e /sys/class/net/wlan0 ]; then
+    modprobe bcmdhd >> "$LOG" 2>&1 || log "modprobe bcmdhd failed (continuing)"
+    _i=0
+    while [ ! -e /sys/class/net/wlan0 ] && [ "$_i" -lt 20 ]; do
+        sleep 1; _i=$((_i + 1))
+    done
+    log "wlan0 after modprobe: $([ -e /sys/class/net/wlan0 ] && echo present || echo absent) after ${_i}s"
+fi
+
 verified_build=0
-for attempt in 1 2 3 4 5; do
+_i=0
+_first_seen=""
+while [ "$_i" -lt 120 ]; do
     if systemctl is-active --quiet wifi-daemon.service 2>/dev/null && \
-       grep -q "\"build_id\":\"$BUILD_ID\"" "$RW_DIR/status.json" 2>/dev/null; then verified_build=1; break; fi
+       grep -q "\"build_id\":\"$BUILD_ID\"" "$RW_DIR/status.json" 2>/dev/null; then
+        verified_build=1
+        break
+    fi
+    [ "$_i" = 0 ] && systemctl start wifi-daemon.service >> "$LOG" 2>&1 || true
+    if [ -e /sys/class/net/wlan0 ]; then
+        [ -n "$_first_seen" ] || _first_seen=$_i
+        [ "$((_i - _first_seen))" -ge 20 ] && break
+    fi
     sleep 1
+    _i=$((_i + 1))
 done
-[ "$verified_build" = 1 ] || fail "running daemon build identity did not match payload"
 main_pid=$(systemctl show -p MainPID wifi-daemon.service 2>/dev/null | sed -n 's/^MainPID=//p')
-case "$main_pid" in ''|*[!0-9]*|0|1) fail "cannot verify daemon MainPID";; esac
-[ "$(md5 "/proc/$main_pid/exe")" = "$(md5 "$PAYLOAD/bin/wifi_daemon")" ] || fail "running daemon bytes do not match payload"
+if [ "$verified_build" != 1 ]; then
+    daemon_verify=unverified
+    probe_radio "install: daemon did not verify"
+    log "WARNING: wifi daemon did not report build_id=$BUILD_ID within 30 s"
+    { systemctl status wifi-daemon.service --no-pager 2>&1 | head -n 12
+      echo '--- journal'
+      journalctl -u wifi-daemon.service -n 12 --no-pager 2>&1 | tail -n 12
+    } >> "$LOG" 2>&1 || true
+elif [ "$(md5 "/proc/$main_pid/exe")" != "$(md5 "$PAYLOAD/bin/wifi_daemon")" ]; then
+    daemon_verify=bytes-mismatch
+    log "WARNING: running daemon bytes differ from the payload ($main_pid)"
+else
+    daemon_verify=ok
+fi
 if [ "$new_restore_point" = 1 ]; then ln -sfn "$BACKUP_HU" "$RW_DIR/backup/latest" || fail "cannot record restore point"; fi
 install_complete=1
 final_status=OK
 case "$restart" in *verified=0*) final_status=REBOOT_REQUIRED;; esac
+# A daemon that did not verify does not undo the install: the files, the page and
+# the tile are in place, and a reboot usually brings the service up. Report it
+# instead of aborting, so the next stage can still run.
+case "$daemon_verify" in
+    ok|"") : ;;
+    *) final_status="DAEMON_UNVERIFIED"; daemon_status="$daemon_status+$daemon_verify" ;;
+esac
+
+wifi_net_report() {
+    # One short, greppable file on the STICK ROOT: what it associated with, what
+    # address it got, and whether ssh is listening. No guessing from probe dumps.
+    _sf="$RW_DIR/status.json"
+    # Write where the owner will look: the stick root, then the stage dir, then
+    # /rw_data. Pick a writable candidate instead of trusting the environment (the
+    # 16:09 run produced no report at all).
+    _dir=""
+    for _c in "${SCOURGE_STICK_DIR:-}" "${USB_DIR:-}" "$RW_DIR"; do
+        [ -n "$_c" ] || continue
+        [ -d "$_c" ] || continue
+        [ -w "$_c" ] || continue
+        _dir="$_c"; break
+    done
+    _out="${_dir:-/tmp}/wifi_net.txt"
+    _field() {   # _field <key>: quoted or bare JSON value
+        sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$_sf" 2>/dev/null | head -n1
+    }
+    _num() {
+        sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\(-\?[0-9][0-9]*\).*/\1/p" "$_sf" 2>/dev/null | head -n1
+    }
+    # Say so immediately: the file exists from the first second, so "no end beep
+    # yet" can be told apart from "still waiting for an address" without guessing.
+    printf '=== SCOURGE wifi network (waiting for an address, started %s)\n' "$(date -u 2>/dev/null)" > "$_out"
+    sync 2>/dev/null || true
+    _i=0
+    _off=0
+    # Shorter than the old 45x2 s: either the association comes up quickly or it
+    # does not, and every extra second here is a second per iteration.
+    [ "${_have_dhcp:-1}" = 0 ] && [ -z "${_static_ip:-}" ] && _i=45
+    while [ "$_i" -lt 30 ]; do
+        # No point waiting for an address while ConnMan's wifi technology is off.
+        if connmanctl technologies 2>/dev/null | grep -A2 'technology/wifi' | grep -q 'Powered = False'; then
+            _off=$((_off + 2))
+            [ "$_off" -lt 16 ] || break
+        else
+            _off=0
+        fi
+        _ip=$(_field ip); [ -n "$_ip" ] || _ip=$(ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' | head -n1)
+        [ -n "$_ip" ] && break
+        sleep 1; _i=$((_i + 1))
+    done
+    {
+        echo "=== SCOURGE wifi network (\$(date -u 2>/dev/null))"
+        echo "ssid=$(_field ssid)"
+        echo "bssid=$(_field bssid)"
+        echo "state=$(_field state)"
+        echo "ip=${_ip:-none}"
+        echo "signal_dbm=$(_num signal)"
+        echo "ssh=$(_field ssh)  ssh_port=$(_field ssh_port)"
+        echo "gateway=$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')"
+        echo "--- wlan0"
+        (ip -4 -o addr show wlan0 2>/dev/null || ifconfig wlan0 2>/dev/null | head -n 4)
+        echo "--- wpa_cli"
+        wpa_cli -i wlan0 status 2>/dev/null | sed -n '1,8p'
+        echo "--- connman"; connmanctl technologies 2>/dev/null | grep -A2 'technology/wifi'
+        echo "--- credentials in config.conf (psk hidden)"
+        grep -E '^(mode|wlan_on|boot_off|ssid|ssid2|ssid3|static_ip|static_gw)=' "$RW_DIR/config.conf" 2>/dev/null
+        echo "--- wifi.txt"; [ -f "$RW_DIR/wifi.txt" ] && echo "present ssid_lines=$(grep -cE '^ssid' "$RW_DIR/wifi.txt" 2>/dev/null)" || echo absent
+        echo "--- wpa_cli"; wpa_cli -i wlan0 status 2>&1 | sed -n '1,6p'
+        echo "--- supplicant procs"; pidof wpa_supplicant 2>/dev/null; ls -l /var/run/wpa_supplicant 2>/dev/null | head -n 4
+        echo "--- listeners"
+        (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -E ':(2222|8090)' || echo "no 2222/8090 listener"
+    } > "$_out" 2>&1
+    sync 2>/dev/null || true
+    log "wifi network report written: $_out"
+}
+
+# Always leave a radio snapshot on the stick, success or not: the working case
+# is exactly when we need the unit's address to ssh in afterwards.
+wifi_net_report
+probe_radio "end of install (daemon_verify=${daemon_verify:-unknown})"
+probe_aa
 
 result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$setup_variant/$custom_variant" \
-       "backup=$BACKUP_HU" "daemon=$daemon_status" "oem_mask=$oem_mask" \
+    "tile_skipped=${variant_missing:+1}${variant_missing:-0}" \
+       "backup=$BACKUP_HU" "daemon=$daemon_status" "daemon_verify=$daemon_verify" \
+       "oem_mask=$oem_mask" \
        "wifi_import=$wifi_import" "restart=$restart" "build_id=$BUILD_ID" \
        "mdnsd_patch=$mdnsd_patch" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"
 log "=== wifi payload done ==="
