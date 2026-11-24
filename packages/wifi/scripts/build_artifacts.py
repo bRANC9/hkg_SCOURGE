@@ -455,6 +455,14 @@ def _have(*parts) -> bool:
     variants it has a base for and the installer says
     "page installed, tile skipped" for the rest.
     """
+    if len(parts) > 1 and os.path.isfile(os.path.join(BASE, parts[0], "SYNTHESIZED")):
+        # A synthesised base (scripts/synth_hello_base.py) is a diagnostic
+        # fixture, never an install input: the variant it produces references a
+        # tile component an OEM app set may not define, and the installer would
+        # carry that variant to the unit.  Skip it exactly like a missing base;
+        # only a real dump makes the marker disappear.
+        print(f"skip base {parts[0]}: synthesised fixture, not a dump", file=sys.stderr)
+        return False
     return os.path.isfile(os.path.join(BASE, *parts))
 
 
