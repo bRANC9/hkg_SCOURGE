@@ -450,7 +450,8 @@ in-process:
 | Is the decoder stack usable on this rootfs? | **Yes, proven by tooling, with one path quirk**: `usr/bin/vainfo` exists beside the vendor VA test tools (`avcenc`, `h264encode`, `mpeg2vaenc`, `mpeg2vldemo`, `jpegenc`, `loadjpeg`). On the unit `vainfo` reports VA-API **0.99.0** and then fails: it opens `/usr/lib/media-libva/dri/i965_drv_video.so` and `va_openDriver()` returns -1 — the vendor's driver path, not `/usr/lib/dri`. So the helper must set `LIBVA_DRIVERS_PATH`/`LIBVA_DRIVER_NAME` (and `XDG_RUNTIME_DIR`), not assume the stock layout |
 | What actually decodes video? | **GStreamer**, not a private codec: `ldd` on `AppProjection` pulls `libgstreamer-1.0`, `libgstapp`, `libgstvideo`, `libgstbase`, and `/usr/lib/gstreamer-1.0` ships a full element set. The running media stack is `playerengine` + `mediamanager` (`/app/bin`), and the vendor already drives VA-API from the shell: `AppEarlyCamera … h264 -vaapi -hw -uyvy` |
 | Is there real TLS on the image? | **Yes**: `libssl.so.1.0.2` (462 KiB) + `libcrypto.so.1.0.2` (in `/lib`) — OpenSSL 1.0.2, glibc, so the same two-process rule applies, but the "no TLS provider exists" blocker is now only a packaging question |
-| Is a USB device controller present? | **Yes**: `/sys/class/udc` lists `dwc3.2.auto` (with a `bind` node), so gadget role is wired; host role stays unproven |
+| Is a USB device controller present? | **Yes**: `/sys/class/udc` lists `dwc3.2.auto` (with a `bind` node), so gadget role is wired |
+| Can the same port be the **host** (what wired AA needs)? | **Yes, in the update flow it already is**: docs/01's rig is `HU USB host ──► dwc2 gadget`, and every SCOURGE stick run is the unit reading a mass-storage device. The port is therefore dual-role: host for USB media/updates, device for CarPlay (`g_iap2`/`usb_f_iap2` hold the UDC). What is unproven is switching it *at runtime* while the vendor projection app lives |
 | Which vendor binary must be probed? | `/app/bin/vbtd` is a **symlink to `/tmp/vbtd`** whose md5 equals `vbtd-51`'s (`be8406c8…`); `vbtd-63` differs (`fc8b7922…`). So the exports live in `vbtd-51`, and `readlink -f /proc/<pid>/exe` names the loaded object exactly |
 | Can the platform import a dmabuf as an EGL image? | **Yes.** `/usr/lib/libEGL.so.1` carries `EGL_EXT_image_dma_buf_import`, `EGL_KHR_image`/`_base`/`_pixmap`, `EGL_ANDROID_image_native_buffer` and `EGL_WL_bind_wayland_display` (`libGLESv2` has none of these — EGL owns the path) |
 | Can the compositor take a dmabuf from a client? | **Yes: `zwp_linux_dmabuf_v1`, version 1.** Weston is **1.10.0** with `drm-backend` + `gl-renderer`; the `linux_dmabuf_buffer`/`bind_linux_dmabuf` names are internal helpers, and the drm-backend carries the full v1 error set (`ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_{ALREADY_USED,INCOMPLETE,INVALID_DIMENSIONS,INVALID_FORMAT,OUT_OF_BOUNDS}`). No Wayland headers exist on the rootfs (`usr/include/wayland*` is empty), so the interface is bound by hand at v1 weights — no later plane-offset fields, and no third-party XML in this repo |
@@ -482,6 +483,17 @@ The zero-copy chain is therefore **alive on this platform**, whole:
    `EGL_WL_bind_wayland_display` is the alternative if the v1 binding proves
    awkward. `zwp_linux_dmabuf_v1` simply does not exist on this image, so no
    amount of client-side work makes the modern interface appear.
+
+**Wired AA is a shorter road than this section implies**, and the measurement above
+changed its standing. Wired AA wants the head unit to be the USB **host** and the
+TLS **client**, with the phone as the accessory and TLS server — which is exactly
+the role `aa_session` already implements; the AOA request table in `aa_aoap` is
+the sequence, only the host-side sender is missing. Going wired removes the three
+most expensive wireless-only pieces outright: the vendor SDP/RFCOMM shim (§5b),
+the 5 GHz AP + DHCP, and the RFCOMM five-stage bootstrap. What it adds instead:
+a cable, a runtime USB role switch (stop the iAP2 gadget and CarPlay projection
+while AA is up), and a real TLS provider (libssl 1.0.2 is on the image). Video
+stays the common cost either way.
 
 What is still open on this track: the **input path** — whether a new ivi surface
 receives pointer/keyboard focus directly or only through the vendor
