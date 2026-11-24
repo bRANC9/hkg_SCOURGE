@@ -3840,6 +3840,29 @@ static int owned_dropbear_pid(void)
     return pid;
 }
 
+/* Is anything LISTENing on this port?  /proc/net/tcp is always present (ss may
+ * not be), and state 0A is LISTEN.  Used to notice a listener somebody else
+ * started, so an apply does not kill a working SSH session to replace it. */
+static bool ssh_listening(int port)
+{
+    char hexport[8];
+    snprintf(hexport, sizeof(hexport), ":%04X", port & 0xffff);
+    const char *files[] = { "/proc/net/tcp", "/proc/net/tcp6" };
+    for (int i = 0; i < 2; i++) {
+        FILE *f = fopen(files[i], "r");
+        if (!f) continue;
+        char line[512];
+        if (!fgets(line, sizeof(line), f)) { fclose(f); continue; }  /* header */
+        while (fgets(line, sizeof(line), f)) {
+            char local[128], remote[128], st[16];
+            if (sscanf(line, " %*d: %127s %127s %15s", local, remote, st) != 3) continue;
+            if (!strcmp(st, "0A") && strstr(local, hexport)) { fclose(f); return true; }
+        }
+        fclose(f);
+    }
+    return false;
+}
+
 static bool ssh_running(void)
 {
     char buf[64];
@@ -3938,6 +3961,20 @@ static bool ssh_start(void)
         ensure_car_user();
         if (g_ssh_bound_ip[0] && !strcmp(g_ssh_bound_ip, ip))
             return true;
+        /* The stage starts dropbear itself when the apply cannot get a window
+         * (2e8b474, wifi_logs_20261124210007).  That listener is started from
+         * the same binary but with its own pid file, so ssh_stop() below used to
+         * kill the very session the user was working through, a minute after it
+         * came up.  Adopt a listener that is already up on our port: SSH keeps
+         * running and the daemon simply records which address it belongs to. */
+        if (!g_ssh_bound_ip[0] && ssh_listening(g_cfg.ssh_port)) {
+            str_copy(g_ssh_bound_ip, sizeof(g_ssh_bound_ip), ip);
+            write_file_atomic(SSH_BOUND, ip, 0600);
+            g_ssh_active_port = g_cfg.ssh_port;
+            log_msg("ssh: adopted the existing listener on port %d instead of restarting it", g_cfg.ssh_port);
+            set_msg("SSH running on port %d (existing listener adopted)", g_cfg.ssh_port);
+            return true;
+        }
         /* The WLAN address changed, or the daemon restarted; rebind. */
         ssh_stop();
     }
