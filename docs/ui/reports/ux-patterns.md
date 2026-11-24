@@ -125,8 +125,9 @@ http://127.0.0.1:8088/status, fallback file:///rw_data/battery/status.json
 on non-200/parse error (:235-273); Timer 500 ms repeat triggeredOnStart
 (:353-359); POST helper re-refreshes on DONE (:275-284); retry timer 10 s ×4
 (:367-377); staleness watchdog 5 s (:379-388). One daemon serves both
-surfaces: card ignores home_seq/home_source; overlay closes on
-onHomeSeqChanged (homeSeq > 0) (:52,229-232). Wifi app precedent: 2000 ms
+surfaces: card ignores home_seq/home_source; overlay closes when home_seq
+changes *after* open (baseline captured on the first read post-open; the
+counter is cumulative, so `homeSeq > 0` closed it at once). Wifi app precedent: 2000 ms
 file-mirror polling (WifiPage.qml:213-218), port 8090. Daemon death: HTTP
 fails → file mirror = last-known-good; serviceOk=false renders "Service
 unavailable" (:335,442), disables controls (:666,703), greys title (:649);

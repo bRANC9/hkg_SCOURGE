@@ -140,8 +140,11 @@ int main(int argc, char **argv)
         rootItem->setProperty("visible", true);
         // Optional state flags so a preview can show an overlay/panel that is
         // normally closed: qmlpreview … [showKeypad]
-        if (args.size() > 6 && args.value(6) == "showKeypad")
-            rootItem->setProperty("showKeypad", true);
+        if (args.size() > 6) {
+            const QString flag = args.value(6);
+            if (flag == "showKeypad") rootItem->setProperty("showKeypad", true);
+            else if (flag.startsWith("tab=")) rootItem->setProperty("currentTab", flag.mid(4).toInt());
+        }
         markOverflow(rootItem, &marks);
         fprintf(stderr, "overflow items: %d\n", overflowCount);
         for (QQuickItem *m : marks)

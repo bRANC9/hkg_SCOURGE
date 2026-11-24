@@ -71,8 +71,17 @@ Item {
     }
 
     // -- close on the steering-wheel Home/Star key (via helper daemon) --
+    // home_seq is CUMULATIVE: closing on `homeSeq > 0` shut the page the instant
+    // open()'s own refresh came back. Adopt the first value read after open as
+    // the baseline, close only on a later change.
     property int homeSeq: 0            // updated from the daemon's /status
-    onHomeSeqChanged: if (homeSeq > 0) close()
+    property int homeSeqBaseline: -1
+    function applyHomeSeq(v) {
+        if (homeSeqBaseline < 0) homeSeqBaseline = v
+        else if (v !== homeSeqBaseline) { homeSeqBaseline = v; if (requested) close() }
+        homeSeq = v
+    }
+    // open(): homeSeqBaseline = -1   // re-arm on every open
 
     // -- full-screen input shield, content above it --
     Rectangle { anchors.fill: parent; color: "#0E0E0E" }   // background
