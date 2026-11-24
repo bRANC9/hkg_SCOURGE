@@ -37,7 +37,7 @@ trap '[ -z "${BATTERY_BUILD:-}" ] || rm -rf "$BATTERY_BUILD"' EXIT
 [ "$TARGET" != "/" ] || { echo "refusing to deploy to /" >&2; exit 1; }
 
 # --- package selection -----------------------------------------------------------
-AVAILABLE="battery wifi tweaks ambient fake-engine wifi1b migrate button-gate applauncher dmclient-gate"
+AVAILABLE="battery wifi tweaks ambient fake-engine wifi1b migrate java button-gate applauncher dmclient-gate"
 DEFAULT_ORDER="battery wifi tweaks"
 WIP_STAGES="button-gate applauncher dmclient-gate"
 
@@ -50,6 +50,7 @@ if [ -z "$SELECTION" ]; then
     echo "  fake-engine — parked engine sound (own synthesised loop, 127.0.0.1:8095)"
     echo "  wifi1b  — separate CarPlay AP/client app beside WiFi (or standalone)"
     echo "  migrate — one-way: remove WiFi, keep Battery/Tweaks and rebase Wifi1b"
+    echo "  java    — headless Temurin 25 runtime for JAR apps/daemons (WIP, VM-validated, car-pending)"
     echo "  [WIP, signatureless-update research — docs/08; VM-validated, car-pending]"
     echo "  button-gate   — AppScomoDM stubs + drive wrapper + watcher (tools/update-debug)"
     echo "  applauncher   — AppLauncher .sign stubs"
@@ -102,7 +103,7 @@ fi
 if [ "${SCOURGE_SKIP_BUILD:-0}" != "1" ]; then
     for pkg in $SELECTED; do
         case "$pkg" in
-        battery|wifi|tweaks|wifi1b|migrate|ambient|fake-engine)
+        battery|wifi|tweaks|wifi1b|migrate|ambient|fake-engine|java)
             echo "== building package: $pkg"
             if [ "$pkg" = battery ]; then
                 mkdir -p "$HERE/battery/out"
@@ -257,7 +258,7 @@ stage_wip() {
 
 for pkg in $SELECTED; do
     case "$pkg" in
-    battery|wifi|tweaks|wifi1b|migrate|ambient|fake-engine) stage_pkg "$pkg" ;;
+    battery|wifi|tweaks|wifi1b|migrate|ambient|fake-engine|java) stage_pkg "$pkg" ;;
     *) stage_wip "$pkg" ;;
     esac
 done

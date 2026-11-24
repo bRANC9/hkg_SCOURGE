@@ -6,9 +6,14 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
+import tempfile
 from pathlib import Path
 
 from .result_schema import schema_state, validate_result
+
+# Linux sun_path is 108 bytes including the terminating NUL.
+AF_UNIX_PATH_LIMIT = 107
 
 
 def _result(path: Path) -> dict:
@@ -85,6 +90,97 @@ def extract(vm_dir: Path, run: str, member: str, destination: Path) -> dict:
     shutil.copy2(source, destination)
     return {"run": run, "member": member, "source": str(source),
             "destination": str(destination), "size": destination.stat().st_size}
+
+
+def qmp_socket_from_run(run_dir: Path) -> Path:
+    """Return a run's QMP socket, honoring a long-path redirect pointer."""
+    pointer = Path(run_dir) / "qmp.path"
+    try:
+        value = pointer.read_text().strip()
+    except OSError:
+        value = ""
+    return Path(value) if value else Path(run_dir) / "qmp.sock"
+
+
+def allocate_qmp_socket(run_dir: Path) -> tuple[Path, Path | None]:
+    """Choose a QMP path that fits Linux's 108-byte AF_UNIX limit.
+
+    Normal repositories keep the socket beside the run.  Deep worktree paths
+    would exceed the limit, so redirect to a private temporary directory and
+    leave a ``qmp.path`` pointer in the run directory.
+    """
+    run_dir = Path(run_dir)
+    candidate = run_dir / "qmp.sock"
+    if len(str(candidate).encode()) <= AF_UNIX_PATH_LIMIT:
+        return candidate, None
+    directory = Path(tempfile.mkdtemp(prefix="vm-qmp-",
+                                      dir=tempfile.gettempdir()))
+    socket_path = directory / "qmp.sock"
+    try:
+        (run_dir / "qmp.path").write_text(str(socket_path) + "\n")
+    except OSError:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+    return socket_path, directory
+
+
+def run_qmp_socket(vm_dir: Path, run: str) -> Path:
+    """Resolve a run id/path to its live QMP socket without escaping runs/."""
+    root = (Path(vm_dir) / "runs").resolve()
+    candidate = Path(run)
+    if candidate.is_absolute():
+        run_dir = candidate.resolve()
+    elif len(candidate.parts) > 1:
+        run_dir = (Path(vm_dir) / candidate).resolve()
+    else:
+        run_dir = (root / candidate).resolve()
+    if run_dir != root and root not in run_dir.parents:
+        raise ValueError(f"run escapes runs directory: {run}")
+    socket_path = qmp_socket_from_run(run_dir)
+    if not socket_path.exists():
+        raise ValueError(
+            f"QMP socket missing: {socket_path}; start the run with "
+            "--qmp-screenshot or use a persistent daemon")
+    return socket_path
+
+
+def latest_live(vm_dir: Path) -> dict:
+    """Return the newest live QMP target (daemon first, then one-shot runs)."""
+    root = Path(vm_dir) / "runs"
+    daemon_dir = root / "daemon"
+    try:
+        status = json.loads((daemon_dir / "status.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        status = {}
+    daemon_qmp = daemon_dir / "qmp.sock"
+    if (isinstance(status, dict) and status.get("state") == "ready"
+            and daemon_qmp.exists()):
+        return {"kind": "daemon", "directory": str(daemon_dir),
+                "qmp": str(daemon_qmp)}
+
+    candidates = []
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        entries = []
+    for path in entries:
+        if path.name == "daemon" or not path.is_dir():
+            continue
+        socket_path = qmp_socket_from_run(path)
+        if not socket_path.exists() or (path / "result.json").exists():
+            continue
+        try:
+            mode = socket_path.stat().st_mode
+        except OSError:
+            continue
+        if not stat.S_ISSOCK(mode):
+            continue
+        candidates.append((socket_path.stat().st_mtime, path, socket_path))
+    if not candidates:
+        raise ValueError("no live VM found; start a run with --qmp-screenshot "
+                         "or a persistent daemon")
+    _, path, socket_path = max(candidates)
+    return {"kind": "qmp", "directory": str(path), "qmp": str(socket_path)}
 
 
 def prune(vm_dir: Path, keep: int = 20, apply: bool = False,

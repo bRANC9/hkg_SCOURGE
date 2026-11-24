@@ -13,7 +13,7 @@ for the limits.
 | Exact `4.1.27-abl` kernel | yes | no (pinned host kernel) |
 | Policy/security/crypto claims | **yes** | **no** |
 | Root shell / USB / D-Bus scenarios | yes | yes |
-| Display / screenshots | headless Weston artifact only | virtio-vga + QMP PNG |
+| Display / screenshots | headless Weston artifact only | virtio-vga + QMP PNG (final, live, checkpoints) |
 | Interactive GTK/VNC + input | no (input-free by design) | yes |
 | 9p host share | no | yes |
 | Persistent state | yes | yes |
@@ -98,7 +98,9 @@ python3 -B launch.py run --kernel compat --qmp-screenshot \
 ```
 
 `ui-smoke` requires a non-black QMP frame and writes
-`qmp-screenshot.png` plus `qmp_pixels` metadata into the run dir.
+`qmp-screenshot.png` plus `qmp_pixels` metadata into the run dir. The QMP
+socket also stays available during the run for on-demand `launch.py
+screenshot` captures (see [Live screenshots](#live-screenshots)).
 
 WiFi app QML-error capture (first-party payload on the host):
 
@@ -106,6 +108,27 @@ WiFi app QML-error capture (first-party payload on the host):
 python3 -B launch.py run --kernel compat --profile research \
   --scenario wifi-ui --share /path/to/wifi_app/out/usb --timeout 240
 ```
+
+## Java runtime package scenario
+
+`java-runtime` installs the real `packages/java` USB tree through its
+`run_stuff.sh`, exercises the Temurin 25 runtime (version, self-test, HTTP
+daemon, `jcmd` attach, reinstall/prune) and restores it. It needs a payload
+image, not a tools image:
+
+```sh
+# from the repo root
+sh packages/java/tests/build_vm_payload.sh
+
+# from tools/vm
+python3 -B launch.py run --profile research --scenario java-runtime \
+  --payload ../../packages/java/out/vm --timeout 420
+python3 -B launch.py run --kernel compat --profile research \
+  --scenario java-runtime --payload ../../packages/java/out/vm --timeout 420
+```
+
+Or from the package: `make -C packages/java vm-test`. The scenario is
+headless-only evidence; it makes no GUI or car claim.
 
 ## Daily workflow
 
@@ -158,7 +181,9 @@ Optional share/display/input/network/audio:
 --share DIR --display vnc --vnc-display :7 --network --audio
 --usb-host 058f:6366
 python3 -B launch.py input --qmp <run>/qmp.sock --click 640,360   # X,Y integers
+python3 -B launch.py input --qmp <run>/qmp.sock --drag 900,360,400,360  # swipe
 python3 -B launch.py input --qmp <run>/qmp.sock --key ret
+# use --width 1920 --height 720 when the virtio-vga surface is 1920x720
 ```
 
 `--usb-host VENDOR:PRODUCT` is compat-only and opt-in. QEMU must be able to
@@ -401,6 +426,134 @@ without mutating decoded state).
 Rebuild the payload with `sh build_research_tools.sh` after changing the
 simulator. The lab mapping is not a vendor DBC and does not claim stock
 vehicle fidelity.
+
+## Live screenshots
+
+Capture any running VM on demand (Mode C; the target needs a live QMP
+socket). A one-shot run exposes one when started with `--qmp-screenshot`, and
+the run directory is printed at start:
+
+```sh
+python3 -B launch.py run --kernel compat --qmp-screenshot \
+  --cmd 'sleep 120' --timeout 180
+# in another shell, using the printed run directory
+python3 -B launch.py screenshot --run <run-id>
+python3 -B launch.py screenshot --run <run-id> --output /tmp/shot.png
+```
+
+The command prints JSON with `path`, size/hash/dimensions and a non-black
+pixel bbox (`--no-pixels` skips the scan). Open the PNG directly to inspect
+what the guest is rendering, or feed it to an agent that can view images.
+`--qmp <socket>` targets any QMP socket, `--daemon-dir` uses the daemon
+control path and its retention, and `--latest` picks the newest live daemon
+or one-shot run. On deep worktree paths where `runs/<id>/qmp.sock` would
+exceed Linux's AF_UNIX limit, the socket is redirected to a private temporary
+directory and `runs/<id>/qmp.path` records it; `--run` and `--latest` follow
+that pointer.
+
+For a non-default virtio-vga size (for example the app's 1920×720 surface),
+pass `--display-size WxH` to `run`; the QMP PNG follows the device dimensions.
+
+Sequences capture the same target repeatedly:
+
+```sh
+python3 -B launch.py screenshot --run <run-id> --shots 10 --interval 1
+```
+
+Captures land beside the run's QMP socket as
+`live-screenshot-<ns>[-NNN].png`; for a daemon they use the daemon's
+`screenshot-*.png` retention. With `--output`, a sequence writes
+`<stem>-000.png`, ...; a daemon capture is copied out and the daemon-dir copy
+is removed. `daemon exec` + `daemon screenshot` remains the simplest
+iteration loop for repeated UI work.
+
+### Scenario checkpoints
+
+A compat scenario can declare host-side captures in `screenshots`:
+
+```json
+"screenshots": [
+  {"name": "weston-up", "after_check": "weston-alive"},
+  {"name": "probe", "after_check": "wayland-probe", "delay": 0.5},
+  {"name": "t5", "after_seconds": 5, "required": true, "nonblank": true}
+]
+```
+
+Triggers: `after_check` matches `HARNESS_CHECK <name> PASS`, `after_marker`
+matches an exact serial line, and `after_seconds` counts from command start.
+`delay` waits after the trigger. Captures are written under
+`<run>/screenshots/<name>.png` and recorded in `result.json` as
+`screenshot.checkpoints`, including a per-frame pixel bbox. `required` makes
+a missing or failed checkpoint fail the run; `nonblank` additionally rejects
+an empty frame. `ui-smoke` captures `weston-up` and `wayland-probe`.
+Checkpoint screenshots require `requires_mode: compat` and cannot be
+combined with boot-only or systemd-transition scenarios.
+
+## Stock AppHomeScreen research (Mode C, WIP)
+
+The stock `AppHomeScreen` can be brought up in the compat VM, but this is
+research evidence, not stock UX fidelity. Steps and limits:
+
+- **CAN.** Load `vcan` and create `can0` before launch; otherwise
+  `HomeCanThread::read_port()` calls `FD_SET(-1)` and aborts.
+- **Compositor.** Weston DRM + GL renderer (`kms_swrast`); the pixman
+  renderer asserts on the app's first 0×0 surface commit.
+- **Input devices.** The vendor rootfs has no `udevadm`/`systemd-udevd`; the
+  probe `probes/stock-input.sh` writes `/run/udev/data` tags so Weston creates
+  the QEMU tablet/keyboard. QMP clicks/keys reach the kernel and move the
+  compositor pointer, but the research-injected IVI surface does not receive
+  them.
+- **Boot info.** AppLauncher passes flags such as `-gui:1`, `-vc:65`, `-dn:2`
+  in the child argv. Direct launch with those flags sets LCD/ECO/GUI and
+  day-night; language and full boot info still need the `BOOTINFOSTATUS`
+  shared memory.
+- **Persistence / D-Bus.** The rootfs contains `/usr/bin/pers_admin_svc`.
+  Start a system bus at `/run/dbus/system_bus_socket` (not `/var/run/...`
+  because `/var` links to `rw_data/var`), populate `/tmp/passwd` from
+  `/etc/passwd.legacy` before `dbus-daemon`, and export
+  `DBUS_SYSTEM_BUS_ADDRESS`/`PERS_CLIENT_DBUS_ADDRESS`. The service owns
+  `org.genivi.persistence.admin` and `org.genivi.persistence.admin_svc`;
+  `PersistentManager` reads/writes settings (`APP_HOME_SCREEN_TYPE`). A custom
+  `AppHomeScreen` resource archive installed from guest `/tmp` registers the
+  key; a 9p host path fails the unarchive step. A direct PCL write of ASCII
+  `"0"` makes the app read `APP_HOME_SCREEN_TYPE=0`, but the key alone still
+  normalizes/sets `1` and loads the widget page. The separate
+  `KEY_EVT_REQUEST_GOTO_SCREEN_ALL_MENUS` event loads the stock all-menus QML
+  in a lab overlay; the stock boot path remains WIP.
+- **GUI variant / overlay.** `GUI_VARIANT=1` selects `qml_new2.0`; an overlay
+  aimed at `qml`/`qml_eco3.0` is not used. The labelled menu preview targets
+  `qml_new2.0`, forces the menu page index, and uses a DB-derived mock model.
+- **All-menus event.** From a qml_new2.0 overlay, sending
+  `QML_Handler.qmlSendEvtKey(HMIEVENTS.KEY_EVT_REQUEST_GOTO_SCREEN_ALL_MENUS)`
+  makes the app load `HomeScreen/Screen_HomeScreen_AllMenus.qml`; the capture is
+  a full 1920×720 all-menus frame with placeholder assets. The overlay trigger is
+  lab-only, not a stock boot path.
+- **Theme.** The firmware rootfs carries ASTC-only variants; the QML asks for
+  plain PNGs. The app resolves `new_gui` to `/tmp/new_gui`; placeholders must be
+  staged under `/tmp/new_gui/new2.0/hmc/{night,day}`. Placeholders can be staged
+  locally for layout only, and captures must say "placeholder theme".
+- **Layer.** `ivi-window-manager.so` leaves the surface at `layer(nil)`. The
+  research `ivi_controller` helper (`probes/ivi-layer.c`) can add it to a WM
+  layer for capture; build it with
+  `sh probes/ivi-layer-build.sh <rootfs.img>` and label it lab-only.
+- **Focus.** Weston loads the vendor input controller with
+  `ivi-input-module=ivi-input-controller.so`; putting it in `ivi-module` fails
+  with `undefined symbol: controller_module_init`. The research
+  `probes/ivi-focus.c` binds the vendor `ivi_input` global and sets
+  acceptance/focus. It takes an optional surface id and defaults to `11000`, the
+  launcher surface id, so `ivi-focus` with no argument targets the app surface;
+  pass an id to override. On the event-triggered all-menus frame, a QMP click at
+  `500,365` gave an identical frame and no app item event; Weston still reports
+  pointer entry on `wl_surface@16`. A stock-launcher attempt (`AppLauncher 0/2`
+  with `QT_QPA_PLATFORM=wayland-egl`) timed out and the launcher-child QtQml
+  crash remains unresolved. The stock launcher FG handshake is still the
+  blocker. The `ivi-watch` watcher, the `libvisfilter.so`/`libkeepvisible.so`
+  preloads and the placeholder/qml overlay trees are local scratch artifacts,
+  not repo files.
+- **Capture.** Use `--display-size 1920x720` for the full app surface and
+  `launch.py screenshot` / `launch.py input --drag` for before/after frames.
+  The qml_new2.0 menu preview produces a labelled placeholder frame at
+  `1920x720`; it is observation evidence, not stock fidelity.
 
 ## Visual regression
 
@@ -1441,6 +1594,30 @@ target Multi-User System`, in order, from PID 1. A real run reaches
 Multi-User in about 16 seconds with `micommanager` and `nua.service` still
 failing. This is **not stock boot**: the fan/micom gate is bypassed, not
 emulated, and the fstab/runtime layout is a lab fixture.
+
+## Rust app package (Mode V)
+
+Host-built Rust apps/daemons are static-musl binaries packaged with the
+generic SMACK-aware installer (`docs/19-rust-apps.md`). The unit never gets
+`rustc` or `cargo`.
+
+```sh
+bash scripts/00_fetch_rust.sh
+bash tools/rust/scripts/package_app.sh \
+    tools/rust/examples/scourge-statusd --fetch \
+    --out third_party/rust/out/scourge-statusd-usb
+cd tools/vm
+python3 -B launch.py run --scenario rust-app \
+    --payload ../../third_party/rust/out/scourge-statusd-usb \
+    --timeout 300 --memory 1024 --smp 1 --label rust-app
+```
+
+The scenario installs the package from the payload stick, checks static
+linking, starts `scourge-statusd`, verifies `GET /status` and the SMACK
+exec/process labels, sends SIGTERM, re-runs the installer (idempotent) and
+restores (data preserved). The research boot has no systemd, so the daemon
+is started directly; the unit file is installed/checked but the systemd
+start path is not exercised here.
 
 ## Troubleshooting
 

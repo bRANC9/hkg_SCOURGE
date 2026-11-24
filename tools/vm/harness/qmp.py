@@ -118,6 +118,40 @@ def key(socket_path: Path, qcode: str, timeout: float = 10.0) -> dict:
     return {"ok": True, "qcode": qcode}
 
 
+def drag(socket_path: Path, x1: int, y1: int, x2: int, y2: int,
+         width: int = 1280, height: int = 720, button: str = "left",
+         steps: int = 8, timeout: float = 10.0) -> dict:
+    """Absolute-pointer drag; a button-down swipe across the video surface."""
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be positive")
+    if button not in ("left", "middle", "right"):
+        raise ValueError(f"invalid button: {button!r}")
+    for x, y in ((x1, y1), (x2, y2)):
+        if not (0 <= x < width and 0 <= y < height):
+            raise ValueError(f"drag point outside {width}x{height}: {x},{y}")
+    if not 1 <= steps <= 64:
+        raise ValueError("steps must be between 1 and 64")
+    ax1 = round(x1 * 32767 / max(1, width - 1))
+    ay1 = round(y1 * 32767 / max(1, height - 1))
+    ax2 = round(x2 * 32767 / max(1, width - 1))
+    ay2 = round(y2 * 32767 / max(1, height - 1))
+    events = [
+        {"type": "abs", "data": {"axis": "x", "value": ax1}},
+        {"type": "abs", "data": {"axis": "y", "value": ay1}},
+        {"type": "btn", "data": {"down": True, "button": button}},
+    ]
+    for index in range(1, steps + 1):
+        t = index / steps
+        ax = round(ax1 + (ax2 - ax1) * t)
+        ay = round(ay1 + (ay2 - ay1) * t)
+        events.append({"type": "abs", "data": {"axis": "x", "value": ax}})
+        events.append({"type": "abs", "data": {"axis": "y", "value": ay}})
+    events.append({"type": "btn", "data": {"down": False, "button": button}})
+    send_events(socket_path, events, timeout)
+    return {"ok": True, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
+            "width": width, "height": height, "button": button, "steps": steps}
+
+
 def device_del(socket_path: Path, device_id: str, timeout: float = 10.0) -> dict:
     """Detach a QEMU device, e.g. the usbdev update stick."""
     if not device_id or any(char.isspace() for char in device_id):

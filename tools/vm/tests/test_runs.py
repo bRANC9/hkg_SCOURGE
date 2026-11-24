@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import socket
 import tempfile
 import unittest
 from pathlib import Path
@@ -85,6 +87,93 @@ class RunManagementTests(unittest.TestCase):
             runs.extract(self.root, "run-3", "../run-2/result.json", self.root / "bad")
         with self.assertRaises(ValueError):
             runs.extract(self.root, "../run-2", "result.json", self.root / "bad")
+
+    @staticmethod
+    def _bind_socket(path: Path) -> None:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            server.bind(str(path))
+        finally:
+            server.close()
+
+    def test_long_qmp_path_redirects_to_temp_pointer(self) -> None:
+        short = self.runs / "short-run"
+        short.mkdir()
+        socket_path, temp_dir = runs.allocate_qmp_socket(short)
+        self.assertEqual(socket_path, short / "qmp.sock")
+        self.assertIsNone(temp_dir)
+
+        base = Path(tempfile.mkdtemp(prefix="vm-long-",
+                                     dir=tempfile.gettempdir()))
+        long_run = base
+        while len(str(long_run / "qmp.sock").encode()) <= 107:
+            long_run = long_run / ("x" * 40)
+        long_run.mkdir(parents=True)
+        temp_dir = None
+        try:
+            socket_path, temp_dir = runs.allocate_qmp_socket(long_run)
+            self.assertIsNotNone(temp_dir)
+            self.assertLessEqual(len(str(socket_path).encode()), 107)
+            pointer = long_run / "qmp.path"
+            self.assertEqual(pointer.read_text().strip(), str(socket_path))
+            self.assertEqual(runs.qmp_socket_from_run(long_run), socket_path)
+        finally:
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_run_qmp_socket_uses_pointer(self) -> None:
+        live = self.runs / "run-pointer"
+        live.mkdir()
+        redirect = self.root / "redirect.sock"
+        self._bind_socket(redirect)
+        (live / "qmp.path").write_text(str(redirect) + "\n")
+        self.assertEqual(runs.run_qmp_socket(self.root, "run-pointer"),
+                         redirect)
+        self.assertEqual(runs.latest_live(self.root)["qmp"], str(redirect))
+
+    def test_run_qmp_socket_resolution(self) -> None:
+        live = self.runs / "run-live"
+        live.mkdir()
+        self._bind_socket(live / "qmp.sock")
+        self.assertEqual(runs.run_qmp_socket(self.root, "run-live"),
+                         live / "qmp.sock")
+        self.assertEqual(runs.run_qmp_socket(self.root, str(live)),
+                         live / "qmp.sock")
+        self.assertEqual(runs.run_qmp_socket(self.root, f"runs/{live.name}"),
+                         live / "qmp.sock")
+        with self.assertRaises(ValueError):
+            runs.run_qmp_socket(self.root, "../run-live")
+        with self.assertRaisesRegex(ValueError, "QMP socket missing"):
+            runs.run_qmp_socket(self.root, "run-1")
+
+    def test_latest_live_prefers_newest_run_then_daemon(self) -> None:
+        older = self.runs / "run-live-old"
+        older.mkdir()
+        self._bind_socket(older / "qmp.sock")
+        newer = self.runs / "run-live-new"
+        newer.mkdir()
+        self._bind_socket(newer / "qmp.sock")
+        os.utime(older / "qmp.sock", (100, 100))
+        os.utime(newer / "qmp.sock", (200, 200))
+        completed = self.runs / "run-complete"
+        completed.mkdir()
+        self._bind_socket(completed / "qmp.sock")
+        (completed / "result.json").write_text("{}")
+        os.utime(completed / "qmp.sock", (300, 300))
+
+        target = runs.latest_live(self.root)
+        self.assertEqual(target["kind"], "qmp")
+        self.assertEqual(Path(target["qmp"]), newer / "qmp.sock")
+
+        daemon_dir = self.runs / "daemon"
+        daemon_dir.mkdir()
+        self._bind_socket(daemon_dir / "qmp.sock")
+        (daemon_dir / "status.json").write_text(
+            json.dumps({"state": "ready"}))
+        target = runs.latest_live(self.root)
+        self.assertEqual(target["kind"], "daemon")
+        self.assertEqual(Path(target["directory"]), daemon_dir)
 
 
 if __name__ == "__main__":

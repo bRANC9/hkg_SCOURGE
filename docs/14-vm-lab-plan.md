@@ -261,6 +261,25 @@ Effort: **S** ≤ 0.5 d · **M** 1–2 d · **L** 3–5 d · **XL** 1–2 wk
 | P3-5 | Custom RDP/VNC/input bridge on vendor headless compositor | L–XL | Only if Mode C is ever unacceptable |
 | P3-6 | Real GPU/radio/CAN-timing fidelity | out of scope | Traces + car tests only |
 
+### P0.5 — Stock AppHomeScreen bring-up (2026-11-24, WIP research)
+
+This slice proves the stock app can run and render its home-screen QML in
+Mode C, but it is **not** stock UX fidelity. The capture uses placeholder
+theme assets and a research layer helper; input focus is unresolved.
+
+| # | Task | Effort | Acceptance / blocker |
+|---|---|---|---|
+| S1 | CAN startup fix: vcan `can0` before `AppHomeScreen` | S | No `__fdelt_chk` abort; app stays alive (done) |
+| S2 | GL compositor + IVI surface; avoid the pixman 0×0 assertion | S | Weston GL + Mesa `kms_swrast`; surface created (done) |
+| S3 | Research `ivi_controller` layer helper | M | Surface in WM layer 107/4000; frame visible (done, lab-only) |
+| S4 | Theme placeholder staging + provenance label | S | 32 missing PNGs staged locally; captures labelled placeholder (done) |
+| S5 | Launcher boot info + persistence admin | M | argv sets `LCD/ECO/GUI_VARIANT` and day-night; `pers_admin_svc` runs on a guest system bus and `PersistentManager` reads/writes settings (done). A PCL write of ASCII `"0"` makes the app read `APP_HOME_SCREEN_TYPE=0`, but it still normalizes to `1`; `LANGUAGE` and full boot info still need the shm |
+| S6 | FG/input focus | M | `ivi-input-controller.so` loads via `ivi-input-module`; `probes/ivi-focus.c` sets acceptance/focus and defaults to surface `11000` (optional arg). Run `1795540970918967510` reports `INPUT 11000`; Weston pointer enters `wl_surface@16` but all-menus click frames stay identical and no app item event appears. `AppLauncher 0/2` with `wayland-egl` timed out; launcher-child QtQml crash unresolved. WIP |
+| S7 | Menu-grid DB/SMACK + all-menus screen | M | `MenuHome`/`CustomLayoutDB` created; a qml_new2.0 preview overlay renders the menu grid (done, lab-only). The `KEY_EVT_REQUEST_GOTO_SCREEN_ALL_MENUS` event loads the stock `Screen_HomeScreen_AllMenus.qml` and captures a full 1920×720 frame with placeholders (done, lab-triggered). The real boot path remains WIP |
+| S8 | Launcher-child QtQml crash | M | Child reaches its surface; no restart in `libQt5Qml` |
+| S9 | Car-side theme PNGs / `new_gui` materialisation | M | Real wallpapers/icons; file GitHub issue at push |
+| S10 | Stock UI WIP probe/scenario | M | Explicit placeholder/lab-intervention metadata; never stock-equivalent |
+
 ---
 
 ## 5. SCOURGE cross-commit policy checklist (enforced by sync script)
@@ -1250,5 +1269,15 @@ items beyond that.
   stale entry was corrected on the NAS with `SHA256SUMS.orig-20261115` and
   `MANIFEST-CORRECTION.txt`; the capture script now writes metadata first and
   hashes last, excluding `SHA256SUMS*`.
+- **2026-11-24 — stock AppHomeScreen research**: vcan CAN fix removes the
+  `__fdelt_chk` abort; Weston GL (`kms_swrast`) avoids the pixman 0×0 assertion;
+  the IVI surface is created and a research `ivi_controller` helper adds it to
+  a WM layer for capture. 32 missing theme PNGs are staged as placeholders;
+  the 1920×720 QMP frame is the real app's home-screen QML, labelled
+  placeholder. QMP input reaches the kernel (`ABS_X/Y`, `BTN_LEFT`) and moves
+  the compositor pointer, but the IVI surface ignores clicks/keys;
+  `ivi_controller_surface.set_input_focus` is rejected (`invalid method 9`).
+  Launcher boot-info/FG, DB/SMACK menu-grid data, launcher-child QtQml crash
+  and real car theme assets remain WIP.
 - **Remaining:** P2-3 (recorder), P2-6 (hardware) and the now-feasible
-  P2-7/P2-8/P2-9 slices using the car dump; P3 deferred.
+  P2-7/P2-8/P2-9 slices using the car dump; P3 deferred; P0.5 S5–S10 open.

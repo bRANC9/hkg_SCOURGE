@@ -3,6 +3,8 @@
 # --- secrets & local configuration -------------------------------------------
 config/key.local
 config/paths.local.env
+# any per-target/local override env file
+*.local.env
 config/rig.local.env
 *.key
 *.local
@@ -31,6 +33,14 @@ packages/wifi/bin/
 # --- VM-lab run outputs (serial logs, screenshots, result.json; -------------
 # --- runtime artifacts, never committed) --------------------------------------
 tools/vm/runs/
+tools/vm/.cache/
+# Backing images are prepared from the owner's own staged firmware (docs/14).
+# Symlinks/copies are convenient locally but must never be committed.
+tools/vm/*.img
+tools/vm/bzImage
+tools/vm/vmlinux.patched
+tools/vm/compat/kernel
+tools/vm/compat/initramfs-linux.img
 
 # --- firmware inputs & build outputs ------------------------------------------
 # The official firmware package, decrypted plaintexts, and all built artifacts
@@ -50,6 +60,9 @@ venv/
 __pycache__/
 *.pyc
 
+# --- rust ----------------------------------------------------------------------
+target/
+
 # --- editors / OS --------------------------------------------------------------
 .idea/
 .vscode/
@@ -57,6 +70,7 @@ __pycache__/
 .DS_Store
 
 # --- compiled package daemons (built locally, never committed) ---------------
+packages/java/out/
 packages/battery/src/battery_daemon
 packages/wifi/src/wifi_daemon
 packages/wifi1b/src/wifi1b_daemon

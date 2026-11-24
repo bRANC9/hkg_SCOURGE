@@ -2166,6 +2166,49 @@ class VMIntegrationTests(unittest.TestCase):
                 self.assertEqual(stopped.returncode, 0,
                                  stopped.stdout + stopped.stderr)
 
+    def test_live_screenshot_sequence_via_daemon(self):
+        with tempfile.TemporaryDirectory(prefix='vm-daemon-live-shot-') as tmp:
+            root = Path(tmp)
+            daemon_dir = root / 'daemon'
+            output = root / 'burst.png'
+
+            def run_cli(*args):
+                return subprocess.run(
+                    [sys.executable, '-B', str(VM / 'launch.py'), *args],
+                    cwd=VM, capture_output=True, text=True, timeout=240)
+
+            started = run_cli('daemon', 'start', '--daemon-dir',
+                              str(daemon_dir), '--ready-timeout', '120',
+                              '--lock-timeout', '120')
+            combined = started.stdout + started.stderr
+            if 'another VM boot holds' in combined or 'lock timeout' in combined:
+                self.skipTest('VM lab is busy with another run')
+            self.assertEqual(started.returncode, 0, combined)
+            try:
+                captured = run_cli(
+                    'screenshot', '--daemon-dir', str(daemon_dir),
+                    '--output', str(output), '--shots', '2',
+                    '--interval', '0.2', '--no-pixels', '--timeout', '10')
+                self.assertEqual(captured.returncode, 0,
+                                 captured.stdout + captured.stderr)
+                payload = json.loads(captured.stdout)
+                self.assertTrue(payload['ok'])
+                self.assertEqual(len(payload['captures']), 2)
+                first = root / 'burst-000.png'
+                second = root / 'burst-001.png'
+                self.assertEqual(Path(payload['captures'][0]['path']), first)
+                self.assertEqual(Path(payload['captures'][1]['path']), second)
+                for path in (first, second):
+                    data = path.read_bytes()
+                    self.assertEqual(data[:8], b'\x89PNG\r\n\x1a\n')
+                    self.assertTrue(data)
+                self.assertEqual(list(daemon_dir.glob('screenshot-*.png')), [])
+            finally:
+                stopped = run_cli('daemon', 'stop', '--daemon-dir',
+                                  str(daemon_dir))
+                self.assertEqual(stopped.returncode, 0,
+                                 stopped.stdout + stopped.stderr)
+
     def test_qmp_screendump_failure_diagnostics(self):
         process = subprocess.Popen(
             [sys.executable, '-B', str(VM / 'launch.py'), 'run',
@@ -2468,6 +2511,12 @@ class VMIntegrationTests(unittest.TestCase):
         shot = Path(result['screenshot']['qmp']['path'])
         self.assertTrue(shot.is_file())
         self.assertTrue((result['screenshot'].get('qmp_pixels') or {}).get('bbox'))
+        checkpoints = result['screenshot'].get('checkpoints') or []
+        self.assertEqual(len(checkpoints), 2)
+        for checkpoint in checkpoints:
+            self.assertTrue(Path(checkpoint['path']).is_file())
+            self.assertIsNone(checkpoint.get('error'))
+            self.assertTrue((checkpoint.get('pixels') or {}).get('bbox'))
         run_id = Path(result['run_dir']).name
 
         def visual(*args):

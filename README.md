@@ -56,10 +56,28 @@ This is likely readily adaptable to other cars & environments, but I am noting t
 | TOCTOU delivery + stage-1 root firmware (sideloading, failsafe) | Validated on the target car |
 | Updater signature-check bypass baked into the firmware (unsigned normal-USB update) | Validated on the target car (2026-11-15); see `docs/17-usb-update-confirmed.md` |
 | Battery / WiFi+SSH / Tweaks (incl. Reboot) app packages | Work-in-progress; the WiFi package is VM-validated on the vendor kernel/Qt (on-car retest pending). Reboot's clean path and daemon endpoint are host/QML-tested; the micom hard-reset fallback is host-tested with a fake D-Bus helper and derived from the vendor script (car pending) |
+| Rust apps/daemons (host-built static musl) | WIP — host build/package path offline-validated; sample `scourge-statusd` VM-validated on the vendor kernel; car pending. No Rust toolchain or runtime is installed on the unit; see `docs/19-rust-apps.md` |
+| Java 25 runtime (headless, JAR apps/daemons) | WIP — Temurin 25.0.5.1+2 jlink runtime VM-validated on the vendor and compat kernels; car pending. Installs under `/rw_data/java`, app JARs in `/rw_data/java-apps`; no GUI/X11 and no `javac` in the default build; see `docs/21-java-runtime.md` |
 | Tweaks: safety-disclaimer auto-accept | Working reliably |
-| Anything beyond the exact firmware above (`NE_E.EUR.S5W_L.001.001.260128`, EU) | Untested — see the porting runbook before trying |
+| Kia EV6 MY22–24 (EU, Gen5W_L), `CV_E.EUR.S5W_L.001.001.260128` | Fixture captured; payload byte-identical to the Ioniq 5 260128 package. Target wiring/build is WIP — not car-validated (docs/20) |
+| Any other firmware, region or vehicle | Untested — see the porting runbook before trying |
 
 No claims are made about other vehicles or platforms (including S5W_M/Android units, which are a fundamentally different architecture, or models whose update schemes are known to differ).
+
+### Firmware package warnings
+
+`scripts/01_stage_inputs.sh` audits the downloaded package before any build.
+HMG's update server sometimes republishes the same firmware with a new
+package-id counter in the `.ver` header; every row is identical, but the
+file's size/hash changes. That is a **warning** (`ver.sha ... but header
+identity and rows verify`), not a stop — a package-map variant, not a bad
+download. A **row** that disagrees with its file or a lock pin is an error,
+and the audit names the stale pin. Do not re-download or edit the package to
+silence it. Inspect by hand with:
+
+```sh
+scripts/01b_audit_inputs.py --layout package --root /path/to/IONIQ5_EU
+```
 
 ## Quick Installation Guidance
 
@@ -97,8 +115,25 @@ As a general rule of thumb:
 - Packaging & making it easier to sideload apps
 - Making sideload app installers less likely to interfere with each other
 - Support networked installation scripts/packages
+- A **headless Java 25 runtime** (Temurin, `jlink`-built) for JAR apps and
+  daemons, installed under `/rw_data/java`; WIP — VM-validated on the vendor
+  and compat kernels, car-pending — see `docs/21-java-runtime.md`
 - A QEMU/KVM **VM lab** for bench-testing packages, installers and patches against your own decrypted firmware before they go near the car, with a planned graphics mode for UI work — see `docs/14-vm-lab.md` (WIP: the harness runs today, but is not yet packaged in-repo)
 - Separate-process custom apps: the platform's AppLauncher RSA-verifies the `.sign` section of startup-group/preload spawns (on-demand `request.launch` spawns already skip it), which blocks the "official app" route. A sigstub for those paths ships in stage-1 build 5 and is car-validated (`docs/07-packages.md`), and there is a second route (an own Wayland process outside AppLauncher) that needs no patch at all. See `docs/07-packages.md` and `docs/ui/deployment-modes.md`.
+
+## Rust apps and daemons (WIP)
+
+Rust is a **builder-side** app language, not an on-unit runtime. Apps are
+built on the owner's host into self-contained static-musl binaries and
+installed with the same USB failsafe as the other packages; the unit gets
+no `rustc`, no Cargo and no shared `libstd`. A Tokio sample daemon, a
+project template and a generic SMACK-aware installer live under
+`tools/rust/`; the runbook is `docs/19-rust-apps.md`.
+
+Status: host build/package path offline-validated; the sample
+`scourge-statusd` is VM-validated on the vendor kernel (1 vCPU / 1 GiB);
+car validation is pending. The default build is Cargo release with symbols
+kept; the sample binary is ~1.1 MiB.
 
 ## AI Usage Disclaimer
 
@@ -110,7 +145,7 @@ If a markdown file in this repo is handwritten, I will highlight that. The READM
 
 | Path | What |
 |---|---|
-| `docs/01–17` | The runbooks: TOCTOU explainer, firmware format, stage-1 build, Pi rig, car install, failsafe/packages, post-root updates (confirmed), porting, Ghidra re-derivation, troubleshooting, safety/legal, upstream references, VM lab (WIP), the micom command surface, the micom MCU images, and the unsigned normal-USB update confirmation |
+| `docs/01–21` | The runbooks: TOCTOU explainer, firmware format, stage-1 build, Pi rig, car install, failsafe/packages, post-root updates (confirmed), porting, Ghidra re-derivation, troubleshooting, safety/legal, upstream references, VM lab (WIP), MICOM research, unsigned normal-USB update confirmation, a tentative writable-data reference, host-built Rust apps/daemons (WIP), firmware fixtures, and the headless Java 25 runtime (WIP) |
 | `docs/ui/` | The Gen5W UI/UX research: styleguide, deployment modes (A–L), UX behavior patterns, design tokens, component library, glossary, and 15 evidence reports |
 | `scripts/` | The build pipeline (fetch → stage → decrypt → patch → repack → verify → package → image → preflight → Pi deploy) |
 | `payload/` | What gets baked into the rootfs: the failsafe, the eleven-stub patch tables, the sample run_stuff.sh |

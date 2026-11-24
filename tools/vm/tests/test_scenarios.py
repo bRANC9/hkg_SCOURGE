@@ -40,6 +40,36 @@ class ScenarioContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='vm-scenarios-') as tmp:
             self.assertEqual(validate_scenario('sample', valid_scenario(), Path(tmp)), [])
 
+    def test_screenshot_checkpoints_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='vm-scenarios-') as tmp:
+            data = valid_scenario(
+                requires_mode='compat',
+                screenshots=[{'name': 'ready', 'after_check': 'one'}])
+            self.assertEqual(
+                validate_scenario('sample', data, Path(tmp)), [])
+            data = valid_scenario(
+                requires_mode='compat',
+                screenshots=[{'name': 'ready', 'after_check': 'one',
+                              'required': True, 'nonblank': True}])
+            self.assertEqual(
+                validate_scenario('sample', data, Path(tmp)), [])
+
+            data = valid_scenario(
+                screenshots=[{'name': 'ready', 'after_check': 'one'}])
+            joined = '\n'.join(
+                validate_scenario('sample', data, Path(tmp)))
+            self.assertIn('requires_mode compat', joined)
+
+            data = valid_scenario(
+                requires_mode='compat',
+                screenshots=[{'name': 'a', 'after_check': 'one'},
+                             {'name': 'a', 'after_marker': 'READY'}],
+                init_override='/init', boot_marker='boot')
+            joined = '\n'.join(
+                validate_scenario('sample', data, Path(tmp)))
+            self.assertIn('duplicated', joined)
+            self.assertIn('cannot be combined with init_override', joined)
+
     def test_invalid_contract_fields_are_reported(self) -> None:
         with tempfile.TemporaryDirectory(prefix='vm-scenarios-') as tmp:
             data = valid_scenario(

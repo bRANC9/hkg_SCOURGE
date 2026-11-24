@@ -35,6 +35,11 @@ repo.
    never bypass or "best-effort" it. On mismatch: docs/09.
 4. **A failed gate is a stop, not a workaround.** Hash mismatches,
    unexpected bytes, failed pins — abort and report, do not improvise.
+   The one distinction: a `.ver` revision whose header identity and
+   consumed rows verify is a package-map variant (the server's package-id
+   counter moves between repacks), not a failed gate.
+   `scripts/01b_audit_inputs.py` reports it as a warning. A row, file or
+   ELF that disagrees still stops.
 5. **Match the known-good table.** Builds are deterministic; docs/03's
    hash table is the acceptance test. A mismatched build is never
    deployed.
@@ -87,11 +92,15 @@ repo.
 | The user wants… | Read, then do |
 |---|---|
 | To root the car (first time) | docs/03 → docs/04 → docs/05 |
+| Setup warns about a hash/CRC on a correct official package | `scripts/01b_audit_inputs.py` (docs/11); fix the stale pin, never the download |
 | To install the apps | docs/06 → docs/07 → `packages/compose.sh` |
+| To build a Rust app/daemon | docs/19 → `tools/rust/scripts/package_app.sh` |
+| To run a Java app/daemon | docs/21 → `packages/java` |
 | A custom firmware update on a rooted car | docs/08 (confirmed; docs/17 is the one-pager) |
 | To port to another firmware/region/car | docs/09 gates first; docs/10 only if hashes differ |
 | To build/fix a package's UI | `docs/ui/styleguide.md` → `deployment-modes.md` → `ux-patterns.md` → the overlay checklist, before writing any QML |
 | To debug a failure | docs/11; rig issues also docs/04 + the upstream field journal (docs/13) |
+| To investigate writable-data usage | docs/18 for the tentative reference and read-only report |
 | To bench-test something in the VM lab before the car | docs/14 (WIP — the lab is not yet packaged in-repo) |
 | To understand the exploit | docs/01 (no mitigation content in ours; upstream's is linked via docs/13) |
 | Legal/safety framing | docs/12 |
@@ -115,7 +124,9 @@ repo.
   runtime (docker/podman) only for the dropbear static-musl build.
   **Ghidra is porting-only, never a build dep.**
 - First setup: `scripts/00_fetch_third_party.sh` → `scripts/00_env.sh` →
-  `scripts/01_stage_inputs.sh`.
+  `scripts/01_stage_inputs.sh`. The last step runs
+  `scripts/01b_audit_inputs.py`; read its findings before changing anything. Rust app/daemon builds additionally need
+  `scripts/00_fetch_rust.sh` (builder-only; never installed on the unit).
 - Everything firmware-specific is pinned in `config/firmware_locks.env`;
   third-party pins live in `config/third_party.lock`.
 
@@ -144,7 +155,7 @@ repo.
     material never gets our header.
 - Package installers follow the docs/06 house rules (manifest, stock-hash
   guards, backups, idempotency, explicit status lines).
-- Docs are numbered `docs/01–17`; UI research lives in `docs/ui/`.
+- Docs are numbered `docs/01–21`; UI research lives in `docs/ui/`.
 - Scripts are run with `sh`/`bash`/`python3` (do not rely on +x bits) —
   except the hooks under `scripts/githooks/`, which git itself executes
   and therefore must stay executable (`scripts/install_hooks.sh` restores

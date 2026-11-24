@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 
+from .checkpoints import validate_checkpoints
 from .config import SCENARIO_NAMES
 
 ALLOWED_REQUIRES = {'usb', 'tools', 'payload'}
@@ -51,6 +52,13 @@ def validate_scenario(name: str, data: dict, vm_dir: Path) -> list[str]:
     mode = data.get('requires_mode')
     if mode is not None and mode not in ALLOWED_MODES:
         problems.append(f'requires_mode must be one of {sorted(ALLOWED_MODES)}')
+    problems.extend(validate_checkpoints(data.get('screenshots')))
+    if data.get('screenshots'):
+        if mode != 'compat':
+            problems.append('screenshots require requires_mode compat')
+        for key in ('init_override', 'systemd_transition'):
+            if data.get(key):
+                problems.append(f'screenshots cannot be combined with {key}')
     blockers = data.get('blockers', {})
     if not isinstance(blockers, dict) or set(blockers) - ALLOWED_BLOCKERS:
         problems.append(f'blockers keys must be a subset of {sorted(ALLOWED_BLOCKERS)}')

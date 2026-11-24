@@ -22,6 +22,8 @@ class UiSmokeTests(unittest.TestCase):
         self.assertTrue(scenario['requires_visible_frame'])
         self.assertEqual(set(scenario['checks']),
                          {'weston-alive', 'wayland-probe', 'qml-ready', 'ui-smoke'})
+        self.assertEqual([point['name'] for point in scenario['screenshots']],
+                         ['weston-up', 'wayland-probe'])
 
     def test_command_runs_weston_probe_and_qml(self) -> None:
         command = scenario_command(load_scenario('ui-smoke'), load_profile('conformance'),

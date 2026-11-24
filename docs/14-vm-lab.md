@@ -46,6 +46,12 @@ VM-validated (vendor kernel):
 - D-Bus service contracts; real AppLauncher/ApplicationManager/AppDMClient
   lifecycle; updater launch chain
 - package install/restore round-trips against the real QML tree
+- Java 25 runtime (`java-runtime`): the real package installer installs
+  Temurin `25.0.5.1+2` under `/rw_data/java`, then version, headless
+  self-test, HTTP daemon + second-JVM client + SIGTERM, `jcmd` attach,
+  reinstall/prune and restore pass on the vendor kernel (run
+  `1795311226052276579`); headless only, no X11/GUI; see
+  `docs/21-java-runtime.md`
 - update-engine state machines up to the device-credential gate
 - forced-reboot recovery smoke (marker + QEMU `-no-reboot` exit; one slice,
   not power-loss/corrupt-media coverage)
@@ -193,12 +199,21 @@ VM-validated (vendor kernel):
   `0x2b0` steering) and Gen2 fallbacks (`0x56e`, `0x55a`), clamps, range
   guards, bulk retention and reset; not a vendor DBC or stock vehicle
   fidelity
+- host-built static-musl Rust app package (`rust-app`): install, static
+  linking, HTTP `/status`, SIGTERM shutdown, SMACK exec/process labels,
+  idempotent reinstall and data-preserving restore; the sample daemon is
+  started directly because the research boot has no systemd (unit install
+  is checked, systemd start is not exercised)
 
 VM-validated (compat kernel):
 
 - vendor rootfs boot on a pinned modern kernel; `/dev/fb0` + `/dev/dri/card0`
 - Weston 1.10 DRM/pixman; visible Wayland probe; 1280×720 QMP screenshots
+- on-demand live screenshots from a running compat VM and scenario
+  checkpoint captures (`ui-smoke` frames at `weston-alive`/`wayland-probe`)
 - QML engine evaluation (`qmlscene`) and WiFi-payload QML-error capture
+- the same `java-runtime` scenario on the compat kernel (run
+  `1795311288097083935`); supporting evidence, not a stock-kernel claim
 - 9p host share, persistent state, VNC display, QMP click/key injection
 - HDA audio card + direct `hw:0,0` playback; opt-in restricted user net
 - visual-regression baselines/diffs and run management (list/show/extract/
@@ -263,8 +278,100 @@ two-mode workflow, capability matrix and troubleshooting.
 Mode V captures `wayland-screenshot.png` through a second serial artifact
 channel (vendor `weston-screenshooter`); it proves capture, not visible UI.
 Mode C captures `qmp-screenshot.png` via QMP and can require a non-black
-1280×720 frame (`ui-smoke`). Interactive GTK/VNC windows and QMP input are
+1280×720 frame (`ui-smoke`). A running Mode C VM can also be captured on
+demand with `launch.py screenshot --run <run-id>` (or `--daemon-dir`), and
+compat scenarios may declare `screenshots` checkpoints for deterministic
+frames during a command. Interactive GTK/VNC windows and QMP input are
 available in Mode C; the vendor kernel stays input-free.
+
+## Stock AppHomeScreen bring-up (WIP, research)
+
+The stock app runs in Mode C and its home-screen QML can be composited with a
+research controller helper, but this is not yet stock-equivalent. Current gaps:
+
+- **Theme assets.** The firmware rootfs carries ASTC-only variants
+  (`*.astc.lz4` plus headers); the QML asks for plain `.png` paths. The app's
+  `new_gui` symlink resolves to `/tmp/new_gui`; placeholders must be staged
+  under `/tmp/new_gui/new2.0/hmc/{night,day}` for the app's image provider, not
+  only under `/app/share/images/hmc`. A layout-only capture can use generated
+  placeholders (never committed), but it is not visual-fidelity evidence.
+  TODO: obtain the car-side PNG set under `/app/share/images/hmc/{home,general}`
+  (or the runtime step that materialises `/tmp/new_gui`) and file a GitHub issue
+  when this branch is pushed.
+- **Launcher boot info.** AppLauncher passes boot-info flags in the child argv
+  (`-gui:1`, `-vc:65`, `-dn:2`, ...). Direct launch with those flags sets
+  `LCD TYPE`, `ECO TYPE`, `GUI_VARIANT` and day/night successfully, but
+  `LANGUAGE` and `loadBootInfoFromAppLauncher` still need the `BOOTINFOSTATUS`
+  shared memory; without it the labels remain raw `STR_*`. The stock launcher
+  flow currently restarts AppHomeScreen and it crashes in `libQt5Qml` before
+  the surface appears.
+- **Persistence / D-Bus.** The rootfs does contain `/usr/bin/pers_admin_svc`
+  and `libpers_admin_access_lib`; the admin daemon is not absent. Run it on a
+  system bus at `/run/dbus/system_bus_socket` (not `/var/run/...`, because
+  `/var` links to `rw_data/var`) and populate `/tmp/passwd` from
+  `/etc/passwd.legacy` before `dbus-daemon`, since `/etc/passwd` is a symlink to
+  `/tmp/passwd`. The service owns `org.genivi.persistence.admin` and
+  `org.genivi.persistence.admin_svc`; `PersistentManager` then reads and writes
+  settings (`APP_HOME_SCREEN_TYPE`, climate/profile keys). A custom
+  `AppHomeScreen` resource archive installed with
+  `persadmin_tool install /tmp/...` registers `APP_HOME_SCREEN_TYPE`; archive
+  paths on the 9p share fail the unarchive step, so copy to guest `/tmp` first.
+  A direct PCL write of ASCII `"0"` (public/local DB, users 0–4/default, seats
+  0/1) makes the app read `APP_HOME_SCREEN_TYPE QVariant(QString, "0")` on the
+  next boot. The app still normalizes/sets `1` and loads the widget QML
+  (`HomeScreen/QHMI_HomeScreenMain_Advanced.qml`), not directly
+  `Screen_HomeScreen_AllMenus.qml`; the key alone is not enough. The separate
+  `KEY_EVT_REQUEST_GOTO_SCREEN_ALL_MENUS` event path below loads and captures
+  the stock all-menus QML in a lab overlay, while the stock boot path remains
+  WIP.
+- **Vendor WM layer assignment.** `ivi-window-manager.so` leaves the app's
+  surface at `layer(nil)`/`visibility(0)`; a research `ivi_controller` helper
+  adds it to a WM layer for capture. That is an explicit lab intervention, not
+  the stock HMI handshake.
+- **GUI variant / overlay.** `GUI_VARIANT=1` selects
+  `/app/share/AppHomeScreen/qml_new2.0/`, not `qml_eco3.0`; an overlay aimed at
+  `qml` or `qml_eco3.0` is ignored by the app. The menu-grid preview must target
+  `qml_new2.0`, force the all-menu page index, and supply a DB-derived mock
+  model. That preview is lab-only, not stock fidelity; the stock all-menu page
+  needs the persistence setting above.
+- **All-menus event path.** Sending
+  `QML_Handler.qmlSendEvtKey(HMIEVENTS.KEY_EVT_REQUEST_GOTO_SCREEN_ALL_MENUS)`
+  from a `qml_new2.0` overlay makes `AppHomeEngine` call
+  `QMLController::showScreen("HomeScreen/Screen_HomeScreen_AllMenus.qml")`.
+  Run `1795532949328163183` captures a full 1920×720 all-menus frame
+  (`52459` bytes, the run's `qmp-screenshot.png`) with OCR labels
+  `All menus`, `N Mode`, `Phone`, `Phone projection`, `Climate`, `Radio`,
+  `Media`, `Manual`, `Settings`. The screen is stock `qml_new2.0` QML, but the
+  trigger is an overlay lab intervention and the assets are placeholders; this
+  is not stock-boot fidelity.
+- **Input.** The vendor rootfs has no `udevadm`/`systemd-udevd`. Manually
+  writing `/run/udev/data` tags makes Weston create the QEMU tablet and
+  keyboard. Weston can load the vendor `ivi-input-controller.so` via
+  `ivi-input-module=ivi-input-controller.so` (adding it to `ivi-module` instead
+  fails with `undefined symbol: controller_module_init`). The research
+  `probes/ivi-focus.c` binds the vendor `ivi_input` global and sets
+  acceptance/focus; it takes an optional surface id argument and defaults to
+  `11000`, the app's launcher surface id (`QT_WAYLAND_SET_SURFACE_ID`). Run
+  `1795540970918967510` exercises the committed helper with no argument and
+  reports `INPUT 11000`, matching surface `11000`. Weston's pointer trace still
+  enters `wl_surface@16` at the click; the before/after all-menus frames remain
+  pixel-identical and no app item-click event is observed. A stock-launcher
+  attempt (`AppLauncher 0` then `AppLauncher 2` with
+  `QT_QPA_PLATFORM=wayland-egl`) timed out; its logs were empty and the
+  launcher-child QtQml crash was not resolved. QMP clicks still reach the kernel
+  and move the compositor pointer, but the app input path/FG handshake remains
+  WIP. The `ivi-watch` layer watcher, the `libvisfilter.so`/
+  `libkeepvisible.so` preloads and the placeholder/qml overlay trees used for
+  these captures are local scratch artifacts, not part of this repo, so the
+  frames are observation evidence rather than a reproducible stock build.
+
+TODO ledger (detailed in `docs/14-vm-lab-plan.md` P0.5 S5–S10): launcher
+boot-info shared memory, FG/input focus, menu-grid DB/SMACK, launcher-child
+QtQml crash, car-side theme PNGs / `new_gui` materialisation, and a stock UI
+WIP probe/scenario with placeholder provenance.
+
+A QMP capture may be cropped to the VM display; `--display-size 1920x720`
+matches the app's 1920×720 surface for a full-frame capture.
 
 ## Known issues
 
@@ -278,6 +385,9 @@ available in Mode C; the vendor kernel stays input-free.
   (`HMIEVENTS`, `AppHome_Enum`); rendering the page needs the runtime.
 - Mode C SMACK (`lsm=smack`) approximates but does not reproduce 4.1.27
   policy semantics.
+- Java is headless-only: AWT/Swing request X11 libraries that the vendor
+  rootfs does not ship. The default runtime has no `javac`. Evidence is VM
+  only; car validation is pending.
 
 Every FAIL/timeout writes a failure bundle with dmesg, processes, mounts,
 Weston/QML/updater logs and the serial tail. Run management

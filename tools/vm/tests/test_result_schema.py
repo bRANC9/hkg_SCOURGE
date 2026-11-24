@@ -165,6 +165,48 @@ class ResultSchemaTests(unittest.TestCase):
                          'screenshot.qmp_pixels.bbox'):
             self.assertIn(expected, joined)
 
+    def test_screenshot_checkpoints_evidence(self) -> None:
+        good = valid_result(screenshot={
+            'requested': True, 'ok': None, 'artifacts': [], 'qmp': None,
+            'checkpoints': [{
+                'name': 'probe', 'trigger': 'after_check=wayland-probe',
+                'seconds': 1.25, 'required': True, 'nonblank': True,
+                'path': '/run/screenshots/probe.png', 'size': 3,
+                'sha256': 'c' * 64, 'width': 10, 'height': 20,
+                'pixels': {'count': 3, 'bbox': [0, 0, 1, 1],
+                           'width': 10, 'height': 20},
+            }, {
+                'name': 'late', 'trigger': 'after_seconds=60',
+                'missed': True, 'required': False, 'nonblank': False,
+            }]})
+        self.assertEqual(validate_result(good), [])
+
+        bad = valid_result(screenshot={
+            'requested': True, 'checkpoints': [
+                {'name': '', 'trigger': '', 'required': 'yes',
+                 'nonblank': 1, 'missed': 'no', 'path': '', 'sha256': 1,
+                 'size': -1, 'width': 0, 'height': 'x', 'seconds': -1,
+                 'delay_seconds': 'x', 'error': 1, 'pixel_error': 1,
+                 'pixels': {'count': -1, 'bbox': [0, 0], 'width': 0}},
+                'not-an-object',
+            ]})
+        joined = '\n'.join(validate_result(bad))
+        for expected in ('screenshot.checkpoints[0].name',
+                         'screenshot.checkpoints[0].trigger',
+                         'screenshot.checkpoints[0].required',
+                         'screenshot.checkpoints[0].nonblank',
+                         'screenshot.checkpoints[0].missed',
+                         'screenshot.checkpoints[0].path',
+                         'screenshot.checkpoints[0].sha256',
+                         'screenshot.checkpoints[0].size',
+                         'screenshot.checkpoints[0].width',
+                         'screenshot.checkpoints[0].seconds',
+                         'screenshot.checkpoints[0].delay_seconds',
+                         'screenshot.checkpoints[0].error',
+                         'screenshot.checkpoints[0].pixels.count',
+                         'screenshot.checkpoints[1]'):
+            self.assertIn(expected, joined)
+
     def test_patch_phase_audit_evidence(self) -> None:
         good = valid_result(
             patch={'driver_init': '0x1', 'table_entry': '0x2', 'stop': 'T05',

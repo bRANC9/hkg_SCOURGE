@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Example only: the Java runtime package does not install or enable this unit.
+# Copy it to /etc/systemd/system/ and place your JAR at
+# /rw_data/java-apps/<name>.jar (outside the runtime tree, so restore keeps
+# it), then:
+#   systemctl daemon-reload
+#   systemctl enable --now java-app@<name>
+#
+# If the daemon needs the head-unit SMACK floor label, run once as root:
+#   chsmack -e _ /rw_data/java/current/bin/java
+# (the installer already does this when smackfs is available).
+[Unit]
+Description=SCOURGE Java app %i
+After=network.target
+
+[Service]
+Type=simple
+Environment=JAVA_HOME=/rw_data/java/current
+WorkingDirectory=/rw_data/java-apps
+ExecStart=/rw_data/java/current/bin/java -XX:+UseSerialGC -Xms16m -Xmx128m -jar /rw_data/java-apps/%i.jar
+Restart=on-failure
+RestartSec=5
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target

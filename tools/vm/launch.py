@@ -12,6 +12,7 @@ The base image and kernel are never modified (snapshot disk, no writes).
 Usage:
   ./launch.py run --cmd "uname -r; id" --timeout 240
   ./launch.py run --interactive
+  ./launch.py screenshot --run <run-id> --output /tmp/shot.png
 """
 from __future__ import annotations
 
@@ -41,6 +42,8 @@ from patch_kernel import COMPAT, TABLE_ENTRY, vaddr_to_offset
 from harness.audit import audit_script, parse_audit
 from harness.artifacts import extract_artifacts, wrap_command
 from harness import daemon as daemon_mod
+from harness.checkpoints import (CheckpointWatcher, normalize_checkpoints,
+                                 required_failures as checkpoint_failures)
 from harness.compat import verify_kernel_pin
 from harness.config import SCENARIO_NAMES, load_profile, load_scenario, scenario_command
 from harness.governor import LockTimeout, run_lock
@@ -53,11 +56,15 @@ from harness.protocol import command_frame, command_output, completion_pattern
 from harness.qmp import QmpError
 from harness.qmp import click as qmp_click
 from harness.qmp import device_del as qmp_device_del
+from harness.qmp import drag as qmp_drag
 from harness.qmp import key as qmp_key
 from harness.qmp import screendump as qmp_screendump
-from harness.runs import collect_runs, extract as extract_run, filter_runs, prune as prune_runs
+from harness.runs import (allocate_qmp_socket, collect_runs,
+                          extract as extract_run, filter_runs, latest_live,
+                          prune as prune_runs, run_qmp_socket)
 from harness.share import MOUNTPOINT, mount_script as share_mount_script
 from harness.share import qemu_option as share_qemu_option
+from harness.screenshots import nonblack_bbox
 from harness.state import StateBusy, create_state_overlays
 from harness.visual import baseline as visual_baseline
 from harness.visual import compare as visual_compare
@@ -208,6 +215,50 @@ def daemon_restart_argv(config: dict, daemon_dir: Path,
     return argv
 
 
+def daemon_screenshot(daemon_dir: Path, requested: Path | None = None) -> dict:
+    """Capture through the daemon control socket and optionally copy it out."""
+    daemon_dir = Path(daemon_dir)
+    capture = daemon_dir / f'screenshot-{time.time_ns()}.png'
+    response = daemon_mod.request(
+        daemon_dir, {'action': 'screenshot', 'output': str(capture)},
+        timeout=30)
+    if not response.get('ok'):
+        raise RuntimeError(response.get('error', 'daemon screenshot failed'))
+    if requested is not None:
+        try:
+            shutil.copy2(capture, requested)
+        except OSError as exc:
+            capture.unlink(missing_ok=True)
+            raise RuntimeError(
+                f'cannot copy screenshot to {requested}: {exc}') from exc
+        response['copied_to'] = str(requested)
+        # The daemon dir is normalised by its retention policy; keep only
+        # the requested copy when one was asked for.
+        capture.unlink(missing_ok=True)
+    return response
+
+
+def screenshot_output(requested: Path | None, owner: Path, kind: str,
+                      stamp: int, index: int, count: int) -> Path:
+    """Choose a safe-ish output path for one live capture."""
+    if requested is None:
+        base = f'screenshot-{stamp}' if kind == 'daemon' else f'live-screenshot-{stamp}'
+        name = f'{base}.png' if count == 1 else f'{base}-{index:03d}.png'
+        return Path(owner) / name
+    requested = Path(requested)
+    if requested.is_symlink():
+        raise ValueError(f'refusing symlink screenshot output: {requested}')
+    if requested.is_dir():
+        name = (f'screenshot-{stamp}.png' if count == 1
+                else f'screenshot-{stamp}-{index:03d}.png')
+        return requested / name
+    if count == 1:
+        return requested
+    suffix = requested.suffix or '.png'
+    stem = requested.stem if requested.suffix else requested.name
+    return requested.with_name(f'{stem}-{index:03d}{suffix}')
+
+
 def parse_click(value: str) -> tuple[int, int]:
     """Parse --click X,Y with clear errors."""
     parts = value.split(',')
@@ -217,6 +268,17 @@ def parse_click(value: str) -> tuple[int, int]:
         return int(parts[0].strip()), int(parts[1].strip())
     except ValueError as exc:
         raise ValueError('--click coordinates must be integers') from exc
+
+
+def parse_drag(value: str) -> tuple[int, int, int, int]:
+    """Parse --drag X1,Y1,X2,Y2 with clear errors."""
+    parts = value.split(',')
+    if len(parts) != 4:
+        raise ValueError('--drag requires X1,Y1,X2,Y2')
+    try:
+        return tuple(int(part.strip()) for part in parts)
+    except ValueError as exc:
+        raise ValueError('--drag coordinates must be integers') from exc
 
 
 def qemu_preexec(pin_cpu: int | None = None):
@@ -511,6 +573,7 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
               artifacts_serial: Path | None = None,
               qmp_socket: Path | None = None,
               display_device: str = "none",
+              display_size: tuple[int, int] = (1280, 720),
               smp: int = 1, memory_mb: int = 4096,
               noapic: bool = True,
               kernel_target: str = "vendor",
@@ -600,9 +663,9 @@ def qemu_argv(run_dir: Path, usb: Path | None = None,
     if display_device == "std":
         argv += ["-vga", "std"]
     elif display_device == "virtio-vga":
-        argv += ["-vga", "none", "-device", "virtio-vga,xres=1280,yres=720"]
+        argv += ["-vga", "none", "-device", f"virtio-vga,xres={display_size[0]},yres={display_size[1]}"]
     elif display_device == "virtio-vga-gl":
-        argv += ["-vga", "none", "-device", "virtio-vga-gl,xres=1280,yres=720"]
+        argv += ["-vga", "none", "-device", f"virtio-vga-gl,xres={display_size[0]},yres={display_size[1]}"]
     elif display_device == "none":
         argv += ["-vga", "none"]
     else:
@@ -764,6 +827,7 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
         storage_sizes: dict[str, int] | None = None, collect_audit: bool = False,
         allow_stale_tools: bool = False, screenshot: bool = False,
         qmp_screenshot: bool = False, display_device: str = "none",
+        display_size: tuple[int, int] = (1280, 720),
         smp: int = 1, memory_mb: int = 4096, apic: bool = False,
         failure_bundle: bool = True, kernel_target: str = "vendor",
         allow_kernel_mismatch: bool = False, share: Path | None = None,
@@ -776,6 +840,8 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
         rootfs: Path | None = None) -> int:
     profile = load_profile(profile_name)
     scenario = load_scenario(scenario_name) if scenario_name else None
+    checkpoints = (normalize_checkpoints(scenario.get('screenshots'))
+                   if scenario else [])
     if profile_name == 'conformance' and (scenario is None or interactive):
         raise ValueError('conformance requires a managed --scenario; arbitrary commands are research only')
     if interactive and screenshot:
@@ -786,7 +852,7 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
         raise ValueError('--dry-run cannot capture screenshots')
     if display_device not in ('none', 'std', 'virtio-vga', 'virtio-vga-gl'):
         raise ValueError(f'unknown display device: {display_device}')
-    if qmp_screenshot and display_device == 'none':
+    if (qmp_screenshot or checkpoints) and display_device == 'none':
         display_device = ('virtio-vga-gl' if display == 'egl-headless' else 'virtio-vga') \
             if kernel_target == 'compat' else 'std'
     if display not in ('none', 'gtk', 'vnc', 'egl-headless'):
@@ -885,8 +951,9 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
     result['memory_mb'] = memory_mb
     result['apic'] = apic
     result['failure_bundle'] = None
-    result['screenshot'] = {'requested': screenshot or qmp_screenshot, 'ok': None,
-                            'artifacts': [], 'qmp': None, 'qmp_error': None}
+    result['screenshot'] = {'requested': screenshot or qmp_screenshot or bool(checkpoints),
+                            'ok': None, 'artifacts': [], 'qmp': None,
+                            'qmp_error': None}
     usb_removal = scenario.get('usb_removal') if scenario else None
     result['usb_removal'] = ({'requested': True,
                               'device_id': usb_removal.get('device_id', 'usbdev'),
@@ -906,6 +973,8 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
     overlays = {}
     artifact_serial = None
     qmp_socket = None
+    qmp_temp_dir = None
+    watcher = None
     state_lock = None
     removal_thread = None
     power_loss_thread = None
@@ -938,6 +1007,9 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
             if blockers:
                 result.update(verdict='BLOCKED', blockers=blockers, rc=77)
                 return 77
+            if checkpoints and kernel_target != 'compat':
+                raise ValueError(
+                    'scenario screenshots require --kernel compat (QMP display)')
             for requirement in scenario['requires']:
                 if {'usb': usb, 'tools': tools, 'payload': payload}.get(requirement) is None:
                     raise ValueError(f'scenario {scenario_name} requires --{requirement}')
@@ -982,8 +1054,10 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
         if (boot_only or transition) and collect_audit:
             raise ValueError('--audit is not available for boot-only or '
                              'systemd-transition scenarios')
-        if transition and (screenshot or qmp_screenshot):
+        if transition and (screenshot or qmp_screenshot or checkpoints):
             raise ValueError('screenshots are not available for systemd-transition scenarios')
+        if checkpoints and boot_only:
+            raise ValueError('scenario screenshots are not available for boot-only scenarios')
         if transition and interactive:
             raise ValueError('--interactive is not available for systemd-transition scenarios')
         if scenario and not boot_only:
@@ -997,8 +1071,10 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
         artifact_serial = run_dir / 'artifact-serial.bin' if screenshot else None
         if artifact_serial is not None:
             result['screenshot']['serial'] = str(artifact_serial)
-        qmp_socket = (run_dir / 'qmp.sock'
-                      if qmp_screenshot or usb_removal is not None else None)
+        if qmp_screenshot or usb_removal is not None or checkpoints:
+            qmp_socket, qmp_temp_dir = allocate_qmp_socket(run_dir)
+        else:
+            qmp_socket = None
         if qmp_socket is not None:
             result['screenshot']['qmp_socket'] = str(qmp_socket)
         kernel = compat_kernel_path() if kernel_target == 'compat' else (
@@ -1025,7 +1101,7 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
                 overlays.update(create_overlays(run_dir, {name: path}))
         result['overlays'] = overlays
         argv = qemu_argv(run_dir, usb, tools, patched, inputs.get('payload'), overlays,
-                         artifact_serial, qmp_socket, display_device,
+                         artifact_serial, qmp_socket, display_device, display_size,
                          smp, memory_mb, not apic, kernel_target,
                          scenario.get('init_override') if scenario else None,
                          share, display, vnc_display, network, audio,
@@ -1224,6 +1300,10 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
 
             power_loss_thread = threading.Thread(target=lose_power, daemon=True)
             power_loss_thread.start()
+        if checkpoints:
+            watcher = CheckpointWatcher(
+                ser, qmp_socket, run_dir / 'screenshots', checkpoints)
+            watcher.start()
         token, output, guest_rc, scenario_seconds = execute_guest(
             ser, cmd or 'uname -a; id; cat /proc/partitions', remaining())
         result['command_id'] = token
@@ -1318,6 +1398,22 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
             signal.signal(signum, signal.SIG_IGN)
         cleanup_errors = []
         stopped = True
+        if watcher is not None:
+            try:
+                entries = watcher.finalize()
+            except Exception as exc:  # noqa: BLE001
+                entries = []
+                result['screenshot']['checkpoint_error'] = (
+                    f'{type(exc).__name__}: {exc}')
+            result['screenshot']['checkpoints'] = entries
+            reasons = checkpoint_failures(entries)
+            if reasons and result.get('verdict') != 'BLOCKED':
+                result['verdict'] = 'FAIL'
+                result['rc'] = 1
+                failures = result.setdefault('failures', [])
+                for reason in reasons:
+                    if reason not in failures:
+                        failures.append(reason)
         if qmp_screenshot and qmp_socket is not None and proc is not None and proc.poll() is None:
             try:
                 result['screenshot']['qmp'] = qmp_screendump(
@@ -1326,7 +1422,6 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
                 result['screenshot']['qmp_error'] = f'{type(exc).__name__}: {exc}'
         if (scenario and scenario.get('requires_visible_frame')
                 and result.get('verdict') != 'BLOCKED'):
-            from harness.screenshots import nonblack_bbox
             qmp = result['screenshot'].get('qmp')
             if qmp:
                 try:
@@ -1442,6 +1537,9 @@ def _run_impl(cmd: str | None, interactive: bool, timeout: float,
                     failures.append(message)
         if cleanup_errors:
             result.update(verdict='FAIL', rc=1, cleanup_errors=cleanup_errors)
+        if qmp_temp_dir is not None:
+            shutil.rmtree(qmp_temp_dir, ignore_errors=True)
+            (run_dir / 'qmp.path').unlink(missing_ok=True)
         result['total_seconds'] = round(time.monotonic() - t0, 3)
         (run_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
         if outcome is not None:
@@ -1626,6 +1724,16 @@ def _recovery_power_loss(args, lock_info: dict) -> int:
     return 0 if summary['ok'] else 1
 
 
+def parse_display_size(value: str) -> tuple[int, int]:
+    try:
+        width, height = (int(part) for part in value.lower().split('x', 1))
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError('expected WxH, e.g. 1920x720') from exc
+    if not (320 <= width <= 3840 and 200 <= height <= 2160):
+        raise argparse.ArgumentTypeError('display size out of range')
+    return (width, height)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="action", required=True)
@@ -1642,10 +1750,32 @@ def main() -> int:
     inp = sub.add_parser('input', help='send a click or key to a running compat VM via QMP')
     inp.add_argument('--qmp', type=Path, required=True, help='QMP socket from the run directory')
     inp.add_argument('--click', metavar='X,Y', help='absolute tablet click in video pixels')
+    inp.add_argument('--drag', metavar='X1,Y1,X2,Y2',
+                     help='absolute tablet drag/swipe in video pixels')
     inp.add_argument('--key', metavar='QCODE', help='QEMU qcode, e.g. ret or a')
     inp.add_argument('--width', type=int, default=1280)
     inp.add_argument('--height', type=int, default=720)
     inp.add_argument('--button', choices=('left', 'middle', 'right'), default='left')
+    shot = sub.add_parser('screenshot', help='capture a PNG from a running VM')
+    target = shot.add_mutually_exclusive_group(required=True)
+    target.add_argument('--qmp', type=Path, help='QMP socket from a run directory')
+    target.add_argument('--run', metavar='RUN', help='run id or run directory')
+    target.add_argument('--daemon-dir', type=Path,
+                        help='persistent daemon directory')
+    target.add_argument('--latest', action='store_true',
+                        help='newest live daemon or one-shot run')
+    shot.add_argument('--output', type=Path, default=None,
+                      help='copy/rename the capture (base name for sequences)')
+    shot.add_argument('--shots', type=int, default=1,
+                      help='number of captures (default 1)')
+    shot.add_argument('--interval', type=float, default=None,
+                      help='seconds between captures (default 1s when --shots > 1)')
+    shot.add_argument('--pixels', dest='pixels', action='store_true',
+                      default=True, help='include non-black pixel metadata')
+    shot.add_argument('--no-pixels', dest='pixels', action='store_false',
+                      help='skip the host-side pixel scan')
+    shot.add_argument('--timeout', type=float, default=15.0,
+                      help='QMP connect/capture timeout in seconds')
     lst = sub.add_parser('list', help='list runs')
     lst.add_argument('--label', default=None)
     lst.add_argument('--scenario', default=None)
@@ -1901,6 +2031,8 @@ def main() -> int:
                    help='attach a display device and capture qmp-screenshot.png via QMP')
     r.add_argument('--display-device', choices=('none', 'std', 'virtio-vga', 'virtio-vga-gl'), default='none',
                    help='QEMU display device for QMP screendump (default: auto std for --qmp-screenshot)')
+    r.add_argument('--display-size', type=parse_display_size, default=(1280, 720), metavar='WxH',
+                   help='virtio-vga display size for QMP screendump (default: 1280x720)')
     r.add_argument('--smp', type=int, choices=(1, 2, 4), default=1,
                    help='guest CPUs (vendor kernel NR_CPUS=4)')
     r.add_argument('--memory', type=int, default=4096, metavar='MiB',
@@ -2098,27 +2230,13 @@ def main() -> int:
             return int(response.get('rc', 1))
         if args.daemon_action == 'screenshot':
             requested = args.output.resolve() if args.output else None
-            capture = daemon_dir / f'screenshot-{time.time_ns()}.png'
             try:
-                response = daemon_mod.request(
-                    daemon_dir, {'action': 'screenshot', 'output': str(capture)},
-                    timeout=30)
+                response = daemon_screenshot(daemon_dir, requested)
             except (OSError, RuntimeError, TimeoutError) as exc:
+                if str(exc).startswith('cannot copy screenshot'):
+                    ap.error(str(exc))
                 print(f'ERROR: {exc}', file=sys.stderr)
                 return 1
-            if not response.get('ok'):
-                print(f"ERROR: {response.get('error', 'daemon screenshot failed')}",
-                      file=sys.stderr)
-                return 1
-            if requested is not None:
-                try:
-                    shutil.copy2(capture, requested)
-                except OSError as exc:
-                    capture.unlink(missing_ok=True)
-                    ap.error(f'cannot copy screenshot to {requested}: {exc}')
-                response['copied_to'] = str(requested)
-                # The daemon dir is never pruned; keep only the copy.
-                capture.unlink(missing_ok=True)
             print(json.dumps(response, indent=2))
             return 0
         if args.daemon_action == 'console':
@@ -2127,18 +2245,105 @@ def main() -> int:
             except (OSError, RuntimeError) as exc:
                 ap.error(str(exc))
     if args.action == 'input':
-        if bool(args.click) == bool(args.key):
-            ap.error('input requires exactly one of --click X,Y or --key QCODE')
+        modes = sum(1 for value in (args.click, args.drag, args.key) if value)
+        if modes != 1:
+            ap.error('input requires exactly one of --click X,Y, --drag X1,Y1,X2,Y2 or --key QCODE')
         try:
             if args.click:
                 x, y = parse_click(args.click)
                 result = qmp_click(args.qmp, x, y, args.width, args.height,
                                    args.button)
+            elif args.drag:
+                x1, y1, x2, y2 = parse_drag(args.drag)
+                result = qmp_drag(args.qmp, x1, y1, x2, y2, args.width,
+                                  args.height, args.button)
             else:
                 result = qmp_key(args.qmp, args.key)
         except (ValueError, OSError, QmpError) as exc:
             ap.error(str(exc))
         print(json.dumps(result, indent=2))
+        return 0
+    if args.action == 'screenshot':
+        if args.shots < 1:
+            ap.error('--shots must be positive')
+        if args.shots > 1000:
+            ap.error('--shots must be at most 1000')
+        if not math.isfinite(args.timeout) or args.timeout <= 0:
+            ap.error('--timeout must be finite and positive')
+        interval = (1.0 if args.shots > 1 else 0.0) if args.interval is None \
+            else args.interval
+        if not math.isfinite(interval) or interval < 0:
+            ap.error('--interval must be a finite non-negative number')
+        try:
+            if args.qmp:
+                kind = 'qmp'
+                qmp_path = args.qmp
+                owner = qmp_path.resolve().parent
+            elif args.run:
+                kind = 'qmp'
+                qmp_path = run_qmp_socket(VM, args.run)
+                owner = qmp_path.parent
+            elif args.daemon_dir:
+                kind = 'daemon'
+                qmp_path = None
+                owner = args.daemon_dir.resolve()
+            else:
+                target = latest_live(VM)
+                kind = target['kind']
+                owner = Path(target['directory'])
+                qmp_path = Path(target['qmp']) if kind == 'qmp' else None
+        except (OSError, ValueError) as exc:
+            print(json.dumps({'ok': False, 'error': str(exc)}, indent=2))
+            return 1
+
+        stamp = time.time_ns()
+        captures = []
+        for index in range(args.shots):
+            output = None
+            if kind != 'daemon' or args.output is not None:
+                try:
+                    output = screenshot_output(args.output, owner, kind, stamp,
+                                               index, args.shots)
+                except (OSError, ValueError) as exc:
+                    print(json.dumps({'ok': False, 'error': str(exc),
+                                      'captures': captures}, indent=2))
+                    return 1
+                if not output.parent.is_dir():
+                    print(json.dumps({
+                        'ok': False,
+                        'error': f'output directory does not exist: {output.parent}',
+                        'captures': captures}, indent=2))
+                    return 1
+            try:
+                if kind == 'daemon':
+                    daemon_dir = (args.daemon_dir.resolve()
+                                  if args.daemon_dir else owner)
+                    response = daemon_screenshot(daemon_dir, output)
+                    metadata = dict(response.get('screenshot') or {})
+                    if response.get('copied_to'):
+                        metadata['path'] = response['copied_to']
+                    if response.get('pruned'):
+                        metadata['pruned'] = response['pruned']
+                else:
+                    metadata = qmp_screendump(qmp_path, output,
+                                              timeout=args.timeout)
+                if args.pixels:
+                    try:
+                        metadata['pixels'] = nonblack_bbox(
+                            Path(metadata['path']))
+                    except Exception as exc:  # noqa: BLE001
+                        metadata['pixel_error'] = f'{type(exc).__name__}: {exc}'
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(json.dumps({'ok': False, 'error': str(exc),
+                                  'captures': captures}, indent=2))
+                return 1
+            captures.append(metadata)
+            if index + 1 < args.shots and interval:
+                time.sleep(interval)
+        if len(captures) == 1:
+            print(json.dumps({'ok': True, **captures[0]}, indent=2))
+        else:
+            print(json.dumps({'ok': True, 'captures': captures}, indent=2))
         return 0
     if args.action == 'list':
         if args.limit < 0:
@@ -2423,7 +2628,8 @@ def main() -> int:
                        args.keep_overlay, args.verify_images, args.graphics,
                        args.storage, parse_sizes(args.storage_size), args.audit,
                        args.allow_stale_tools, args.screenshot, args.qmp_screenshot,
-                       args.display_device, args.smp, args.memory, args.apic,
+                       args.display_device, args.display_size,
+                       args.smp, args.memory, args.apic,
                        args.failure_bundle, kernel_target, args.allow_kernel_mismatch,
                        args.share, args.display, args.vnc_display, args.label,
                        args.state, args.reset, args.network, args.audio, args.usb_host,

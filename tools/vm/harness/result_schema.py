@@ -376,6 +376,53 @@ def _check_audit(value, problems: list[str]) -> None:
                 problems.append(f'audit.{key} must be a list of strings')
 
 
+def _check_pixels(value, name: str, problems: list[str]) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        problems.append(f'{name} must be an object or null')
+        return
+    if not _is_int(value.get('count')) or value['count'] < 0:
+        problems.append(f'{name}.count must be a non-negative integer')
+    bbox = value.get('bbox')
+    if bbox is not None and (
+            not isinstance(bbox, list) or len(bbox) != 4
+            or any(not _is_int(item) for item in bbox)):
+        problems.append(f'{name}.bbox must be four integers or null')
+    for key in ('width', 'height'):
+        if not _is_int(value.get(key)) or value[key] <= 0:
+            problems.append(f'{name}.{key} must be positive')
+
+
+def _check_checkpoint(value, prefix: str, problems: list[str]) -> None:
+    if not isinstance(value, dict):
+        problems.append(f'{prefix} must be an object')
+        return
+    for key in ('name', 'trigger'):
+        if not isinstance(value.get(key), str) or not value[key]:
+            problems.append(f'{prefix}.{key} must be a non-empty string')
+    for key in ('required', 'nonblank', 'missed'):
+        if key in value and not isinstance(value[key], bool):
+            problems.append(f'{prefix}.{key} must be boolean')
+    for key in ('path', 'sha256'):
+        if key in value and (not isinstance(value[key], str)
+                             or not value[key]):
+            problems.append(f'{prefix}.{key} must be a non-empty string')
+    if 'size' in value and (not _is_int(value['size']) or value['size'] < 0):
+        problems.append(f'{prefix}.size must be a non-negative integer')
+    for key in ('width', 'height'):
+        if key in value and (not _is_int(value[key]) or value[key] <= 0):
+            problems.append(f'{prefix}.{key} must be a positive integer')
+    for key in ('seconds', 'delay_seconds'):
+        if key in value and (not _is_number(value[key]) or value[key] < 0):
+            problems.append(f'{prefix}.{key} must be a non-negative number')
+    for key in ('error', 'pixel_error'):
+        if key in value and value[key] is not None and not isinstance(value[key], str):
+            problems.append(f'{prefix}.{key} must be a string or null')
+    if 'pixels' in value:
+        _check_pixels(value['pixels'], f'{prefix}.pixels', problems)
+
+
 def _check_screenshot(value, problems: list[str]) -> None:
     if not isinstance(value, dict):
         problems.append('screenshot must be an object')
@@ -411,27 +458,21 @@ def _check_screenshot(value, problems: list[str]) -> None:
             for key in ('width', 'height'):
                 if not _is_int(qmp.get(key)) or qmp[key] <= 0:
                     problems.append(f'screenshot.qmp.{key} must be a positive integer')
-    for key in ('qmp_error', 'error'):
+    for key in ('qmp_error', 'error', 'checkpoint_error'):
         if key in value and value[key] is not None and not isinstance(value[key], str):
             problems.append(f'screenshot.{key} must be a string or null')
     for key in ('qmp_socket', 'serial'):
         if key in value and not isinstance(value[key], str):
             problems.append(f'screenshot.{key} must be a string')
-    pixels = value.get('qmp_pixels')
-    if pixels is not None:
-        if not isinstance(pixels, dict):
-            problems.append('screenshot.qmp_pixels must be an object or null')
+    _check_pixels(value.get('qmp_pixels'), 'screenshot.qmp_pixels', problems)
+    checkpoints = value.get('checkpoints')
+    if checkpoints is not None:
+        if not isinstance(checkpoints, list):
+            problems.append('screenshot.checkpoints must be a list')
         else:
-            if not _is_int(pixels.get('count')) or pixels['count'] < 0:
-                problems.append('screenshot.qmp_pixels.count must be a non-negative integer')
-            bbox = pixels.get('bbox')
-            if bbox is not None and (
-                    not isinstance(bbox, list) or len(bbox) != 4
-                    or any(not _is_int(item) for item in bbox)):
-                problems.append('screenshot.qmp_pixels.bbox must be four integers or null')
-            for key in ('width', 'height'):
-                if not _is_int(pixels.get(key)) or pixels[key] <= 0:
-                    problems.append(f'screenshot.qmp_pixels.{key} must be positive')
+            for index, checkpoint in enumerate(checkpoints):
+                _check_checkpoint(
+                    checkpoint, f'screenshot.checkpoints[{index}]', problems)
 
 
 def _check_sources(value, problems: list[str]) -> None:
