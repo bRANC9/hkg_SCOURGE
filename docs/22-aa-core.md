@@ -314,6 +314,36 @@ wire format for the five RFCOMM stages is a small bounded codec on top of
 once the transport exists, not a research project. The expensive part is
 BlueZ/SDP plumbing, and it lives outside the head unit.
 
+## 5b-2. What the owner's dongle already proves, and what is actually missing
+
+Owner fact (2026-11-24): Android Auto **already works in this car** through a
+wired/wireless adapter — a dongle presents itself as the phone and the head unit
+projects it. What does **not** work is the two things this project exists for:
+the **cluster/HUD turn-by-turn** and the **EV energy model** in Maps. That
+reorders the whole plan, and mostly cancels its most expensive part:
+
+- The head unit as an AA **receiver** is proven working. Nothing in this package
+  needs to decode H.264, own an ivi surface, or fight the Weston watchdog: the
+  vendor stack already renders AA (§5e-2's video problem is a *receiver* problem,
+  and we are not building a receiver any more).
+- What the dongle cannot know is the car's state, because it only pipes frames:
+  it opens no SENSOR channel of its own and it has no cluster path. So the missing
+  role is a **protocol-aware middle**, not a renderer.
+- The middle is cheap by design if it stays at the message level: forward every
+  channel verbatim, **drop the head unit's SENSOR request and answer it
+  ourselves** from `battery`'s I-CAN decode (`aa_sensor` already builds that
+  message), and **extract the NAVIGATION channel** for the cluster (`aa_nav`,
+  AA5). Video and audio are never touched, because they are never understood.
+- The roles are the ones the checkpoints already implement: toward the phone the
+  bridge is the head unit (host/TLS client, `aa_session`), toward the car it is
+  the phone (accessory, `aa_aoap`'s AOA responder + a TLS **server** half, which
+  is the one genuinely new piece).
+
+So the shortest useful result is no longer "wireless AA in this car" — it is
+**EV + cluster through a pass-through bridge**, and the two deliverables that do
+not need any of the hardware first are AA5 (navigation out) and the sensor
+injection path, both testable against our own scripted phone.
+
 ## 5c. The AA entry on the WiFi page, and why it is not an AP toggle
 
 The WiFi app already has a CarPlay tab: the access point's SSID, key, band and
