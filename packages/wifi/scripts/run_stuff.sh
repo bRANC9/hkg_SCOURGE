@@ -1708,7 +1708,13 @@ fi
 bt_api_probe() {
     mkdir -p /rw_data/aa 2>/dev/null || true
     _prober=""
-    for _c in "$STICK_ROOT/combo/aa/vbtd_api.target" "$USB_DIR/../aa/vbtd_api.target" "$USB_DIR/bin/vbtd_api.target"; do
+    # The AA prober ships inside the wifi payload (combo/wifi/payload/bin) and the
+    # stage installs it to $RW_DIR/bin a few lines into this script, so those are
+    # the real locations; combo/aa is for a standalone AA bundle that does not
+    # exist yet, and $USB_DIR/bin never did (it cost two runs of
+    # "vbtd_api not staged, bt_api.json not written", 2026-11-24 20:50).
+    for _c in "$PAYLOAD/bin/vbtd_api.target" "$RW_DIR/bin/vbtd_api.target" \
+              "$STICK_ROOT/combo/aa/vbtd_api.target" "$USB_DIR/../aa/vbtd_api.target"; do
         [ -f "$_c" ] && { _prober="$_c"; break; }
     done
     if [ -z "$_prober" ]; then
