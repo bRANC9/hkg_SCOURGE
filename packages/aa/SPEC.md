@@ -133,7 +133,7 @@ under ASan/UBSan:
 | AA7 | Wireless bootstrap codec (aa_btboot): RFCOMM framing, the start/info/status messages, credential validation, five-stage state machine | Done offline for the codec half; the BlueZ SDP/HFP/RFCOMM plumbing and the TCP listener are the transport half |
 | AA7c | TCP transport (`transport/aa_tcp.c`): bind/listen, accept one peer, pump bytes between the socket and the session, drain the queued frames before the first read | Done, host-tested over a real loopback socket (`tests/test_tcp.py`) with the stand-in provider; the bind address and the firewall rule still depend on the unit probe |
 | AA-D | Debug daemon (`daemon/aa_daemon.c`): `GET /status`, `GET /ap-check`, `GET /saved` on 127.0.0.1:8095; a successful `/ap-check` pins the validated AP readback to a state file | Done, host-tested (`tests/test_daemon.py`); not installed, no service unit, no session behind it |
-| AA8 | Phone-role mirror (`aa_mirror`): version answer, discovery request, channel opens, sensor start, EV read-back | Done offline for the protocol half, driven by head-unit-side messages generated with `aa_control`/`aa_sensor`; needed only on the bridge fallback (`docs/19` §5e) |
+| AA8 | Phone-role mirror (`aa_mirror`): version answer, discovery request, channel opens, sensor start, EV read-back | Done offline for the protocol half, driven by head-unit-side messages generated with `aa_control`/`aa_sensor`; needed only on the bridge fallback (`docs/22` §5e) |
 | AA9 | On-unit Bluetooth ownership (`probes/bt_owner.c`): can our process bind L2CAP PSM 1 (SDP) and RFCOMM channel 8, or does `vbtd` hold them | Tool done, self-tested on the host; **not yet run on the unit** — it is the measurement that decides the on-unit route |
 | AA10 | Video track for the on-unit route: H.264 decode, ivi surface on Weston 1.10, input events | Pending — the largest open item, and it inherits "never crash Weston" (its death resets the head unit) |
 
@@ -158,7 +158,7 @@ under ASan/UBSan:
   (`ScreenStreamProcessData`) and never touch a dmabuf. So the checks are
   `EGL_EXT_image_dma_buf_import` in `libEGL`, `wl_drm`/`zwp_linux_dmabuf_v1`
   in Weston, and `vaExportSurfaceHandle` in `libva`; missing any of them drops
-  the target to 720p30 over `wl_shm` (`docs/19` §5e-2, §8).
+  the target to 720p30 over `wl_shm` (`docs/22` §5e-2, §8).
 - The EV energy model is reverse-engineered protocol (undocumented sensor
   type), so it is version-sensitive: validate against the phone's AA version
   before claiming support.

@@ -4,7 +4,7 @@
 """End-to-end test for probes/vbtd_api.c.
 
 The tool decides whether the vendor Bluetooth stack *exports* the SDP/RFCOMM
-calls the Android Auto bootstrap needs (docs/19 §5b), because a plain string
+calls the Android Auto bootstrap needs (docs/22 §5b), because a plain string
 search cannot tell an export from an import.  The test builds two shared objects
 on the host: one that exports the names, and one that only *imports* them, and
 asserts the tool separates the two.  Nothing here needs the head unit.

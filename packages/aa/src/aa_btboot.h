@@ -10,7 +10,7 @@
  *
  * Facts, pinned from the open-android-auto wireless setup guide (BlueZ 5.82,
  * documented 2024-02, cross-checked against aa-proxy-rs/bluer behaviour) and
- * recorded in docs/19 section 5b.  Documentation-derived, **not verified on
+ * recorded in docs/22 section 5b.  Documentation-derived, **not verified on
  * this unit**: treat a real capture as the authority.
  *
  *   packet  [length u16 BE][message id u16 BE][protobuf body]

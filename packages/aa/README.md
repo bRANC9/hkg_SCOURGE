@@ -16,7 +16,7 @@ means these layers are sound, not that projection works.
 
 ## Why this exists
 
-`docs/19-aa-core.md` carries the reasoning. In short:
+`docs/22-aa-core.md` carries the reasoning. In short:
 
 - The head unit's stock Android Auto is wired-only and vendor-owned
   (`AppProjection`); the repo previously touched nothing but its D-Bus
@@ -58,8 +58,8 @@ means these layers are sound, not that projection works.
 | `tests/aa_btboot_test.c` | Framing vectors in both readings, BSSID canonical text, credential and address validation, the full handshake, refusal and out-of-order paths. |
 | `tests/aa_session_test.c` | A scripted phone through version, handshake, auth, discovery, channel open, ping, shutdown and the sensor channel (EV start request, pushed state of charge), plus early-encryption, flood, oversized-handshake, partial-frame and foreign-channel paths. |
 | `tests/proto/aa_differential.proto`, `tests/aa_dump.c` | Second opinion from the official protobuf tooling: `protoc` decodes what our encoders produced, and our decoder parses what `protoc` encoded, so the two independent statements of the same wire facts are cross-checked. |
-| `probes/bt_owner.c` | Diagnostic for the kernel Bluetooth path: whether our process could bind the SDP (L2CAP PSM 1) and AA RFCOMM (channel 8) sockets. On the measured unit the answer is *unavailable* — no kernel Bluetooth stack exists at all (`docs/19` §5b), the vendor daemon is the stack — so this now records the errno and the adapter/module evidence; the real route is the vendor's exported SDP/RFCOMM API via `tools/bttap` |
-| `probes/vbtd_api.c` | (shipped by the WiFi stage as `combo/aa/vbtd_api.target`, writes `/rw_data/aa/bt_api.json`) Reads an ELF's `.dynsym` and answers whether the vendor Bluetooth stack **exports** `SDP_CreateRecord`, `SDP_AddServiceClassIdList`, `SDP_AddAttribute` and `RFCOMM_CreateConnection` — the condition for `dlsym` to find them from inside `vbtd` (`docs/19` §5b). Writes `{"sdp_api":…,"rfcomm_api":…}` for the WiFi status JSON; a string search cannot distinguish an export from an import |
+| `probes/bt_owner.c` | Diagnostic for the kernel Bluetooth path: whether our process could bind the SDP (L2CAP PSM 1) and AA RFCOMM (channel 8) sockets. On the measured unit the answer is *unavailable* — no kernel Bluetooth stack exists at all (`docs/22` §5b), the vendor daemon is the stack — so this now records the errno and the adapter/module evidence; the real route is the vendor's exported SDP/RFCOMM API via `tools/bttap` |
+| `probes/vbtd_api.c` | (shipped by the WiFi stage as `combo/aa/vbtd_api.target`, writes `/rw_data/aa/bt_api.json`) Reads an ELF's `.dynsym` and answers whether the vendor Bluetooth stack **exports** `SDP_CreateRecord`, `SDP_AddServiceClassIdList`, `SDP_AddAttribute` and `RFCOMM_CreateConnection` — the condition for `dlsym` to find them from inside `vbtd` (`docs/22` §5b). Writes `{"sdp_api":…,"rfcomm_api":…}` for the WiFi status JSON; a string search cannot distinguish an export from an import |
 | `tests/test_aa.py` | Builds and runs every program (strict, then ASan/UBSan), runs the `protoc` cross-check and enforces the source policy: SPDX, no allocation/sockets/threads/I-O, no protobuf runtime or TLS library, no reference-library code. |
 
 ## Building for the head unit
@@ -84,10 +84,10 @@ sh -c 'cd packages/aa && make check'
 
 A real TLS provider (a transport checkpoint supplies one backed by a library),
 the navigation/video/input channel state machines, and the wireless bootstrap.
-The route decided in `docs/19-aa-core.md` §5e is the **on-unit** one, so the
+The route decided in `docs/22-aa-core.md` §5e is the **on-unit** one, so the
 next steps are the `bt_owner` probe, the video question and then the bootstrap on
 the unit; the phone-role mirror and the bulk frame pipe only matter on the bridge
 fallback. Video and audio channels are deliberately not advertised
 by the discovery response yet, and the discovery response does not yet declare
 the electric fuel type or EV connector list. See the checkpoint list in
-`docs/19-aa-core.md`.
+`docs/22-aa-core.md`.

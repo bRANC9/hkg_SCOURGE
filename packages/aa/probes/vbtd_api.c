@@ -7,7 +7,7 @@
  * Why this exists
  * ---------------
  * The head unit has no kernel Bluetooth stack: `vbtd` is the stack, running in
- * userspace on /dev/ttyS0 (docs/19 §5b). It exports `SDP_CreateRecord`,
+ * userspace on /dev/ttyS0 (docs/22 §5b). It exports `SDP_CreateRecord`,
  * `SDP_AddAttribute`, `SDP_AddServiceClassIdList` and `RFCOMM_CreateConnection`,
  * which is what makes the on-unit route possible — the record is published
  * inside the vendor stack's own database, through the LD_PRELOAD shim in
@@ -226,7 +226,7 @@ static int all_exported(void)
     return 1;
 }
 
-/* The two flags the status JSON carries (docs/19 §5c): an SDP API needs all
+/* The two flags the status JSON carries (docs/22 §5c): an SDP API needs all
  * three SDP calls defined, the RFCOMM API one. */
 static int sdp_api_ready(void)
 {

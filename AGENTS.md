@@ -155,7 +155,7 @@ repo.
     material never gets our header.
 - Package installers follow the docs/06 house rules (manifest, stock-hash
   guards, backups, idempotency, explicit status lines).
-- Docs are numbered `docs/01–21`; UI research lives in `docs/ui/`.
+- Docs are numbered `docs/01–22`; UI research lives in `docs/ui/`.
 - Scripts are run with `sh`/`bash`/`python3` (do not rely on +x bits) —
   except the hooks under `scripts/githooks/`, which git itself executes
   and therefore must stay executable (`scripts/install_hooks.sh` restores

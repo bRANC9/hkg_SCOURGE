@@ -23,7 +23,7 @@
  *   ping either way (0x000b / 0x000c)
  *
  * Facts pinned against aasdk commit 046b3b381595509d0939fa84b14a90978f46ff63
- * and the phone-side sequences in docs/19; nothing copied.  The EV field is the
+ * and the phone-side sequences in docs/22; nothing copied.  The EV field is the
  * undocumented sensor type 23 documented in aa_sensor.h.
  *
  * Local policy: one request is pending at a time (the caller sends what the

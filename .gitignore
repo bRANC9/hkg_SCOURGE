@@ -63,6 +63,9 @@ __pycache__/
 # --- rust ----------------------------------------------------------------------
 target/
 
+# --- crash dumps from the VM lab (not source, never committed) -----------------
+*.core
+
 # --- editors / OS --------------------------------------------------------------
 .idea/
 .vscode/

@@ -3,7 +3,7 @@
 This directory is parked on purpose: the Android Auto core is **not finished and
 not activated**, so it must be mergeable in one piece later without dragging
 half-finished lines through shared files. Nothing outside `packages/aa/` and
-`docs/19-aa-core.md` is modified while the checkpoint stream is open.
+`docs/22-aa-core.md` is modified while the checkpoint stream is open.
 
 ## What is here
 
@@ -21,10 +21,10 @@ half-finished lines through shared files. Nothing outside `packages/aa/` and
 
 Missing before anything may touch a car: a real TLS provider, the transports
 (TCP listener + USB bulk pipe), the bootstrap on the unit, an installer/restore
-bundle and a parked-car gate. See `docs/19-aa-core.md`.
+bundle and a parked-car gate. See `docs/22-aa-core.md`.
 
 **Route update (2026-11-23):** the target is the on-unit route, not the bridge
-board (`docs/19` §5e), so the mirror (AA8) and the AOA bulk pipe are fallback
+board (`docs/22` §5e), so the mirror (AA8) and the AOA bulk pipe are fallback
 work and the video track (AA10) is a first-class checkpoint.
 
 ## One thing already leaves this directory
@@ -47,17 +47,17 @@ same files.
 ```diff
 --- a/AGENTS.md
 +++ b/AGENTS.md
--- Docs are numbered `docs/01–17`; UI research lives in `docs/ui/`.
-+- Docs are numbered `docs/01–19`; UI research lives in `docs/ui/`.
+-- Docs are numbered `docs/01–21`; UI research lives in `docs/ui/`.
++- Docs are numbered `docs/01–22`; UI research lives in `docs/ui/`.
 
 --- a/README.md
 +++ b/README.md
--| `docs/01–17` | The runbooks: … the unsigned normal-USB update confirmation |
-+| `docs/01–19` | The runbooks: … the unsigned normal-USB update confirmation, and the AA core plan (wired + wireless Android Auto) |
+-| `docs/01–21` | The runbooks: … the unsigned normal-USB update confirmation |
++| `docs/01–22` | The runbooks: … the unsigned normal-USB update confirmation, and the AA core plan (wired + wireless Android Auto) |
 
 --- a/docs/07-packages.md
 +++ b/docs/07-packages.md
-+| AA | AA core research (AA1–AA10): transport-agnostic frame layer, protobuf codec, control/sensor channels, TLS seam, session glue, EV energy model, AOA responder, wireless bootstrap, the phone-role mirror, the on-unit route decision and its Bluetooth/video measurements (`docs/19`) | WIP — unit-tested source only; no TLS provider, no installer, no Maps or car validation |
++| AA | AA core research (AA1–AA10): transport-agnostic frame layer, protobuf codec, control/sensor channels, TLS seam, session glue, EV energy model, AOA responder, wireless bootstrap, the phone-role mirror, the on-unit route decision and its Bluetooth/video measurements (`docs/22`) | WIP — unit-tested source only; no TLS provider, no installer, no Maps or car validation |
 ```
 
 Place the docs/07 row after the last `Wifi1b` row, before the `All` row.
@@ -70,7 +70,7 @@ it with the same plumbing whenever the park should be preserved:
 
 ```sh
 GIT_INDEX_FILE=/tmp/aa_index git read-tree HEAD
-GIT_INDEX_FILE=/tmp/aa_index git add packages/aa docs/19-aa-core.md
+GIT_INDEX_FILE=/tmp/aa_index git add packages/aa docs/22-aa-core.md
 TREE=$(GIT_INDEX_FILE=/tmp/aa_index git write-tree)
 COMMIT=$(git commit-tree "$TREE" -p aa-core-wip -F - <<'MSG'
 chore(aa): park ...
@@ -100,7 +100,7 @@ it (`/ap-check`, `/saved`) — plus the engine and the transports.
 
    ```sh
    git switch -c aa-core-wip
-   git add packages/aa docs/19-aa-core.md
+   git add packages/aa docs/22-aa-core.md
    git commit -m "feat(aa): parked AA core checkpoints AA1-AA8 (codec level)" \
      -m "Second-Opinion: deepseek-v4.1-flash#max — PASS"
    ```
@@ -116,6 +116,6 @@ cd packages/aa && make          # objects
 cd packages/aa && make check    # 11 test programs, strict + ASan/UBSan, plus the protoc cross-check
 ```
 
-Only `packages/aa/` and `docs/19-aa-core.md` should change while the park is
+Only `packages/aa/` and `docs/22-aa-core.md` should change while the park is
 open. If a shared file really has to change, note why at the bottom of this file
 so the merge step is explicit.

@@ -7,7 +7,7 @@
  *
  * Why this is the question that decides the route
  * -----------------------------------------------
- * The AA bootstrap needs two things on the Bluetooth side (docs/19 §5b):
+ * The AA bootstrap needs two things on the Bluetooth side (docs/22 §5b):
  *
  *   1. an SDP record that contains only the AA UUID, so the phone can find the
  *      RFCOMM channel;
@@ -19,7 +19,7 @@
  * to PSM 0x0001 and the RFCOMM listener is a socket bound to channel 8.  If
  * those binds succeed, we can serve both from our own process and `vbtd` is
  * only needed for discoverability/pairing — which its CommonAPI adapter
- * already exposes (docs/19 §5b).  If they fail with EADDRINUSE, the vendor
+ * already exposes (docs/22 §5b).  If they fail with EADDRINUSE, the vendor
  * daemon owns them and the on-unit route needs vendor ABI work.
  *
  * No BlueZ headers are used: the two `sockaddr` layouts below are the kernel
@@ -29,7 +29,7 @@
  * Build for the unit: `make target-bt-owner` (musl, baseline ISA, static-pie).
  * Host self-test:     `make bt-owner-selftest`.
  *
- * RESULT (2026-11-23, docs/19 §5b): on this head unit the answer is already
+ * RESULT (2026-11-23, docs/22 §5b): on this head unit the answer is already
  * known and it is "unavailable".  The kernel loads no Bluetooth module at all
  * (the dmesg module list has no bluetooth/l2cap/rfcomm/hci_uart) and
  * /sys/class/bluetooth never appears, because the vendor daemon `vbtd` *is* the
@@ -57,7 +57,7 @@
 
 /* The SDP server PSM is a protocol constant, not a choice. */
 #define SDP_PSM 0x0001u
-/* The channel Android Auto's SDP record announces (docs/19 §5b). */
+/* The channel Android Auto's SDP record announces (docs/22 §5b). */
 #define AA_RFCOMM_CHANNEL 8u
 /* RFCOMM has 30 usable channels; the sweep stops below that to stay readable. */
 #define RFCOMM_SWEEP_MAX 14u
