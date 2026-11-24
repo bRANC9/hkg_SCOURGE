@@ -37,8 +37,18 @@ mkdir -p "$OUT/payload/facts" "$OUT/payload/bin" "$OUT/payload/assets/wifi" "$OU
          "$OUT/backup/AppHomeScreen/qml_eco3.0/component/common"
 # AA cross-check: the BT socket-ownership probe from packages/aa, so the
 # install-time probe can report who owns SDP / RFCOMM 8 on this unit.
-if [ -x "$HERE/../aa/bt_owner.target" ]; then
-    cp -f "$HERE/../aa/bt_owner.target" "$OUT/payload/bin/bt_owner.target"
+if [ -x "$HERE/../../aa/bt_owner.target" ]; then
+    cp -f "$HERE/../../aa/bt_owner.target" "$OUT/payload/bin/bt_owner.target"
+else
+    echo "note: packages/aa/bt_owner.target not built (make -C packages/aa target-bt-owner)" >&2
+fi
+# AA cross-check: does the vendor Bluetooth stack *export* the SDP/RFCOMM calls
+# the bootstrap needs?  The probe reads the running daemon's .dynsym and writes
+# /rw_data/aa/bt_api.json, which the status JSON carries as sdp_api/rfcomm_api.
+if [ -x "$HERE/../../aa/vbtd_api.target" ]; then
+    cp -f "$HERE/../../aa/vbtd_api.target" "$OUT/payload/bin/vbtd_api.target"
+else
+    echo "note: packages/aa/vbtd_api.target not built (make -C packages/aa target-vbtd-api)" >&2
 fi
 mkdir -p "$OUT/payload/lib"
 [ -f "$HERE/artifacts/facts/hwinfo.txt" ] && cp -f "$HERE/artifacts/facts/hwinfo.txt" "$OUT/payload/facts/hwinfo.txt" || true

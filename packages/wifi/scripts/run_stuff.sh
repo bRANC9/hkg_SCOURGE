@@ -59,6 +59,10 @@ if [ -f "$PAYLOAD/bin/bt_owner.target" ]; then
     cp -f "$PAYLOAD/bin/bt_owner.target" "$RW_DIR/bin/bt_owner.target" 2>/dev/null || true
     chmod 755 "$RW_DIR/bin/bt_owner.target" 2>/dev/null || true
 fi
+if [ -f "$PAYLOAD/bin/vbtd_api.target" ]; then
+    cp -f "$PAYLOAD/bin/vbtd_api.target" "$RW_DIR/bin/vbtd_api.target" 2>/dev/null || true
+    chmod 755 "$RW_DIR/bin/vbtd_api.target" 2>/dev/null || true
+fi
 wifi_import=not-present
 
 ADV="HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
@@ -1721,11 +1725,24 @@ bt_api_probe() {
         log "vbtd_api: cannot stage the prober; bt_api.json not written"
         return 0
     fi
-    if "$RW_DIR/bin/vbtd_api" "$_exe" > /rw_data/aa/bt_api.json 2>>"$LOG"; then
-        log "bt_api: measured $_exe (pid ${_pid:-none})"
-    else
-        log "bt_api: prober failed on $_exe"
-        rm -f /rw_data/aa/bt_api.json 2>/dev/null || true
+    # The running object first; the CLI versions are the fallback when the pid is
+    # gone or /proc is unreadable.  The prober exits 1 when a symbol is missing but
+    # still writes a complete report, so only a non-zero *without* output is fatal.
+    _measured=""
+    for _cand in "$_exe" /app/bin/vbtd /app/bin/vbtd-51 /app/bin/vbtd-63; do
+        [ -n "$_cand" ] || continue
+        [ -f "$_cand" ] || continue
+        if "$RW_DIR/bin/vbtd_api" "$_cand" > /rw_data/aa/bt_api.json 2>>"$LOG"; then
+            log "bt_api: measured $_cand (pid ${_pid:-none}, every AA symbol exported)"
+        else
+            log "bt_api: measured $_cand (pid ${_pid:-none}, symbols missing, see bt_api.json)"
+        fi
+        [ -s /rw_data/aa/bt_api.json ] || { rm -f /rw_data/aa/bt_api.json 2>/dev/null || true; continue; }
+        _measured="$_cand"
+        break
+    done
+    if [ -z "$_measured" ]; then
+        log "bt_api: no vendor binary could be measured"
         return 1
     fi
     # Same reason as bt_tap.bin: the owner reads the measurement from the stick.
