@@ -53,7 +53,8 @@ same protobuf core over both. Both were read as protocol references only —
 |---|---|---|
 | A — upstream dongle | Keep a commercial wireless-AA dongle in the stock USB port | No work, but cannot deliver cluster navigation or EV data |
 | B — bridge dongle | Own hardware between phone and head unit: wireless on the phone side, USB AOAP gadget on the head-unit side, payload passed through | The tractable implementation route: no decode, no projection window, stock USB untouched |
-| C — the AA stack on the unit itself | The head unit speaks AA to the phone and renders it | **The decided route (§5e)**: no OEM AA receiver to reuse (unlike CarPlay's libAirPlay/iAP2), so video decode and window ownership are ours; the Bluetooth half turned out to be cheap |
+| C — the AA stack on the unit itself | The head unit speaks AA to the phone and renders it | Rejected twice over: no OEM AA receiver to reuse, and §5b-2 showed the owner's dongle already provides the receiver — we would be rebuilding a working thing |
+| D — pass-through middle (§5b-2) | A device between phone and head unit that forwards every channel and answers SENSOR itself | **The plan**: the head unit keeps rendering (proven working), we supply the car state it cannot know, and no video is ever decoded |
 
 Route B is why the transport seam matters: the bridge is the only process that
 uses *both* transports, so a single core is not a stylistic choice there, it is
@@ -427,7 +428,14 @@ than that, which is also why the engine avoids float-heavy or vectorised paths.
 Owner decision (2026-11-23): the target is the **on-unit route** — the head unit
 speaks AA to the phone itself, with nothing extra plugged into the car. The
 bridge board (§5e-3 below) stays as a fallback that reuses the same core, not as
-the plan. The reason it moved from §3's "research corner" to the plan is that
+the plan.
+
+> **Superseded by §5b-2 (2026-11-24).** The owner's dongle already makes the
+> head unit a working AA *receiver*, and the two missing features (cluster
+> turn-by-turn, EV in Maps) need a device that knows the car, not a second
+> receiver. So the on-unit route is no longer the plan: the plan is a
+> message-level pass-through bridge, and everything below about decoding video
+> on the unit is recorded history rather than a task. The reason it moved from §3's "research corner" to the plan is that
 the expensive half turned out to be already done:
 
 | What the on-unit route was missing | State now |
@@ -585,38 +593,25 @@ the `wifi1b` C1-reviewed index is not disturbed by this work.
 
 ## 8. Next action
 
-The order changed with the decision in §5e. On-unit means the unit is the
-receiver, so the cheap measurements come first and the video track is the real
-cost:
+The order changed twice: §5e made the unit the receiver, §5b-2 removed the
+receiver from the job entirely. What is left is a pass-through middle, and the
+first deliverables need **no hardware at all**:
 
-1. **AA9c — the active shim** is the Bluetooth half's next implementation step
-   (§5b): in `tools/bttap`, `dlsym` the vendor exports, add the AA SDP record
-   (AA UUID alone, no SPP UUID, RFCOMM channel 8), accept the RFCOMM connection
-   and pump its bytes to `aa_btboot` in the musl daemon over a UNIX socket. The
-   plugin is glibc-2.25, opt-in, revertible, and deliberately dumb: no protocol
-   code, no allocation in callbacks, because a fault inside `vbtd` costs the car
-   its Bluetooth.
-   *Ownership: handed to the "Repó értékfelmérés" tab, which holds the SSH link
-   to the unit and the Ghidra workspace; the same request carries the crypto and
-   decoder library inventory (`ldd /app/bin/AppProjection`, `ls /usr/lib`).
-   Results come back here into §5b and the AA9/AA10 rows.*
-2. **AA10a — the platform's zero-copy question**, now that the vendor binaries
-   are ruled out (§5e-2: they hand encoded bytes to a decoder service and never
-   touch a dmabuf): does `libEGL` expose `EGL_EXT_image_dma_buf_import`, does
-   Weston offer `wl_drm`/`zwp_linux_dmabuf_v1`, and does the installed `libva`
-   expose `vaExportSurfaceHandle`? Missing pieces drop the target to 720p30 over
-   `wl_shm`. *Ownership: the "Repó értékfelmérés" tab's probe — those three
-   `strings`/`ls` checks plus `ps`/`/proc/*/maps` (with the found service's
-   open fds) to name the decoder service and the channel it reads. If the maps
-   sweep finds nothing, the decoder is a kernel V4L2 node and the next check is
-   `/dev/video*` + `VIDIOC_QUERYCAP`, not VA-API.*
-3. **AA7-unit — the bootstrap on the unit itself**: our SDP record (AA UUID
-   only), the RFCOMM listener driving `aa_btboot`, pairing/discoverability
-   through the vendor CommonAPI adapter, the existing 5 GHz AP, and the TCP
-   listener that feeds `aa_session_feed` — plus a real TLS provider, either the
-   unit's own libssl or one built into the musl-static binary.
-4. Fallback only: the bridge board (§5e-3) and AA8's phone-role mirror, which is
-   what a bridge needs to drive a stock head unit.
+1. **AA5 — navigation out** (`aa_nav`): subscribe to the NAVIGATION channel,
+   extract the turn-by-turn events, and push them down the cluster path the
+   car already accepts (`com.mnsoft.navi.canservice`, the `0x4E8`/`0x4CC`
+   frames `packages/battery` already injects). No hardware: our scripted phone
+   can drive the channel. This is the HUD half of the owner's missing features.
+2. **The sensor-injection path**: the middle must answer the head unit's SENSOR
+   request itself instead of forwarding it, from `battery`'s I-CAN decode
+   (`aa_sensor` builds that message today). Testable the same way: a scripted
+   head unit asks, we answer with a live state of charge. This is the EV half.
+3. **The pass-through core**: forward every other channel verbatim (no video or
+   audio understanding), which also means the only *new* protocol piece is the
+   **TLS server** half toward the car (§5b-2).
+4. Deferred until the middle exists: AA9c (the vendor SDP/RFCOMM shim) and
+   AA7-unit, which are only needed if the phone link is wireless. The bridge
+   board (§5e-3) is the hardware fallback for the middle.
 
 Role map to keep in mind (from the same reference commit): wired AA puts the
 head unit in the USB-host *and* TLS-client role (SSL_set_connect_state) with the

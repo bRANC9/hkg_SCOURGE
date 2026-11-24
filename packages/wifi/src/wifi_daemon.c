@@ -4309,7 +4309,23 @@ static void apply_reap(void)
     if (r == 0) {
         if (g_apply_cancelled && now_ms() - g_cancel_ms > 300) {
             kill(-pid, SIGKILL); kill(pid, SIGKILL);
-        } else if (!g_apply_cancelled && now_ms() - g_apply_start_ms > 150000) {
+            /* A worker stuck in an uninterruptible sleep (a hung vendor D-Bus or
+             * connmanctl call) never returns its status, so waitpid() keeps saying
+             * "still running" and the daemon reported applying=true forever, with
+             * the UI stuck on "Applying mode..." and SSH never started (2026-11-24
+             * on-car: applying=true, wpa_state=SCANNING, ssid=none, no 2222
+             * listener).  After 5 s of SIGKILL, abandon the slot: the zombie is
+             * harmless and the next apply gets a clean state. */
+            if (now_ms() - g_cancel_ms > 5000) {
+                log_msg("apply worker %d did not exit 5 s after SIGKILL; clearing the slot", (int)pid);
+                g_apply_pid = 0;
+                g_apply_failed = true;
+                if (g_work_kind == WORK_MODE) g_network_failed = true;
+                set_msg("apply stuck; worker abandoned (see daemon log)");
+                waitpid(pid, &st, WNOHANG);
+                start_pending_work();
+            }
+        } else if (!g_apply_cancelled && now_ms() - g_apply_start_ms > 75000) {
             g_apply_failed = true;
             if (g_work_kind == WORK_MODE) g_network_failed = true;
             set_msg("apply timed out");
