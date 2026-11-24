@@ -1652,6 +1652,40 @@ if [ -n "$_wip" ]; then
     sleep 3
     _l=$( (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep 2222 | head -n1 )
     log "ssh: wlan0=$_wip listener=${_l:-none}"
+    # Last resort, because SSH is the only way to iterate without another stick
+    # round: a worker stuck in "Applying mode..." keeps applying=true forever and
+    # the daemon never reaches ssh_start (2026-11-24 20:36 and 20:54 snapshots).
+    # The direct start uses the same arguments the daemon uses, so its own
+    # ssh_running() sees the pid file and will not start a second copy.
+    if [ -z "$_l" ]; then
+        _db=""
+        for _c in "$RW_DIR/bin/dropbear" "$RW_DIR/bin/dropbearmulti"; do
+            [ -f "$_c" ] && { _db="$_c"; break; }
+        done
+        if [ -n "$_db" ]; then
+            chmod 755 "$_db" 2>/dev/null || true
+            mkdir -p "$RW_DIR/ssh" 2>/dev/null || true
+            _ed="$RW_DIR/ssh/dropbear_ed25519_host_key"
+            _rsa="$RW_DIR/ssh/dropbear_rsa_host_key"
+            _dkey="$RW_DIR/bin/dropbearkey"
+            if [ -x "$_dkey" ]; then
+                [ -f "$_ed" ] || "$_dkey" -t ed25519 -f "$_ed" >> "$LOG" 2>&1 || true
+                [ -f "$_rsa" ] || "$_dkey" -t rsa -s 2048 -f "$_rsa" >> "$LOG" 2>&1 || true
+            fi
+            if [ -f "$_ed" ] && [ -f "$_rsa" ]; then
+                "$_db" -r "$_ed" -r "$_rsa" -p "$_wip:2222" -P "$RW_DIR/ssh/dropbear.pid" \
+                    >> "$RW_DIR/ssh.log" 2>&1 &
+            else
+                "$_db" -R -p "$_wip:2222" -P "$RW_DIR/ssh/dropbear.pid" \
+                    >> "$RW_DIR/ssh.log" 2>&1 &
+            fi
+            sleep 2
+            _l=$( (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep 2222 | head -n1 )
+            log "ssh: direct dropbear start listener=${_l:-none}"
+        else
+            log "ssh: no dropbear binary under $RW_DIR/bin; cannot start it directly"
+        fi
+    fi
 else
     log "ssh: no wlan0 address yet; dropbear stays down"
 fi
