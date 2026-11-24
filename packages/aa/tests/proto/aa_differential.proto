@@ -1,0 +1,133 @@
+// SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// Test-only schema for the differential checks.  It is a second, independent
+// statement of the same wire facts the C codec implements, written as plain
+// protobuf so that the official compiler and decoder can disagree with us.
+// Field numbers come from packages/aa/src/aa_control.h and aa_sensor.h; if the
+// two ever drift, this file and the encoder disagree and the test fails.
+//
+// Nothing here is used at runtime, nothing is vendored from another project,
+// and the undocumented sensor types (23 = EV energy model) are declared the way
+// the phone APK treats them: field 23 carries the model message itself.
+
+syntax = "proto3";
+
+package aa_test;
+
+message EnergyValue {
+  int32 watt_hours = 1;
+}
+
+message EnergyRate {
+  float rate = 1;
+}
+
+message EnergyConsumption {
+  EnergyRate driving = 1;
+}
+
+message BatteryConfig {
+  // Maps reads min_usable_capacity as the *current* energy, not as a floor.
+  EnergyValue min_usable_capacity = 3;
+  EnergyValue max_capacity = 4;
+  EnergyValue reserve_energy = 8;
+  int32 max_charge_power_w = 9;
+  int32 max_discharge_power_w = 10;
+  bool regen_braking_capable = 11;
+}
+
+message ChargingPrefs {
+  uint32 mode = 3;
+}
+
+message VehicleEnergyModel {
+  BatteryConfig battery = 1;
+  EnergyConsumption consumption = 2;
+  ChargingPrefs charging_prefs = 12;
+}
+
+message Gear {
+  uint32 gear = 1;
+}
+
+message NightMode {
+  bool is_night = 1;
+}
+
+message ParkingBrake {
+  bool parking_brake = 1;
+}
+
+message DrivingStatus {
+  int32 status = 1;
+}
+
+message Speed {
+  int32 speed = 1;
+}
+
+// Field numbers equal the sensor type, which is how the reference builds it.
+message SensorEventIndication {
+  repeated Speed speed = 3;
+  repeated ParkingBrake parking_brake = 7;
+  repeated Gear gear = 8;
+  repeated NightMode night_mode = 10;
+  repeated DrivingStatus driving_status = 13;
+  repeated VehicleEnergyModel ev_energy_model = 23;
+}
+
+message Sensor {
+  uint32 type = 1;
+}
+
+message SensorChannel {
+  repeated Sensor sensors = 1;
+}
+
+message NavigationImageOptions {
+  int32 width = 1;
+  int32 height = 2;
+  int32 colour_depth_bits = 3;
+}
+
+message NavigationChannel {
+  uint32 minimum_interval_ms = 1;
+  uint32 type = 2;
+  NavigationImageOptions image_options = 3;
+}
+
+message TouchConfig {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+message InputChannel {
+  repeated uint32 supported_keycodes = 1;
+  TouchConfig touch_screen_config = 2;
+  TouchConfig touch_pad_config = 3;
+}
+
+message ChannelDescriptor {
+  uint32 channel_id = 1;
+  SensorChannel sensor_channel = 2;
+  InputChannel input_channel = 4;
+  NavigationChannel navigation_channel = 8;
+}
+
+message ServiceDiscoveryResponse {
+  repeated ChannelDescriptor channels = 1;
+  string head_unit_name = 2;
+  string car_model = 3;
+  bool left_hand_drive_vehicle = 6;
+  string headunit_manufacturer = 7;
+  string headunit_model = 8;
+  string sw_build = 9;
+  string sw_version = 10;
+  bool hide_clock = 12;
+}
+
+message ServiceDiscoveryRequest {
+  string device_name = 4;
+  string device_brand = 5;
+}

@@ -68,3 +68,11 @@ packages/tweaks/src/wrandr_wrapper
 packages/ambient/src/ambient_daemon
 packages/ambient/out/
 packages/ambient/dist/
+packages/aa/*.o
+packages/aa/aa_daemon
+packages/aa/aa_daemon.target
+packages/aa/bt-owner
+packages/aa/bt_owner.target
+packages/aa/bt_owner.selftest
+packages/aa/vbtd-api
+packages/aa/vbtd_api.target
