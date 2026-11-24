@@ -21,6 +21,11 @@
 # and to the USB backup_current/. It does not flash firmware and does not touch
 # the updater, bootloader, or partitions.
 set -u
+
+# The unit runs a Korean locale: `date` prints "2026. 11. 23. (월)" and tools
+# emit localised text, which lands in combo.log, the probes and the UI popup.
+# Pin the C locale so every log line is ASCII.
+export LC_ALL=C LANG=C LC_TIME=C 2>/dev/null || true
 PATH="${BATTERY_PATH:-/bin:/sbin:/usr/bin:/usr/sbin}"
 USB_DIR="${USB_DIR:-/media/usb}"
 PAYLOAD="$USB_DIR/payload"
@@ -181,6 +186,152 @@ if [ "$already" = 0 ]; then
     cp -f "$cur" "$USB_DIR/backup_current/AppHomeScreen/qml_eco3.0/$ADV" 2>/dev/null || true
 fi
 log "HU backup: $BACKUP_HU"
+
+# The car's I-CAN is not always can0: on this unit all of can0/can1/can2 exist and
+# every one of them was DOWN (2026-11-22 radio probe), and the daemon opens its
+# interface itself. Pick the first interface that has a CAN parent and bring it up
+# at 500 kbit/s, so "installed but no data" cannot be blamed on a downed link.
+detect_can() {
+    for _c in "${BATTERY_CAN_IFACE:-}" can0 can1 can2; do
+        [ -n "$_c" ] || continue
+        [ -e "/sys/class/net/$_c" ] || continue
+        echo "$_c"
+        return 0
+    done
+    echo can0
+}
+collect_dlt() {
+    # The head unit's Qt messages do not go to stderr: they go to DLT, on the
+    # separate /log_data partition. Copy the newest log's tail (plus the lines
+    # that name a page or a QML error) so "Battery/Wifi page does not open" can be
+    # read from the stick instead of guessed. Runs at the START of the bundle, so
+    # the previous session's taps are already in the file.
+    _dir=""
+    for _c in "${SCOURGE_STICK_DIR:-}" "${USB_DIR:-}" "/rw_data"; do
+        [ -n "$_c" ] || continue
+        [ -d "$_c" ] && [ -w "$_c" ] || continue
+        _dir="$_c"; break
+    done
+    [ -n "$_dir" ] || return 0
+    _out="$_dir/dlt_tail.txt"
+    {
+        echo "=== /log_data (newest first)"; ls -lt /log_data 2>/dev/null | head -n 12
+        echo "=== recent files"; find /log_data -type f -newermt '-3 hours' 2>/dev/null | head -n 12
+    } > "$_out" 2>&1
+    # Every process logs through the same DLT daemon, so the page that failed is
+    # not necessarily in the newest file: take the three newest and filter all of
+    # them for page/QML lines, then keep bounded tails of each.
+    # Scan every log touched in the last six hours, not just the newest: on this
+    # unit the home-screen context is not in the newest offline trace (that one is
+    # BluetoothManager noise), so picking files by mtime missed the UI completely.
+    _files=$(find /log_data -type f -newermt '-6 hours' -size -20M 2>/dev/null | head -n 40)
+    _qmlout="$_dir/qml_errors.txt"
+    : > "$_qmlout" 2>/dev/null || true
+    # Any stderr we captured from the UI in an earlier run, if it exists.  This
+    # must come AFTER the truncation above, or the copies are wiped.
+    for _c in /rw_data/apphome.err /rw_data/apphome.out /rw_data/applauncher.err \
+              /rw_data/*homescreen*.log; do
+        [ -f "$_c" ] || continue
+        { echo "=== $_c (last 200 lines)"; tail -n 200 "$_c"; } >> "$_qmlout" 2>&1
+    done
+    for _f in $_files; do
+        _hit=$(strings "$_f" 2>/dev/null | grep -inE 'BatteryPage|WifiPage|TweaksPage|is not a type|Cannot assign|Unable to assign|ReferenceError|TypeError|AppHomeScreen|qmlEngine' | tail -n 20)
+        [ -n "$_hit" ] || continue
+        { echo "=== $_f"; printf '%s\n' "$_hit"; } >> "$_qmlout" 2>&1
+    done
+    sync 2>/dev/null || true
+    log "qml errors: $_qmlout ($(wc -l < "$_qmlout" 2>/dev/null) lines)"
+    if [ -n "$_files" ]; then
+        echo "=== qml/page matches (all of: $_files)" >> "$_out"
+        for _f in $_files; do
+            echo "--- $_f" >> "$_out"
+            tail -c 300000 "$_f" 2>/dev/null | strings | \
+                grep -iE 'batterypage|wifipage|tweakspage|apphomescreen|qml|is not a type|cannot assign|unable to assign|referenceerror|typeerror|wifi page|battery page' | \
+                tail -n 60 >> "$_out" 2>&1
+        done
+        for _f in $_files; do
+            echo "=== tail of $_f (last 120 KB)" >> "$_out"
+            tail -c 120000 "$_f" >> "$_out" 2>/dev/null
+        done
+    else
+        echo "=== no .dlt file found under /log_data" >> "$_out"
+    fi
+    sync 2>/dev/null || true
+    log "dlt tail: $_out"
+}
+
+collect_dlt
+
+CAN_IFACE=$(detect_can)
+_candir=""
+for _c in "${SCOURGE_STICK_DIR:-}" "${USB_DIR:-}" "/rw_data"; do
+    [ -n "$_c" ] || continue
+    [ -d "$_c" ] && [ -w "$_c" ] || continue
+    _candir="$_c"; break
+done
+[ -n "$_candir" ] || _candir="$RW_DIR"
+if [ -e "/sys/class/net/$CAN_IFACE" ]; then
+    _canlog="$_candir/can_diag.txt"
+    {
+        echo "=== ip tooling"
+        ip -V 2>&1 | head -n 2
+        ls -l "$(command -v ip 2>/dev/null)" 2>&1
+        echo "=== before"
+        ip -d link show "$CAN_IFACE" 2>&1 | head -n 6
+    } > "$_canlog" 2>&1
+    ip link set "$CAN_IFACE" up type can bitrate 500000 >> "$_canlog" 2>&1 || \
+        ip link set "$CAN_IFACE" up >> "$_canlog" 2>&1 || true
+    _st=$(cat "/sys/class/net/$CAN_IFACE/operstate" 2>/dev/null || echo unknown)
+    if [ "$_st" != "up" ]; then
+        # iproute2 wants the bitrate configured while the link is down; the
+        # one-shot form above silently fails on this vendor kernel, which left
+        # can0 DOWN and the daemon reading nothing.
+        ip link set "$CAN_IFACE" down >> "$_canlog" 2>&1 || true
+        ip link set "$CAN_IFACE" type can bitrate 500000 restart-ms 100 >> "$_canlog" 2>&1 || \
+            ip link set "$CAN_IFACE" type can bitrate 500000 >> "$_canlog" 2>&1 || true
+        ip link set "$CAN_IFACE" up >> "$_canlog" 2>&1 || true
+        sleep 1
+        _st=$(cat "/sys/class/net/$CAN_IFACE/operstate" 2>/dev/null || echo unknown)
+    fi
+    {
+        echo "=== after (operstate=$_st)"
+        ip -d link show "$CAN_IFACE" 2>&1 | head -n 8
+        ip -o link 2>/dev/null | grep -i can
+        # Which driver owns it, and does the driver advertise a clock parameter at
+        # all: "clock 0" in ip -d output is the reason every bitrate write fails, so
+        # record the module, its parameters and the sysfs driver link.
+        echo "=== driver"
+        readlink -f "/sys/class/net/$CAN_IFACE/device/driver" 2>&1
+        lsmod 2>/dev/null | grep -iE "can|ifx|mcp|flex" | head -n 5
+        _mod=$(basename "$(readlink -f "/sys/class/net/$CAN_IFACE/device/driver" 2>/dev/null)" 2>/dev/null)
+        [ -n "$_mod" ] && ls /sys/module/"$_mod"/parameters/ 2>/dev/null | head -n 10
+        [ -n "$_mod" ] && for _p in /sys/module/"$_mod"/parameters/*; do [ -e "$_p" ] && echo "  param $(basename "$_p")=$(cat "$_p" 2>/dev/null)"; done
+        echo "=== vendor can tooling"
+        ls /app/bin 2>/dev/null | grep -iE "can|com" | head -n 10
+        (command -v canconfig candump cansend 2>/dev/null || echo "no can-utils")
+        systemctl list-units --type=service 2>/dev/null | grep -iE "can|micom" | head -n 5
+        echo "=== dmesg can"
+        dmesg 2>/dev/null | grep -i -E "can|mcp|ifx|flex" | tail -n 8
+    } >> "$_canlog" 2>&1
+    log "can iface=$CAN_IFACE operstate=$_st diag=$_canlog"
+    # BMS precondition state (0x2AD) and BMS_04 (0x25D) are M-CAN: not on this
+    # unit's can0 (I-CAN), so the daemon's can0 socket never sees them and
+    # precond_confirmed stays false.  The micom broadcasts M-CAN frames on the
+    # system bus as com.lge.car.micom.can.NotifyMCANEachMsg; a short bounded
+    # capture puts the actual bytes next to the run, which is what settles the
+    # decode instead of guessing from a dead can0 filter (2026-11-24).
+    if command -v dbus-monitor >/dev/null 2>&1; then
+        {
+            echo "=== M-CAN/ICAN micom D-Bus capture (8 s)"
+            ( dbus-monitor --system "type='signal',sender='com.lge.car.micom'" 2>&1 \
+                  & _dp=$!; sleep 8; kill -TERM "$_dp" 2>/dev/null; wait "$_dp" 2>/dev/null ) | head -n 40
+        } >> "$_canlog" 2>&1
+        log "mcan dbus capture appended to $_canlog"
+    else
+        log "no dbus-monitor; M-CAN capture skipped"
+    fi
+fi
+
 
 # Remount the rootfs rw while installing.
 . "$PAYLOAD/lib/install_io.sh"
@@ -349,7 +500,7 @@ if [ "$daemon_status" != "systemd-ok" ]; then
     # Fallback: run it detached.
     if [ -x "$RW_DIR/battery_daemon" ]; then
         if ! pidof battery_daemon >/dev/null 2>&1; then
-            ( "$RW_DIR/battery_daemon" --iface can0 --port 8088 \
+            ( "$RW_DIR/battery_daemon" --iface "$CAN_IFACE" --port 8088 \
                 --status-file "$RW_DIR/status.json" \
                 --micom-send "$RW_DIR/bin/micom-send" --micom-bin "$RW_DIR/bin/CANService" \
                 --dbus-monitor "$RW_DIR/bin/dbus-monitor" \
@@ -412,6 +563,45 @@ if [ -n "$payload_daemon_md5" ] && command -v md5sum >/dev/null 2>&1; then
 fi
 log "daemon=$daemon_status fresh=$daemon_fresh"
 
+# The unit can report a successful restart and still have the process exit a
+# moment later (Type=simple counts the job, not the process).  With journald
+# absent there is no other record, so capture one foreground run.
+if ! pidof battery_daemon >/dev/null 2>&1; then
+    log "battery_daemon is not running; collecting daemon diagnostics"
+    _ddir=""
+    for _c in "${SCOURGE_STICK_DIR:-}" "${USB_DIR:-}" "/rw_data"; do
+        [ -n "$_c" ] || continue
+        [ -d "$_c" ] && [ -w "$_c" ] || continue
+        _ddir="$_c"; break
+    done
+    [ -n "$_ddir" ] || _ddir="$RW_DIR"
+    {
+        echo "=== systemctl status"
+        systemctl status --no-pager -l battery-daemon.service 2>&1 | head -n 30
+        echo "=== systemctl show"
+        systemctl show --no-pager -p Type -p ExecMainCode -p ExecMainStatus -p Result -p NRestarts -p ExecStart 2>&1 | head -n 12
+        echo "=== unit file"
+        sed -n '1,40p' /etc/systemd/system/battery-daemon.service 2>/dev/null
+        echo "=== binary"
+        ls -l "$RW_DIR/battery_daemon" 2>&1
+        ls -Z "$RW_DIR/battery_daemon" 2>/dev/null | head -n 2
+        echo "=== can interfaces"
+        ip -o link 2>/dev/null | grep -i can
+        echo "=== foreground run (3 s)"
+        # busybox has no `timeout`, so start it, wait, then kill it.
+        ( "$RW_DIR/battery_daemon" --iface "$CAN_IFACE" --port 8088 \
+            --status-file "$RW_DIR/status.json" \
+            --micom-send "$RW_DIR/bin/micom-send" --micom-bin "$RW_DIR/bin/CANService" \
+            --dbus-monitor "$RW_DIR/bin/dbus-monitor" 2>&1 &
+          _dp=$!; sleep 3; kill -TERM "$_dp" 2>/dev/null ) | head -n 40
+        echo "=== install.log tail"
+        tail -n 20 "$RW_DIR/install.log" 2>/dev/null
+        echo "=== daemon.log tail"
+        tail -n 20 "$RW_DIR/daemon.log" 2>/dev/null
+    } > "$_ddir/daemon_diag.txt" 2>&1
+    daemon_status="$daemon_status no-process"
+fi
+
 # Prove the process actually runs in the installer's context.  The file label
 # gate above already guarantees the exec transition; this catches a systemd /
 # shell path that bypassed it.  BATTERY_DAEMON_SMACK is a test-only override.
@@ -440,6 +630,11 @@ io_restore_root || fail "cannot restore root mount state"
 
 # Restart AppHomeScreen through AppLauncher (app id 11).
 restart="not-attempted"
+if [ "${SCOURGE_DEFER_UI_RESTART:-0}" = 1 ]; then
+    # The master restarts AppHomeScreen once after every stage has installed,
+    # instead of one restart per package (4-5 UI flickers per run, 2026-11-24).
+    restart="deferred"
+else
 launcher_pid=""
 for p in /proc/[0-9]*; do
     [ -r "$p/comm" ] || continue
@@ -486,6 +681,7 @@ if [ "$restart" != "dbus-ok" ]; then
     restart="$restart (reboot required if UI does not return)"
 fi
 
+fi
 log "restart=$restart"
 sync
 

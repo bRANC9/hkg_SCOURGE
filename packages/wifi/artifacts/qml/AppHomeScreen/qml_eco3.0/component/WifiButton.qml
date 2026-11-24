@@ -25,10 +25,12 @@ Item {
 
     QText {
         anchors.centerIn: parent
+        width: parent.width - 16
         text: root.label
         font.pixelSize: 24
         color: "#FFFFFF"
         horizontalAlignment: Text.AlignHCenter
+        elide: Text.ElideRight
     }
 
     MouseArea {

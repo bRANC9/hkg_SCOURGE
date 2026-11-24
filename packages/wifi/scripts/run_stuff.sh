@@ -23,6 +23,11 @@
 # the USB backup_current/.  It does not flash firmware and does not touch
 # the updater, bootloader or partitions.
 set -u
+
+# The unit runs a Korean locale: `date` prints "2026. 11. 23. (월)" and tools
+# emit localised text, which lands in combo.log, the probes and the UI popup.
+# Pin the C locale so every log line is ASCII.
+export LC_ALL=C LANG=C LC_TIME=C 2>/dev/null || true
 umask 077
 PATH="${WIFI_PATH:-/bin:/sbin:/usr/bin:/usr/sbin}"
 USB_DIR="${USB_DIR:-/media/usb}"
@@ -40,6 +45,20 @@ RW_DIR="${WIFI_RW_DIR:-/rw_data/wifi}"
 LOG="$RW_DIR/install.log"
 OUT="$USB_DIR/run_stuff_result.txt"
 SERVICE="${WIFI_SERVICE:-/etc/systemd/system/wifi-daemon.service}"
+
+# Hardware facts measured once: shipped next to the daemon, so the install-time
+# probe prints the file instead of re-running the expensive commands
+# (firmware strings, iw phy, dbus introspection).  Refresh with
+# SCOURGE_HWINFO_REFRESH=1 after a firmware update.
+HWFILE="$RW_DIR/hwinfo.txt"
+if [ ! -s "$HWFILE" ] && [ -f "$PAYLOAD/facts/hwinfo.txt" ]; then
+    cp -f "$PAYLOAD/facts/hwinfo.txt" "$HWFILE" 2>/dev/null || true
+fi
+# AA cross-check binary: installed next to the daemon, run by the aa probe.
+if [ -f "$PAYLOAD/bin/bt_owner.target" ]; then
+    cp -f "$PAYLOAD/bin/bt_owner.target" "$RW_DIR/bin/bt_owner.target" 2>/dev/null || true
+    chmod 755 "$RW_DIR/bin/bt_owner.target" 2>/dev/null || true
+fi
 wifi_import=not-present
 
 ADV="HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
@@ -58,7 +77,7 @@ mkdir -p "$RW_DIR/ssh" 2>/dev/null
 : > "$LOG" 2>/dev/null
 
 probe_aa() {   # read-only AA/projection facts for the Android Auto work
-    _p="${SCOURGE_STICK_DIR:-$USB_DIR}/aa_probe.txt"
+    _p="$RW_DIR/aa_probe.txt"
     {
         echo "=== SCOURGE AA probe ($(date -u 2>/dev/null))"
         echo "--- wpa_cli status"
@@ -82,7 +101,7 @@ probe_aa() {   # read-only AA/projection facts for the Android Auto work
             echo "  $(basename "$_h") address=$(cat "$_h/address" 2>/dev/null)"
         done
         echo "--- our AP config (what the bootstrap must advertise)"
-        grep -E '^(carplay_|wifi_mode|mode=|wlan_on|ssh=)' "$RW_DIR/config.conf" 2>/dev/null | head -n 20
+        grep -E '^(carplay_|wifi_mode|mode=|wlan_on|ssh=|psk=|net[0-9]_psk=)' "$RW_DIR/config.conf" 2>/dev/null | redact_psk | head -n 20
         echo "--- bluetooth processes"
         ps 2>/dev/null | grep -i -E 'vbtd|bluetooth' | grep -v grep | head -n 10
         echo "--- /sys/class/bluetooth"; ls /sys/class/bluetooth 2>&1
@@ -94,10 +113,131 @@ probe_aa() {   # read-only AA/projection facts for the Android Auto work
         ps 2>/dev/null | grep -i vbtd | grep -v grep | head -n 3
         echo "--- vendor bt binaries"
         ls /app/bin 2>/dev/null | grep -i -E 'bt|blue' | head -n 10
+        echo "--- bluetooth deep (the RFCOMM question)"
+        # The AA bootstrap needs an RFCOMM channel.  BlueZ is absent, so the only
+        # on-unit hope is the vendor stack: record what it is, what it holds open
+        # and whether it talks over D-Bus or its own socket.
+        _bt=$(pidof vbtd 2>/dev/null | awk '{print $1}')
+        [ -n "$_bt" ] && echo "vbtd pid=$_bt cmdline=$(tr '\0' ' ' < /proc/$_bt/cmdline 2>/dev/null)"
+        [ -n "$_bt" ] && ls -l /proc/$_bt/fd 2>/dev/null | awk '{print "  fd", $9, $10, $11}' | head -n 12
+        echo "  ttyS0: $(ls -l /dev/ttyS0 2>&1)"
+        echo "  patchram: $(ls -l /tmp/bt_patchram.hcd 2>&1)"
+        echo "  rfkill: $(rfkill list bluetooth 2>&1 | head -n 4)"
+        echo "  hci devs: $(ls /sys/class/bluetooth 2>&1)"
+        echo "  dbus services:"; busctl --no-pager list --no-legend 2>/dev/null | grep -iE "blue|bt|vbt" | head -n 8
+        # The vendor stack documents its own D-Bus contract; introspection is
+        # cheaper than reverse engineering vbtd (14 MB, stripped).  vbtd-51
+        # carries com.lge.hkmc.avn.BluetoothService with the pairing surface
+        # (BTM_SetPairableMode, AddPairedDevice, CancelPairing, ...), so the
+        # method and property names come from the service itself.
+        # The vendor BT stack is a CommonAPI adapter on the SESSION bus (env:
+        # DBUS_SESSION_BUS_ADDRESS, connections from vbtd and BluetoothHMI), not
+        # the system bus: the system-bus introspect came back empty on 2026-11-23.
+        # So look at every session-bus name and introspect the candidates.
+        echo "  AA enable setting (BluetoothHMI deviceSettings)"
+        # The vendor UI has deviceSettings.phoneProjectionSettings.androidAutoSettings
+        # .enableAndroidAuto.  Find the store it lives in BEFORE anyone patches a
+        # 9 MB Qt binary: grep the candidate setting stores for the key.
+        for _sp in /app/data /rw_data/app_data /Data/mnt-c /Data/mnt-wt /app/share/AppSetup/data /app/data/AppSetup; do
+            [ -d "${_sp}" ] || continue
+            _hit=$(grep -rl "enableAndroidAuto" "${_sp}" 2>/dev/null | head -n 3)
+            [ -n "${_hit}" ] && printf "    %s -> %s\n" "${_sp}" "${_hit}"
+        done
+        _cfg=$(grep -rl "phoneProjectionSettings" /app/data /rw_data/app_data 2>/dev/null | head -n 2)
+        if [ -n "${_cfg}" ]; then
+            echo "    found in: ${_cfg}"
+            for _f in ${_cfg}; do grep -o -m3 "enableAndroidAuto[^,}]*" "${_f}" 2>/dev/null | head -n 3; done
+        else
+            echo "    key not found in the plain-text stores (QSettings/db or compiled-in)"
+        fi
+        echo "  --- BT socket ownership (packages/aa bt_owner)"
+        if [ -x "$RW_DIR/bin/bt_owner.target" ]; then
+            "$RW_DIR/bin/bt_owner.target" 2>&1 | head -n 30
+        else
+            echo "    bt_owner.target not installed"
+        fi
+        echo "  --- video decoder path (H.264 for projection)"
+        ldd /app/bin/AppProjection 2>/dev/null | grep -iE "ssl|crypto|va|mfx|omx|avcodec|gst|egl|gles|v4l" | head -n 12
+        for _l in /usr/lib/libssl.so* /usr/lib/libcrypto.so* /usr/lib/libva.so* /usr/lib/libmfx*.so* \
+                  /usr/lib/libOMX*.so* /usr/lib/libavcodec*.so* /usr/lib/libv4l2*.so*; do
+            [ -e "$_l" ] && ls -l "$_l" 2>/dev/null | head -n 2
+        done
+        ls /usr/lib/gstreamer-1.0 2>/dev/null | head -n 10
+        (command -v vainfo >/dev/null 2>&1 && vainfo 2>&1 | head -n 12) || echo "    no vainfo"
+        echo "  --- USB port role (wired AA / bridge)"
+        for _p in /sys/module/dwc3/parameters/*; do
+            [ -f "${_p}" ] && printf "    dwc3.%%s=%%s\n" "$(basename "${_p}")" "$(cat "${_p}" 2>/dev/null)"
+        done
+        echo "    /sys/class/udc: $(ls /sys/class/udc 2>/dev/null | tr "\n" " ")"
+        for _u in /sys/class/udc/*; do
+            [ -d "${_u}" ] || continue
+            printf "    %%s state=%%s function=%%s\n" "$(basename "${_u}")" "$(cat "${_u}/state" 2>/dev/null)" "$(cat "${_u}/function" 2>/dev/null | tr "\n" ",")"
+        done
+        ls /sys/bus/platform/drivers/dwc3 2>/dev/null | head -n 4
+        echo "  --- media service (who holds the decoder)"
+        ps -o pid,comm,args 2>/dev/null | grep -iE "media|codec|vaapi|player|projection" | grep -v grep | head -n 10
+        # The service's own fd table says HOW it receives the encoded stream
+        # (socket, shared memory, dmabuf), which is the missing link for our own
+        # video path.  Cheap: one ls per matching pid, capped.
+        for _pid in $(ps -o pid,comm 2>/dev/null | grep -iE "media|codec|vaapi|player|projection" | grep -v grep | awk '{print $1}' | head -n 3); do
+            echo "    fd table of pid ${_pid} ($(tr '\\0' ' ' < /proc/${_pid}/cmdline 2>/dev/null | cut -c1-50)):"
+            ls -l /proc/${_pid}/fd 2>/dev/null | head -n 14
+        done
+        for _m in /proc/[0-9]*/maps; do
+            [ -r "${_m}" ] || continue
+            if grep -qiE "libva\.|igfxcmrt|i965_drv|ImageProvider" "${_m}" 2>/dev/null; then
+                _pid=${_m#/proc/}; _pid=${_pid%%/*}
+                printf "    pid %%s (%%s) maps: %%s\\n" "${_pid}" "$(tr '\\0' ' ' < /proc/${_pid}/cmdline 2>/dev/null | cut -c1-60)" \
+                    "$(grep -oiE "libva[a-z0-9_.-]*|igfxcmrt[0-9.]*|i965_drv_video|libImageProvider" "${_m}" 2>/dev/null | sort -u | tr '\\n' ' ')"
+            fi
+        done | head -n 12
+        echo "  --- GPU / DRI"
+        ls /dev/dri 2>/dev/null | head -n 6
+        for _c in /sys/class/drm/card*/device/driver; do [ -e "${_c}" ] && printf "    %%s -> %%s\\n" "${_c}" "$(basename "$(readlink -f "${_c}")")"; done | head -n 4
+        ls /usr/lib/dri 2>/dev/null | head -n 6
+        echo "  --- VA-API runtime"
+        if command -v vainfo >/dev/null 2>&1; then vainfo 2>&1 | head -n 14; else echo "    no vainfo"; fi
+        echo "  --- zero-copy strings (EGL image / dmabuf)"
+        strings -a /app/bin/AppProjection 2>/dev/null | grep -iE "eglCreateImage|EGL_EXT_image_dma|eglCreateStream|gralloc|dmabuf|NV12|I420" | sort -u | head -n 10 || true
+        echo "  --- VBTConfig full (redacted)"
+        for _v in /app/data/vbt/VBTConfig.json /rw_data/app_data/vbt/VBTConfig.json; do
+            [ -f "${_v}" ] || continue
+            echo "    ## ${_v}"
+            sed -E 's/("(psk|passkey|pin|key)[^"]*"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"<redacted>"/Ig' "${_v}" 2>/dev/null | head -n 60
+        done
+        echo "  session bus names:"
+        busctl --user --no-pager list 2>/dev/null | head -n 30
+        for _name in org.bluez org.bluez.Adapter.Adapter.v2_0 org.bluez.Adapter.Adapter v2.org.bluez.Adapter com.lge.hkmc.avn.BluetoothService; do
+            _out=$(dbus-send --session --print-reply --reply-timeout=2000 --dest="$_name" / org.freedesktop.DBus.Introspectable.Introspect 2>&1)
+            case "$_out" in *Interface*|*method*)
+                echo "  == $_name"
+                printf "%s\n" "$_out" | sed -n "s/.*<\(method\|property\|signal\) name=.\{0,1\}\([A-Za-z0-9_]*\).*/    \1 \2/p" | head -n 20 ;;
+            esac
+        done
+        echo "  com.lge.hkmc.avn.BluetoothService on the system bus (for reference):"
+        dbus-send --system --print-reply --reply-timeout=2000 --dest=com.lge.hkmc.avn.BluetoothService / org.freedesktop.DBus.Introspectable.Introspect 2>&1 | head -n 6
+        echo "  session bus (CommonAPI adapter):"
+        [ -f /tmp/session_appmgr.env ] && sed -n "1,4p" /tmp/session_appmgr.env
+        busctl --user --no-pager list --no-legend 2>/dev/null | grep -iE "bt|blue|commonapi" | head -n 8
+        echo "  vbtd strings (rfcomm/sdp/uuid):"
+        strings -a /app/bin/vbtd 2>/dev/null | grep -iE "^(rfcomm|sdp|uuid|org.bluez|android)" | head -n 8
+        echo "  vbt config keys:"; for _f in /app/data/vbt/VBTConfig.json /rw_data/app_data/vbt/VBTConfig.json; do [ -f "$_f" ] && { echo "    $_f"; grep -oE "\"[A-Z_]+\"" "$_f" 2>/dev/null | head -n 12; }; done
+        echo "  bt dmesg:"; dmesg 2>/dev/null | grep -iE "hci|btusb|patchram|bluetooth" | tail -n 6
         echo "--- hciconfig"; (command -v hciconfig >/dev/null 2>&1 && hciconfig -a || echo "no hciconfig") 2>&1 | head -n 20
         echo "--- sdptool"; (command -v sdptool >/dev/null 2>&1 && sdptool browse local || echo "no sdptool") 2>&1 | head -n 30
         echo "--- bt services"
         for _u in bluetooth btd vbtd bluetoothd; do printf '%s active=%s\n' "$_u" "$(systemctl is-active "$_u" 2>/dev/null)"; done
+        # Which vbtd file the running stack actually is: the AA API probe (dlsym in
+        # the live process) needs this inventory to decide whether one file covers it
+        # or the family has to be checked (2026-11-24, AA tab).
+        echo "--- vbtd inventory"
+        ls -l /app/bin/vbtd* 2>/dev/null | head -n 8
+        for _v in /app/bin/vbtd*; do
+            [ -f "$_v" ] || continue
+            printf '%s %s\n' "$(md5sum "$_v" 2>/dev/null | cut -d' ' -f1)" "$_v"
+        done
+        echo "vbtd_pid=$(pidof vbtd 2>/dev/null)"
+        echo "vbtd_cmdline=$(tr '\0' ' ' < /proc/$(pidof vbtd 2>/dev/null | cut -d' ' -f1)/cmdline 2>/dev/null)"
         echo "--- projection binaries"
         ls /app/bin 2>/dev/null | grep -i -E 'projection|auto|carplay' | head -n 12
         (sha256sum /app/bin/AppProjection 2>/dev/null || echo "no /app/bin/AppProjection")
@@ -118,10 +258,62 @@ probe_aa() {   # read-only AA/projection facts for the Android Auto work
     sync 2>/dev/null || true
 }
 
+# The unit has neither wget nor nc; every daemon call goes through the tiny
+# httpreq we ship.  Resolve it once: stage dir, combo root, stick root, an
+# installed copy.  The 2026-11-23 run logged "no httpreq on the unit" for both
+# ssh and the api walk although combo/bin/httpreq was on the stick.
+find_httpreq(){
+    for _cand in \
+        "${USB_DIR}/bin/httpreq" \
+        "${USB_DIR}/../bin/httpreq" \
+        "${USB_DIR}/../../combo/bin/httpreq" \
+        "${STICK_ROOT:-${USB_DIR}}/combo/bin/httpreq" \
+        "${COMBO:-${USB_DIR}/..}/bin/httpreq" \
+        "${RW_DIR}/bin/httpreq"; do
+        [ -f "${_cand}" ] || continue
+        [ -x "${_cand}" ] || chmod 755 "${_cand}" 2>/dev/null || true
+        if [ -x "${_cand}" ]; then
+            mkdir -p "${RW_DIR}/bin" 2>/dev/null || true
+            [ "${_cand}" = "${RW_DIR}/bin/httpreq" ] || cp -f "${_cand}" "${RW_DIR}/bin/httpreq" 2>/dev/null || true
+            printf '%s\n' "${_cand}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Never leave key material in a probe report: it lands on the stick and gets
+# shared.  Redact before anything is printed or copied.
+redact_psk(){
+    sed -E 's/^(psk|net[0-9]_psk|carplay_psk)=.*/\1=<redacted>/'
+}
+
 probe_radio() {   # probe_radio <label> - one bounded report, no guessing later
     # Write to the STICK ROOT: the stage dir is wiped by the next bundle copy, and
     # that is exactly how the report for a failed run disappeared.
-    _p="${SCOURGE_STICK_DIR:-$USB_DIR}/wifi_probe.txt"
+    # Written to /rw_data, NOT to the stick: every write to the stick changes its
+    # content digest, which re-triggers the loader and made the run repeat (heard
+    # as a regular, heartbeat-like beep).  The files are copied out at the very end.
+# The unit has no `timeout` (coreutils) and no busybox applet for it either:
+# every "timeout 25 iw ... scan" printed "timeout: command not found" and the
+# scan never ran (2026-11-23, wifi_probe showed 0 frequencies for that reason,
+# not because the spectrum was empty).  Bound it in shell instead.
+run_bounded(){
+    _limit=$1; shift
+    "$@" & _p=$!
+    _i=0
+    while [ "$_i" -lt "$_limit" ] && kill -0 "$_p" 2>/dev/null; do
+        sleep 1; _i=$((_i + 1))
+    done
+    if kill -0 "$_p" 2>/dev/null; then
+        kill "$_p" 2>/dev/null
+        echo "(bounded out after ${_limit}s)"
+    fi
+    wait "$_p" 2>/dev/null
+}
+    # probe_radio <label> [fast]: fast skips the scans, 20-25 s each
+    _mode=${2:-full}
+    _p="$RW_DIR/wifi_probe.txt"
     {
         echo "=== SCOURGE radio probe: ${1:-?} ($(date -u 2>/dev/null))"
         echo "--- uptime"; cut -d' ' -f1 /proc/uptime 2>&1
@@ -129,8 +321,42 @@ probe_radio() {   # probe_radio <label> - one bounded report, no guessing later
         echo "--- wlan0 link"; ip link show wlan0 2>&1 | head -n 6; ifconfig wlan0 2>&1 | head -n 6
         echo "--- operstate"; cat /sys/class/net/wlan0/operstate 2>&1
         echo "--- iw dev"; iw dev 2>&1 | head -n 16
+        # Band support, regulatory domain and what the radio actually sees.  The
+        # imported list carries a 5 GHz SSID (the phone hotspot is 5 GHz only), and
+        # an association that fails on one band looks exactly like a dead
+        # supplicant in our own log - this is what tells the two apart.
+        if [ -s "$HWFILE" ] && [ "${SCOURGE_HWINFO_REFRESH:-0}" != 1 ]; then
+            echo "--- hardware facts (cached, no re-probe)"
+            cat "$HWFILE" 2>/dev/null
+        else
+        echo "--- iw phy (bands)"
+        ( iw phy phy#0 info 2>&1 || iw phy0 info 2>&1 ) | grep -E "Band|Frequency|MHz \[|Channel" | head -n 30
+        echo "--- regdomain"; iw reg get 2>&1 | head -n 12
+        # The dhd/bcmdhd driver keeps its OWN country in the firmware (nvram
+        # ccode/regrev) and does not publish it to cfg80211: "iw reg get" shows
+        # country 00 even though nvram says ccode=GB, so the world regdomain is
+        # NOT proof that 5 GHz is unusable.  Record the real source of truth.
+        echo "--- nvram country (the firmware side)"
+        for _n in /lib/firmware/bcmdhd/nvram.txt /lib/firmware/nvram.txt; do [ -f "$_n" ] && { echo "  $_n"; grep -n -iE "^(ccode|regrev)=" "$_n" | head -4; }; done
+        echo "--- dmesg country lines"; dmesg 2>/dev/null | grep -iE "country|regdomain|ccode" | tail -n 8
+        echo "--- broadcom wl tool"; (command -v wl >/dev/null 2>&1 && wl country 2>&1 | head -2) || echo "  no wl tool"
+        [ "${_mode}" = fast ] || { echo "--- scan frequencies seen"; run_bounded 8 iw dev wlan0 scan 2>&1 | grep "freq:" | head -n 20 || true; }
+        echo "--- bcmdhd module params"; for _p in /sys/module/bcmdhd/parameters/*; do [ -f "$_p" ] && printf "  %s=%s\n" "$(basename "$_p")" "$(cat "$_p" 2>/dev/null)"; done
+        # A world regdomain (country 00, DFS-UNSET) leaves every 5 GHz channel
+        # PASSIVE-SCAN: the station may listen there but must not associate, and an
+        # AP on channel 36 cannot start at all.  Proven 2026-11-23: only 2.4 GHz is
+        # active here.  Try a country without persisting it, report, then restore.
+        fi
+        echo "--- regdomain trial (HU)"
+        [ "${_mode}" = fast ] || iw reg set HU 2>&1 | head -n 2
+        iw reg get 2>&1 | sed -n "1,12p"
+        echo "--- 5 GHz visibility after the trial"
+        [ "${_mode}" = fast ] || run_bounded 8 iw dev wlan0 scan 2>&1 | grep -E "^BSS|SSID:|freq:" | head -n 40
+        [ "${_mode}" = fast ] || iw reg set 00 2>&1 | head -n 2
+        [ "${_mode}" = fast ] || { echo "--- scan errors (unfiltered, 3 lines)"; run_bounded 6 iw dev wlan0 scan 2>&1 | head -n 3; }
         echo "--- rfkill"; [ -e /dev/rfkill ] && rfkill list 2>&1 | head -n 12 || echo "no /dev/rfkill in this kernel"
         echo "--- modules"; lsmod 2>/dev/null | grep -E '^(bcmdhd|dhd|brcmfmac|brcmutil|cfg80211|bluetooth|btusb|hci)' | head -n 12
+        echo "--- kernel module inventory (dmesg)"; dmesg 2>/dev/null | grep -m2 "Modules linked in" | cut -c1-600
         echo "--- wifi firmware load (dmesg)"; dmesg 2>/dev/null | grep -iE 'register interface|firmware version = wl|dhd_bus_download' | tail -n 6
         echo "--- module load timing"
         dmesg 2>/dev/null | grep -iE 'bcmdhd|dhdpcie' | sed -n 's/^\[ *\([0-9.]*\)\].*/  \1s/p' | head -n 6
@@ -146,6 +372,17 @@ probe_radio() {   # probe_radio <label> - one bounded report, no guessing later
         done
         echo "--- connman technologies"; connmanctl technologies 2>&1 | head -n 12
         echo "--- connman state"; connmanctl state 2>&1 | head -n 4
+        # Reverse-engineering ConnMan on this unit: what config it shipped with,
+        # who owns the wpa_supplicant D-Bus name, and whether a scan ever surfaces
+        # a service (the OEM association path needs a service + the agent flow).
+        echo "--- connman main.conf + drop-ins"
+        for _cf in /etc/connman/main.conf /etc/connman/*.conf /run/connman/*.conf; do
+            [ -f "$_cf" ] || continue
+            echo "[$_cf]"; sed -n '1,80p' "$_cf" 2>/dev/null | grep -vE '^\s*#|^\s*$'
+        done
+        echo "--- connmand version"; connmand --version 2>&1 | head -n 2
+        echo "--- wpa_supplicant D-Bus owner"; dbus-send --system --print-reply --reply-timeout=2000 --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetNameOwner string:fi.w1.wpa_supplicant1 2>&1 | head -n 4
+        echo "--- connman scan wifi + services (10 s)"; connmanctl scan wifi 2>&1 | head -n 3; sleep 10; connmanctl services 2>&1 | head -n 20
         echo "--- our daemon pid"; pidof wifi_daemon 2>&1
         systemctl show -p MainPID -p ExecMainStatus wifi-daemon.service 2>&1
         echo "--- status.json"; head -c 400 "$RW_DIR/status.json" 2>&1; echo
@@ -175,6 +412,7 @@ result() {
         echo "uid=$(id -u 2>/dev/null)"
         echo "$@"
     } > "$OUT" 2>&1
+    cp -f "$OUT" "$RW_DIR/run_stuff_result.txt" 2>/dev/null || true
     cp -f "$OUT" "$RW_DIR/result.txt" 2>/dev/null
 }
 
@@ -821,6 +1059,42 @@ if [ -f "$RW_DIR/wifi.txt" ] && [ -f "$RW_DIR/config.conf" ]; then
         fi
     done
     chmod 600 "$RW_DIR/config.conf" 2>/dev/null || true
+  # A dropped network survives in config.conf (net2..net4): the import only adds,
+  # it never deletes, so an old hotspot stayed in the retry list and shared the
+  # little airtime a weak AP leaves (2026-11-24: -87 dBm, two configured nets).
+  # Put "wifi_primary_only" on the stick root to keep the first network and drop
+  # the rest.  Must run AFTER the import, or the import puts them back.
+  if [ -f "$STICK_ROOT/wifi_primary_only" ] || [ -f "$USB_DIR/wifi_primary_only" ]; then
+      for _k in net2_ssid net2_psk net3_ssid net3_psk net4_ssid net4_psk; do
+          sed -i "s/^$_k=.*/$_k=/" "$RW_DIR/config.conf" 2>/dev/null || true
+      done
+      sed -i "s/^net_count=.*/net_count=1/" "$RW_DIR/config.conf" 2>/dev/null || true
+      log "wifi_primary_only: extra client networks cleared (kept '$(sed -n 's/^ssid=//p' "$RW_DIR/config.conf" | head -n1)')"
+      # The master retries `--import-file /rw_data/wifi/wifi.txt` after the stages,
+      # so trimming only config.conf is undone by the next import.  Reduce the file
+      # itself to the first network as well.
+      if [ -f "$RW_DIR/wifi.txt" ]; then
+          _trim="$RW_DIR/wifi.txt.trim"
+          : > "$_trim" 2>/dev/null
+          _pairs=0
+          while IFS= read -r _l || [ -n "$_l" ]; do
+              case "$_l" in
+                  ssid=*|ssid2=*|ssid3=*|ssid4=*) _pairs=$((_pairs + 1)) ;;
+              esac
+              if [ "$_pairs" -le 1 ]; then
+                  printf '%s\n' "$_l" >> "$_trim"
+              else
+                  case "$_l" in
+                      ssid[0-9]*=*|psk[0-9]*=*) : ;;
+                      *) printf '%s\n' "$_l" >> "$_trim" ;;
+                  esac
+              fi
+          done < "$RW_DIR/wifi.txt"
+          mv -f "$_trim" "$RW_DIR/wifi.txt" 2>/dev/null && chmod 600 "$RW_DIR/wifi.txt" 2>/dev/null
+          log "wifi_primary_only: wifi.txt reduced to the first network ($(grep -c '^ssid' "$RW_DIR/wifi.txt" 2>/dev/null) ssid line)"
+      fi
+      wifi_nets_trimmed=1
+  fi
     log "config forced for client mode: mode=client wlan_on=1 boot_off=0"
 fi
 # ConnMan stays the association/DHCP owner in this app, and its WiFi technology
@@ -1005,6 +1279,38 @@ log "daemon=$daemon_status"
 [ "$daemon_status" = systemd-ok ] || fail "daemon did not start through systemd: $daemon_status"
 
 io_restore_root || fail "cannot restore root mount state"
+# ---- optional Bluetooth tap --------------------------------------------
+# Exporting the vendor BT stack for local analysis needs an LD_PRELOAD shim on
+# vbtd, and that stops Bluetooth while it runs (no HFP, no media, no wireless
+# CarPlay pairing).  So the stage only INSTALLS the shim and prints the exact
+# command; it starts nothing unless the stick also carries bt_tap_run.
+_bttap_src="$STICK_ROOT/combo/bt/libbttap.so"
+[ -f "$_bttap_src" ] || _bttap_src="$STICK_ROOT/libbttap.so"
+if [ -f "$_bttap_src" ]; then
+    mkdir -p "$RW_DIR/bt" 2>/dev/null
+    cp -f "$_bttap_src" "$RW_DIR/bt/libbttap.so" 2>/dev/null || true
+    chmod 755 "$RW_DIR/bt/libbttap.so" 2>/dev/null || true
+    log "bt tap shim installed: $RW_DIR/bt/libbttap.so"
+    if [ -f "$STICK_ROOT/bt_tap_run" ]; then
+        _btpid=$(pidof vbtd 2>/dev/null | awk '{print $1}')
+        if [ -n "$_btpid" ]; then
+            tr '\0' ' ' < "/proc/$_btpid/cmdline" > "$RW_DIR/bt/vbtd_cmdline.txt" 2>/dev/null || true
+            log "bt tap: vbtd cmdline saved; stopping vbtd for the tap (Bluetooth is off until it restarts)"
+            kill -TERM "$_btpid" 2>/dev/null || true
+            sleep 2
+            BT_TAP_OUT="$RW_DIR/bt/tap.bin" BT_TAP_DEV=/dev/ttyS0 \
+                LD_PRELOAD="$RW_DIR/bt/libbttap.so" \
+                /app/bin/vbtd -d /dev/ttyS0 -p /tmp/bt_patchram.hcd \
+                >> "$RW_DIR/bt/vbtd_tapped.log" 2>&1 &
+            sleep 1
+            log "bt tap: vbtd restarted under the shim ($(pidof vbtd 2>/dev/null))"
+        else
+            log "bt tap: vbtd not running; shim installed but not attached"
+        fi
+    else
+        log "bt tap: shim only - add bt_tap_run to the stick to attach it (stops Bluetooth)"
+    fi
+fi
 # ---- address fallback ---------------------------------------------------
 # The association is ours (our supplicant holds the link), but nothing hands out
 # a lease on this unit.  Record which clients exist and, when every one is
@@ -1045,6 +1351,11 @@ log "wlan0 addr: $(ip -4 addr show wlan0 2>/dev/null | grep "inet " | tr '\n' ' 
 # ---- restart AppHomeScreen --------------------------------------------
 io_capture_qml "$QML_DIR" "$USB_DIR/qml_after" || log "WARNING: QML after-snapshot unavailable"
 restart="not-attempted"
+if [ "${SCOURGE_DEFER_UI_RESTART:-0}" = 1 ]; then
+    # The master restarts AppHomeScreen once after every stage has installed,
+    # instead of one restart per package (4-5 UI flickers per run, 2026-11-24).
+    restart="deferred"
+else
 old_home_pid=$(pidof AppHomeScreen 2>/dev/null || true)
 launcher_pid=""
 for p in /proc/[0-9]*; do
@@ -1060,18 +1371,31 @@ if [ -n "$launcher_pid" ] && [ -r "/proc/$launcher_pid/environ" ]; then
         [ -n "$val" ] && export "$var=$val"
     done
 fi
-if [ -f "${SCOURGE_STICK_DIR:-$USB_DIR}/no_ui_restart" ]; then
+# Did the payload change since the last run?  The manifest covers every
+# installed file (payload + stage.sh), so a digest comparison is the honest
+# signal for "the UI must restart".  Listing individual QML paths broke once:
+# NEW_FILES was used before it was defined and set -u killed the whole stage.
+_prev_manifest="$RW_DIR/last_manifest.md5"
+_cur_manifest="$PAYLOAD/manifest.md5"
+_qml_changed=0
+if [ -f "$_prev_manifest" ] && [ -f "$_cur_manifest" ]; then
+    cmp -s "$_prev_manifest" "$_cur_manifest" || _qml_changed=1
+fi
+if [ "$_qml_changed" = 1 ] && [ -f "${SCOURGE_STICK_DIR:-$USB_DIR}/no_ui_restart" ]; then
+    log "no_ui_restart ignored: the payload changed, the UI must restart"
+fi
+if [ -f "${SCOURGE_STICK_DIR:-$USB_DIR}/no_ui_restart" ] && [ "$_qml_changed" = 0 ]; then
     # Iterating on the daemon only? The UI restart costs ~10 s and the QML is
     # unchanged, so let the stick say so.
     restart="skipped-flag verified=1"
     log "UI restart skipped: no_ui_restart on the stick"
 elif command -v dbus-send >/dev/null 2>&1; then
-    dbus-send --session --type=method_call --dest=com.lge.avn.applauncher /Request \
+    dbus-send --session --type=method_call --reply-timeout=3000 --dest=com.lge.avn.applauncher /Request \
         com.lge.avn.applauncher.request.terminate int32:11 >> "$LOG" 2>&1 || true
     sleep 2
     restart="dbus-launch-failed"
     for i in 1 2 3; do
-        if dbus-send --session --type=method_call --dest=com.lge.avn.applauncher /Request \
+        if dbus-send --session --type=method_call --reply-timeout=3000 --dest=com.lge.avn.applauncher /Request \
             com.lge.avn.applauncher.request.launch int32:11 \
             string:AppHomeScreen string:/app/bin/AppHomeScreen >> "$LOG" 2>&1; then
             restart="dbus-ok"
@@ -1109,6 +1433,7 @@ case "$restart" in
         fi
         ;;
 esac
+fi
 log "restart=$restart"
 sync
 
@@ -1134,10 +1459,16 @@ if [ ! -e /sys/class/net/wlan0 ]; then
     log "wlan0 after modprobe: $([ -e /sys/class/net/wlan0 ] && echo present || echo absent) after ${_i}s"
 fi
 
+# The master can own the long wait: install + daemon + UI restart happen
+# here, then the run waits for the association at the very end, so the
+# driver can watch the Live log instead of a dark screen.
+DEFER_WAIT=${SCOURGE_DEFER_WIFI_WAIT:-0}
+_verify_budget=30
+[ "${DEFER_WAIT}" = 1 ] && _verify_budget=20
 verified_build=0
 _i=0
 _first_seen=""
-while [ "$_i" -lt 120 ]; do
+while [ "$_i" -lt 30 ]; do
     if systemctl is-active --quiet wifi-daemon.service 2>/dev/null && \
        grep -q "\"build_id\":\"$BUILD_ID\"" "$RW_DIR/status.json" 2>/dev/null; then
         verified_build=1
@@ -1154,7 +1485,7 @@ done
 main_pid=$(systemctl show -p MainPID wifi-daemon.service 2>/dev/null | sed -n 's/^MainPID=//p')
 if [ "$verified_build" != 1 ]; then
     daemon_verify=unverified
-    probe_radio "install: daemon did not verify"
+    probe_radio "install: daemon did not verify" fast
     log "WARNING: wifi daemon did not report build_id=$BUILD_ID within 30 s"
     { systemctl status wifi-daemon.service --no-pager 2>&1 | head -n 12
       echo '--- journal'
@@ -1167,6 +1498,7 @@ else
     daemon_verify=ok
 fi
 if [ "$new_restore_point" = 1 ]; then ln -sfn "$BACKUP_HU" "$RW_DIR/backup/latest" || fail "cannot record restore point"; fi
+cp -f "$_cur_manifest" "$_prev_manifest" 2>/dev/null || true
 install_complete=1
 final_status=OK
 case "$restart" in *verified=0*) final_status=REBOOT_REQUIRED;; esac
@@ -1199,6 +1531,9 @@ wifi_net_report() {
     _num() {
         sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\(-\?[0-9][0-9]*\).*/\1/p" "$_sf" 2>/dev/null | head -n1
     }
+    _bool() {   # unquoted true/false JSON value (booleans are not strings)
+        sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p" "$_sf" 2>/dev/null | head -n1
+    }
     # Say so immediately: the file exists from the first second, so "no end beep
     # yet" can be told apart from "still waiting for an address" without guessing.
     printf '=== SCOURGE wifi network (waiting for an address, started %s)\n' "$(date -u 2>/dev/null)" > "$_out"
@@ -1220,14 +1555,40 @@ wifi_net_report() {
         [ -n "$_ip" ] && break
         sleep 1; _i=$((_i + 1))
     done
+    # The daemon reports only what it can see itself, and on this unit it saw
+    # nothing: status.json carried ip="" ssid="" signal=0 while wlan0 really had
+    # 192.168.1.60/24 (23:52 run).  The report therefore falls back to the kernel
+    # view, so a working association is never published as "no address".
+    _ssid=$(_field ssid)
+    _bssid=$(_field bssid)
+    _state=$(_field state)
+    _sig=$(_num signal)
+    if [ -z "$_ssid" ] || [ "${_sig:-0}" = 0 ]; then
+        _link=$(iw dev wlan0 link 2>/dev/null)
+        [ -n "$_ssid" ] || _ssid=$(printf '%s\n' "$_link" | sed -n 's/^[[:space:]]*SSID:[[:space:]]*//p' | head -n1)
+        [ "${_sig:-0}" != 0 ] || _sig=$(printf '%s\n' "$_link" | sed -n 's/^[[:space:]]*signal:[[:space:]]*\(-\?[0-9][0-9]*\).*/\1/p' | head -n1)
+    fi
     {
-        echo "=== SCOURGE wifi network (\$(date -u 2>/dev/null))"
-        echo "ssid=$(_field ssid)"
-        echo "bssid=$(_field bssid)"
-        echo "state=$(_field state)"
+        echo "=== SCOURGE wifi network ($(date -u 2>/dev/null))"
+        echo "ssid=${_ssid:-none}"
+        echo "bssid=${_bssid:-none}"
+        echo "state=${_state:-none}"
         echo "ip=${_ip:-none}"
-        echo "signal_dbm=$(_num signal)"
-        echo "ssh=$(_field ssh)  ssh_port=$(_field ssh_port)"
+        echo "signal_dbm=${_sig:-0}"
+        # The daemon states why SSH is not up ("SSH deferred: ...", "SSH started on
+        # port 2222", "dropbear binary missing"): the next run then answers the
+        # question instead of leaving it to a guess.
+        echo "daemon_msg=$(_field message)"
+        # Is the daemon's picture of the radio current?  A stale status.json is what
+        # made "Applying mode..." coexist with a live 192.168.1.60 address
+        # (2026-11-24); the age and the flag make that readable from the stick.
+        _upd=$(_num updated_ms)
+        _now=$(date +%s 2>/dev/null || echo 0)
+        _age=unknown
+        case "$_upd" in ''|*[!0-9]*) : ;; *) [ "$_now" -gt 0 ] && _age=$((_now - _upd / 1000)) ;; esac
+        echo "observations_fresh=$(_bool observations_fresh)  status_age_s=$_age"
+        echo "applying=$(_bool applying)"
+        echo "ssh_active=$(_bool ssh_active)  ssh_enabled=$(_bool ssh_enabled)  ssh_port=$(_num ssh_port)"
         echo "gateway=$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')"
         echo "--- wlan0"
         (ip -4 -o addr show wlan0 2>/dev/null || ifconfig wlan0 2>/dev/null | head -n 4)
@@ -1249,11 +1610,149 @@ wifi_net_report() {
 # Always leave a radio snapshot on the stick, success or not: the working case
 # is exactly when we need the unit's address to ssh in afterwards.
 wifi_net_report
+
+# ---- start SSH as soon as there is an address ---------------------------
+# The daemon starts dropbear itself once wlan0 has an IPv4, but a gate drift left
+# SSH deferred through several runs.  Ask it explicitly once an address exists,
+# then report what is actually listening.
+# The stick is FAT: every file lands 0644 there, so the old [ -x ] test was false
+# on the unit and the kick was skipped on every run ("ssh request skipped: no
+# httpreq on the unit", 23:50).  Stage a copy under /rw_data, where chmod works.
+httpreq_bin() {
+    [ -n "${_HTTPREQ_CACHED:-}" ] && { printf '%s' "$_HTTPREQ_CACHED"; return 0; }
+    for _c in "$STICK_ROOT/combo/bin/httpreq" "$USB_DIR/../bin/httpreq" "$USB_DIR/bin/httpreq"; do
+        [ -f "$_c" ] || continue
+        mkdir -p "$RW_DIR/bin" 2>/dev/null || true
+        cp -f "$_c" "$RW_DIR/bin/httpreq" 2>/dev/null || continue
+        chmod 755 "$RW_DIR/bin/httpreq" 2>/dev/null || continue
+        _HTTPREQ_CACHED="$RW_DIR/bin/httpreq"
+        printf '%s' "$_HTTPREQ_CACHED"
+        return 0
+    done
+    return 1
+}
+_wip=$(ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' | head -n1)
+if [ -n "$_wip" ]; then
+    _rq=$(httpreq_bin || true)
+    if [ -n "$_rq" ]; then
+        "$_rq" POST 127.0.0.1 8090 "/ssh?enabled=1&port=2222" >> "$LOG" 2>&1 || log "ssh request failed (httpreq)"
+    else
+        log "ssh request skipped: no httpreq on the unit"
+    fi
+    sleep 3
+    _l=$( (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep 2222 | head -n1 )
+    log "ssh: wlan0=$_wip listener=${_l:-none}"
+else
+    log "ssh: no wlan0 address yet; dropbear stays down"
+fi
+
+
+# ---- one-round API walk (opt-in) ----------------------------------------
+# Every UI action is an HTTP call, so the whole interaction matrix can be walked
+# in a single insert instead of one action per round.  Put `api_walk` on the
+# stick root; the trace lands next to the probe as api_walk.txt.
+# The unit has neither wget nor nc, so the walk uses the tiny httpreq we ship
+# next to the combo helpers.  Port 8090 is the wifi daemon (see the unit file).
+_HTTPRQ=$(httpreq_bin || true)
+_api() {
+    [ -n "$_HTTPRQ" ] || { echo "{\"error\":\"no httpreq\"}"; return 1; }
+    "$_HTTPRQ" POST 127.0.0.1 8090 "$1" 2>/dev/null | head -c 400
+}
+_apistatus() {
+    [ -n "$_HTTPRQ" ] || { echo "{\"error\":\"no httpreq\"}"; return 1; }
+    "$_HTTPRQ" GET 127.0.0.1 8090 /status 2>/dev/null | head -c 1200
+}
+if [ -f "$STICK_ROOT/api_walk" ]; then
+    _walk="$RW_DIR/api_walk.txt"
+    { echo "=== api walk $(date -u 2>/dev/null)"
+      echo "--- step 1: mode=client"; _api "/mode?value=client" | head -c 200; echo
+      sleep 20; _apistatus | head -c 1200; echo
+      echo "--- step 2: client/connect"; _api "/client/connect" | head -c 200; echo
+      sleep 40; _apistatus | head -c 1200; echo
+      echo "--- step 3: bad manual join (must fail cleanly)"
+      _api "/client/pair?ssid=SCOURGE-TEST&psk=short" | head -c 200; echo
+      echo "--- step 4: scan"; _api "/scan" | head -c 400; echo
+      echo "--- step 5: AA AP 5 GHz"; _api "/ap/start?ssid=SCOURGE-AA&channel=36" | head -c 200; echo
+      sleep 25; _apistatus | head -c 1200; echo
+      echo "--- step 6: stop AP"; _api "/carplay/stop" | head -c 200; echo
+      sleep 8; _apistatus | head -c 800; echo
+      echo "--- step 7: back to client + ssh"; _api "/mode?value=client" | head -c 200; echo
+      _api "/ssh?enabled=1&port=2222" | head -c 200; echo
+      sleep 5
+      echo "--- listeners"; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -E ":(2222|8090|8091)" | head -n 5
+      echo "--- wlan0"; ip -4 -o addr show wlan0 2>/dev/null | head -n 2
+      echo "--- aa/check"; _apistatus >/dev/null 2>&1; _api "/aa/check" | head -c 400; echo
+    } > "$_walk" 2>&1
+    log "api walk written: $_walk"
+fi
+
+# ---- vendor BT API measurement (AA package prober) ------------------------
+# The AA package has no installer of its own, so this stage is the only writer of
+# /rw_data/aa/bt_api.json (agreed with the AA tab, 2026-11-24).  The probe target
+# is the RUNNING object (/proc/<pid>/exe): the shim resolves the symbols with
+# dlsym(RTLD_DEFAULT) inside that process, so "does the loaded object export it"
+# is the question, not "which file has the string".
+bt_api_probe() {
+    mkdir -p /rw_data/aa 2>/dev/null || true
+    _prober=""
+    for _c in "$STICK_ROOT/combo/aa/vbtd_api.target" "$USB_DIR/../aa/vbtd_api.target" "$USB_DIR/bin/vbtd_api.target"; do
+        [ -f "$_c" ] && { _prober="$_c"; break; }
+    done
+    if [ -z "$_prober" ]; then
+        log "vbtd_api not staged, bt_api.json not written"
+        rm -f /rw_data/aa/bt_api.json 2>/dev/null || true
+        return 0
+    fi
+    _pid=$(pidof vbtd 2>/dev/null | cut -d' ' -f1)
+    _exe=""
+    [ -n "$_pid" ] && _exe=$(readlink -f "/proc/$_pid/exe" 2>/dev/null)
+    [ -n "$_exe" ] || _exe=/app/bin/vbtd
+    mkdir -p "$RW_DIR/bin" 2>/dev/null || true
+    if ! cp -f "$_prober" "$RW_DIR/bin/vbtd_api" 2>/dev/null || ! chmod 755 "$RW_DIR/bin/vbtd_api" 2>/dev/null; then
+        log "vbtd_api: cannot stage the prober; bt_api.json not written"
+        return 0
+    fi
+    if "$RW_DIR/bin/vbtd_api" "$_exe" > /rw_data/aa/bt_api.json 2>>"$LOG"; then
+        log "bt_api: measured $_exe (pid ${_pid:-none})"
+    else
+        log "bt_api: prober failed on $_exe"
+        rm -f /rw_data/aa/bt_api.json 2>/dev/null || true
+        return 1
+    fi
+    # Same reason as bt_tap.bin: the owner reads the measurement from the stick.
+    cp -f /rw_data/aa/bt_api.json "${SCOURGE_STICK_DIR:-$USB_DIR}/bt_api.json" 2>/dev/null || true
+    return 0
+}
+bt_api_probe || true
+
+log "step: end-of-install probe"
 probe_radio "end of install (daemon_verify=${daemon_verify:-unknown})"
+log "step: probe done"
 probe_aa
 
+# Publish the collected reports at the very end, in one go: anything written to
+# the stick earlier restarts the loader (md5 gate), and each restart beeps.
+_stick="${SCOURGE_STICK_DIR:-$USB_DIR}"
+if [ -w "$_stick" ]; then
+    for _f in wifi_probe.txt aa_probe.txt api_walk.txt; do
+        [ -f "$RW_DIR/$_f" ] && cp -f "$RW_DIR/$_f" "$_stick/$_f" 2>/dev/null || true
+    done
+    # The Bluetooth tap is only produced when the stick carried `bt_tap_run`, and
+    # it is the evidence for whether the vendor stack's RFCOMM layer is alive at
+    # all (tools/bttap/hci_decode.py on the host). It used to stay on the unit,
+    # so getting it home needed SSH or dd; it travels with the reports instead.
+    if [ -f "$RW_DIR/bt/tap.bin" ]; then
+        if cp -f "$RW_DIR/bt/tap.bin" "$_stick/bt_tap.bin" 2>/dev/null; then
+            log "bt tap published: bt_tap.bin"
+        else
+            log "bt tap: copy to the stick failed, it stays at $RW_DIR/bt/tap.bin"
+        fi
+    fi
+    sync 2>/dev/null || true
+fi
+
 result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$setup_variant/$custom_variant" \
-    "tile_skipped=${variant_missing:+1}${variant_missing:-0}" \
+    "tile_skipped=${variant_missing:+1}${variant_missing:-0}" "nets_trimmed=${wifi_nets_trimmed:-0}" \
        "backup=$BACKUP_HU" "daemon=$daemon_status" "daemon_verify=$daemon_verify" \
        "oem_mask=$oem_mask" \
        "wifi_import=$wifi_import" "restart=$restart" "build_id=$BUILD_ID" \

@@ -1,4 +1,8 @@
 #!/bin/sh
+# Pin the compiler: the host glibc is x86-64-v3 and any -static glibc build
+# faults on the head unit (Atom-class CPU). musl-gcc keeps the baseline ISA.
+MUSL_CC="$(command -v musl-gcc 2>/dev/null || true)"
+
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 # Build the complete USB payload tree for the Tweaks app.
@@ -14,7 +18,7 @@ QML_SRC="$ROOT/artifacts/qml/AppHomeScreen/qml_eco3.0"
 cd "$ROOT"
 
 echo "== build daemon / wrapper =="
-make -C src
+make -C src CC="${MUSL_CC:-cc}"
 
 echo "== build persistence helper =="
 if [ "${SKIP_PERSIST:-0}" = "1" ]; then

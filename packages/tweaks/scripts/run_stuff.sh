@@ -22,6 +22,11 @@
 #
 # It does not flash firmware, touch the updater, bootloader or partitions.
 set -u
+
+# The unit runs a Korean locale: `date` prints "2026. 11. 23. (월)" and tools
+# emit localised text, which lands in combo.log, the probes and the UI popup.
+# Pin the C locale so every log line is ASCII.
+export LC_ALL=C LANG=C LC_TIME=C 2>/dev/null || true
 PATH="${TWEAKS_PATH:-/bin:/sbin:/usr/bin:/usr/sbin}"
 USB_DIR="${USB_DIR:-/media/usb}"
 PAYLOAD="$USB_DIR/payload"
@@ -51,8 +56,72 @@ mkdir -p "$RW_DIR" 2>/dev/null
 mkdir -p "$RW_DIR/backup" 2>/dev/null
 : > "$LOG" 2>/dev/null
 
+probe_tweaks() {   # probe_tweaks <label> - why the page is dead, in one file on the stick
+    _pf="$USB_DIR/tweaks_probe.txt"
+    {
+        echo "=== SCOURGE tweaks probe: ${1:-?} ($(date -u 2>/dev/null))"
+        echo "--- boot timing"
+        # Why the unit feels slower to start since the packages went on: boot
+        # completion, our units' start times and the daemons' first log line.
+        echo "  uptime: $(cut -d. -f1 /proc/uptime 2>/dev/null)s"
+        (systemd-analyze 2>/dev/null | head -n 3) || echo "  no systemd-analyze"
+        echo "  blame (top 8):"
+        (systemd-analyze blame 2>/dev/null | head -n 8) || true
+        for _u in wifi-daemon battery-daemon tweaks-daemon ambient-daemon fake-engine; do
+            _ts=$(systemctl show -p ActiveEnterTimestamp --value "${_u}.service" 2>/dev/null)
+            _st=$(systemctl is-active "${_u}.service" 2>/dev/null)
+            printf "  %-16s active=%s since=%s\n" "${_u}" "${_st}" "${_ts:-none}"
+        done
+        echo "  our daemons first log lines:"
+        for _l in /rw_data/wifi/daemon.log /rw_data/battery/daemon.log /rw_data/tweaks/daemon.log /rw_data/ambient/ambient.log /rw_data/fake-engine/engine.log; do
+            [ -f "${_l}" ] && printf "    %s: %s\n" "${_l}" "$(head -n 1 "${_l}" 2>/dev/null | cut -c1-90)"
+        done
+
+        echo "--- pid"; pidof tweaks_daemon 2>&1
+        echo "--- service"; systemctl is-active tweaks-daemon.service 2>&1; systemctl is-enabled tweaks-daemon.service 2>&1
+        systemctl show -p MainPID -p ExecMainStatus -p ExecMainCode tweaks-daemon.service 2>&1
+        echo "--- unit"; sed -n '1,24p' /etc/systemd/system/tweaks-daemon.service 2>&1
+        echo "--- files"; ls -l /rw_data/tweaks/tweaks_daemon /rw_data/tweaks/tweaks_persist 2>&1
+        echo "--- smack"; getfattr -n security.SMACK64 --only-values /rw_data/tweaks/tweaks_daemon 2>&1
+        echo "--- daemon.log"; tail -n 15 /rw_data/tweaks/daemon.log 2>&1
+        echo "--- journal"; journalctl -u tweaks-daemon.service -n 20 --no-pager 2>&1 | tail -n 20
+        echo "--- port 8091"; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep 8091 2>&1
+        echo "--- ui"; pidof AppHomeScreen 2>&1
+        echo "--- installed pages"
+        for _f in HomeScreen/BatteryPage.qml HomeScreen/WifiPage.qml HomeScreen/TweaksPage.qml \
+                  HomeScreen/RebootPage.qml component/BatteryTile.qml component/WifiTile.qml \
+                  component/TweaksTile.qml component/RebootTile.qml component/Q_ThemeImage.qml \
+                  component/common/Q_ThemeImage.qml; do
+            _t="/app/share/AppHomeScreen/qml_eco3.0/$_f"
+            if [ -f "$_t" ]; then echo "  present $_f $("md5sum" "$_t" 2>/dev/null | cut -d' ' -f1)"; else echo "  MISSING $_f"; fi
+        done
+        echo "--- qml tooling"; for _q in qml qmlscene qmlplugindump; do command -v "$_q" 2>/dev/null || echo "no $_q"; done
+        echo "--- ui units"
+        (systemctl list-unit-files --type=service 2>/dev/null | grep -iE 'home|apphome|launcher|qml|iviprj' | head -n 12)
+        _hp=$(pidof AppHomeScreen 2>/dev/null | awk '{print $1}')
+        if [ -n "$_hp" ]; then
+            echo "  AppHomeScreen pid=$_hp ppid=$(sed -n 's/^PPid:[[:space:]]*//p' /proc/$_hp/status 2>/dev/null)"
+            _pp=$(sed -n 's/^PPid:[[:space:]]*//p' /proc/$_hp/status 2>/dev/null)
+            [ -n "$_pp" ] && echo "  parent cmdline: $(tr '\0' ' ' < /proc/$_pp/cmdline 2>/dev/null)"
+            echo "  unit: $(sed -n 's/.*\([a-zA-Z0-9_.@-]*\.service\).*/\1/p' /proc/$_hp/cgroup 2>/dev/null | head -n1)"
+            echo "  fd1: $(readlink /proc/$_hp/fd/1 2>/dev/null) fd2: $(readlink /proc/$_hp/fd/2 2>/dev/null)"
+        fi
+        echo "--- qml error logs"; ls -lt /var/log/*qml* /var/log/*apphome* /run/log/*qml* /var/volatile/log/*qml* 2>/dev/null | head -n 6
+        for _l in /var/log/AppHomeScreen.log /var/log/qml.log /var/volatile/log/AppHomeScreen.log; do
+            [ -f "$_l" ] || continue
+            echo "  --- $_l (tail)"; tail -n 20 "$_l" 2>&1
+        done
+        echo
+    } >> "$_pf" 2>&1
+    sync 2>/dev/null || true
+}
+
 log() {
+    # Also appended to the stick: this stage can take the UI down with it, and a
+    # log that only lives on the unit is exactly what we could not read during
+    # the 2026-11-22 reboot loop.
     echo "$(date -u 2>/dev/null) $*" >> "$LOG" 2>/dev/null
+    echo "$(date -u 2>/dev/null) $*" >> "$USB_DIR/tweaks_trace.log" 2>/dev/null
 }
 
 result() {
@@ -245,6 +314,13 @@ fi
 
 # ---- backup ------------------------------------------------------------
 STAMP=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null)
+# TWEAKS_SKIP_STANDBY (or a "no-standby" file in the stage dir) installs the tile,
+# the pages and the daemon but leaves the boot safety-disclaimer QML alone. That
+# QML is what crashed AppHomeScreen into a reboot loop on 2026-11-22; the tile is
+# the part the owner actually sees, so ship it separately and prove it.
+SKIP_STANDBY=0
+[ "${TWEAKS_SKIP_STANDBY:-0}" = 1 ] && SKIP_STANDBY=1
+[ -f "$USB_DIR/no-standby" ] && SKIP_STANDBY=1
 [ -n "$STAMP" ] || STAMP=manual
 BACKUP_HU="$RW_DIR/backup/$STAMP"
 [ -e "$BACKUP_HU" ] && BACKUP_HU="$BACKUP_HU.$$"
@@ -258,7 +334,11 @@ for f in "$ADV" "$WIDE" "$ALL" "$SETUP" "$CUSTOM" "$THEME"; do
         cp -f "$QML_DIR/$f" "$USB_DIR/backup_current/AppHomeScreen/qml_eco3.0/$f" 2>/dev/null || true
     fi
 done
+if [ "$SKIP_STANDBY" = 1 ]; then
+    log "standby clock QML: skipped on request (TWEAKS_SKIP_STANDBY/no-standby)"
+fi
 for base in qml_eco3.0 new_qml qml_genesis; do
+    [ "$SKIP_STANDBY" = 1 ] && break
     for f in main.qml Screen_AppStandbyClock_Confirm.qml Screen_AppStandbyClock_Confirm_Profile.qml; do
         src="$STANDBY_ROOT/$base/$f"
         [ -f "$src" ] || continue
@@ -586,11 +666,18 @@ install_qml() {
 }
 
 Q="$PAYLOAD/qml/AppHomeScreen/qml_eco3.0"
-install_qml "$Q/HomeScreen/QHMI_HomeScreenMain_Advanced.$adv_variant.qml" "$cur_adv" "$cur_adv"
-install_qml "$Q/HomeScreen/QHMI_HomeScreenMain_Wide.$wide_variant.qml" "$cur_wide" "$cur_wide"
-install_qml "$Q/HomeScreen/Screen_HomeScreen_AllMenus.$all_variant.qml" "$cur_all" "$cur_all"
-install_qml "$Q/HomeScreen/Screen_HomeScreen_Submenu_Setup.$setup_variant.qml" "$cur_setup" "$cur_setup"
-install_qml "$Q/component/QCustomizedMenuListAllowEmpty.$custom_variant.qml" "$cur_custom" "$cur_custom"
+# The home-screen variants are per installed-package combination: a build only
+# carries the ones it had a base for, and a missing one ships the page without
+# the tile instead of failing the whole stage.
+install_variant() {
+    [ -f "$1" ] || { log "no home-screen variant: $(basename "$1") - tile skipped"; return 0; }
+    install_qml "$1" "$2" "$3"
+}
+install_variant "$Q/HomeScreen/QHMI_HomeScreenMain_Advanced.$adv_variant.qml" "$cur_adv" "$cur_adv"
+install_variant "$Q/HomeScreen/QHMI_HomeScreenMain_Wide.$wide_variant.qml" "$cur_wide" "$cur_wide"
+install_variant "$Q/HomeScreen/Screen_HomeScreen_AllMenus.$all_variant.qml" "$cur_all" "$cur_all"
+install_variant "$Q/HomeScreen/Screen_HomeScreen_Submenu_Setup.$setup_variant.qml" "$cur_setup" "$cur_setup"
+install_variant "$Q/component/QCustomizedMenuListAllowEmpty.$custom_variant.qml" "$cur_custom" "$cur_custom"
 if ! grep -q 'indexOf("file://")' "$cur_theme" 2>/dev/null; then
     install_qml "$Q/component/common/Q_ThemeImage.qml" "$cur_theme" "$cur_theme"
 fi
@@ -603,6 +690,10 @@ for f in HomeScreen/TweaksPage.qml HomeScreen/RebootPage.qml \
 done
 
 # AppStandbyClock disclaimer auto-accept. Takes effect on the next boot.
+# Skipped with the rest of the standby-clock work when asked: this QML is the
+# one that took AppHomeScreen down on 2026-11-22, and it is not needed for the
+# tile or the daemon.
+if [ "$SKIP_STANDBY" != 1 ]; then
 for base in qml_eco3.0 new_qml qml_genesis; do
     dst_dir="$STANDBY_ROOT/$base"
     [ -d "$dst_dir" ] || continue
@@ -612,6 +703,7 @@ for base in qml_eco3.0 new_qml qml_genesis; do
         install_qml "$src" "$dst_dir/$f" "$dst_dir/$f"
     done
 done
+fi
 
 # Clear QML caches.
 io_capture_qml "$QML_DIR" "$USB_DIR/qml_after" || log "WARNING: QML after-snapshot unavailable"
@@ -651,6 +743,11 @@ io_restore_root || fail "cannot restore root mount state"
 
 # ---- restart AppHomeScreen --------------------------------------------
 restart="not-attempted"
+if [ "${SCOURGE_DEFER_UI_RESTART:-0}" = 1 ]; then
+    # The master restarts AppHomeScreen once after every stage has installed,
+    # instead of one restart per package (4-5 UI flickers per run, 2026-11-24).
+    restart="deferred"
+else
 launcher_pid=""
 for p in /proc/[0-9]*; do
     [ -r "$p/comm" ] || continue
@@ -691,7 +788,32 @@ if [ "$restart" != "dbus-ok" ]; then
     done
     restart="$restart (reboot required if UI does not return)"
 fi
+fi
 log "restart=$restart"
+
+# UI health gate: the tile/page install either leaves AppHomeScreen alive or not,
+# and a dead home screen is a reboot loop the owner has to pull the stick out of.
+# Watch it here; if it dies, put the previous QML back automatically and say so on
+# the stick instead of shipping a black screen.
+ui_after=unknown
+_home_pid=""
+for _t in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 1
+    _home_pid=$(pidof AppHomeScreen 2>/dev/null || true)
+    if [ -n "$_home_pid" ]; then ui_after=alive; else ui_after=dead; fi
+    [ "$ui_after" = alive ] && [ "$_t" -ge 5 ] && break
+done
+log "ui health: state=$ui_after pid=${_home_pid:-none}"
+if [ "$ui_after" != alive ]; then
+    log "UI DID NOT COME BACK - rolling the home-screen QML back"
+    for f in "$ADV" "$WIDE" "$ALL" "$SETUP" "$CUSTOM" "$THEME"; do
+        [ -f "$BACKUP_HU/$f" ] || continue
+        io_copy "$BACKUP_HU/$f" "$QML_DIR/$f" >> "$LOG" 2>&1 || log "rollback failed: $f"
+    done
+    sync
+    echo "ui_rollback=1" >> "$USB_DIR/tweaks_trace.log"
+    ui_after=rolled-back
+fi
 sync
 
 # The Reboot hard-reset fallback is only allowed to reach the micom service
@@ -712,6 +834,11 @@ if [ -z "$RUNNING_SMACK" ]; then
     done
 fi
 smack_check=unknown
+# "not running yet" is a deferred condition, not a failure: the daemon starts
+# from systemd and the SMACK check runs within a second or two of it. Failing
+# here is what produced the two-beep FAIL on 2026-11-22 while the tile and the
+# daemon were actually fine (ui_after=alive). The master re-checks it at the end.
+daemon_verify=ok
 case "$DAEMON_SMACK" in
     "$SMACK_SELF")
         if [ -n "$RUNNING_SMACK" ]; then
@@ -722,7 +849,9 @@ case "$DAEMON_SMACK" in
                 log "SMACK MISMATCH: running tweaks_daemon='$RUNNING_SMACK' expected='$SMACK_SELF'"
             fi
         else
-            log "SMACK UNKNOWN: tweaks_daemon is not running"
+            log "SMACK UNKNOWN: tweaks_daemon is not running yet; deferred to the end of the run"
+            smack_check=pending
+            daemon_verify=pending
         fi
         ;;
     unverified)
@@ -732,7 +861,9 @@ case "$DAEMON_SMACK" in
             smack_check=mismatch
             log "SMACK MISMATCH: running tweaks_daemon='$RUNNING_SMACK' expected='$SMACK_SELF'"
         else
-            log "SMACK UNKNOWN: tweaks_daemon file label unreadable and process not found"
+            log "SMACK UNKNOWN: tweaks_daemon file label unreadable and process not found; deferred"
+            smack_check=pending
+            daemon_verify=pending
         fi
         ;;
     *)
@@ -749,16 +880,33 @@ fi
 # with no readable exec attribute the helper inherits the daemon's '_'
 # context.  A readable wrong label above remains fatal.
 final_status=OK
-[ "$smack_check" = "ok" ] || final_status=FAIL
+case "$smack_check" in
+    ok) : ;;
+    pending) final_status=DAEMON_UNVERIFIED ;;
+    *) final_status=FAIL ;;
+esac
+# One probe at the end, always: "the page opens but nothing reacts" is the daemon,
+# and the answer has to be on the stick rather than in a guess.
+probe_tweaks "end of install (smack_check=$smack_check)"
+
+# A rolled-back UI means the install did not survive the boot: report it as such,
+# so the combo master stops here instead of carrying on into the next stage.
+[ "${ui_after:-unknown}" = rolled-back ] && final_status=UI_ROLLED_BACK
 
 result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$setup_variant/$custom_variant" \
        "backup=$BACKUP_HU" "daemon=$daemon_status" "restart=$restart" \
        "smack_self=$SMACK_SELF" "smack=$DAEMON_SMACK" \
        "persist_smack=$PERSIST_SMACK" "daemon_smack=${RUNNING_SMACK:-none}" \
-       "smack_check=$smack_check" \
+       "smack_check=$smack_check" "daemon_verify=${daemon_verify:-ok}" \
        "can_service=${CAN_SERVICE:-unset}" "can_source=$CAN_SOURCE" \
        "disclaimer=next-boot" "tzdata=$(cat "$RW_DIR/tzdata_version" 2>/dev/null | head -n 1)" \
-       "ota_block=$(cfg_value ota_block 0)" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"
+       "ota_block=$(cfg_value ota_block 0)" "asset_warnings=$ASSET_WARNINGS" \
+       "ui_after=${ui_after:-unknown}" "trace=$USB_DIR/tweaks_trace.log" "log=$LOG"
 log "=== tweaks payload done ==="
-[ "$final_status" = "OK" ] || exit 1
+# DAEMON_UNVERIFIED is deferred, not failed: the master re-checks the daemon at
+# the end of the run. Exiting 1 here is what produced the two-beep stop.
+case "$final_status" in
+    OK|DAEMON_UNVERIFIED) exit 0 ;;
+    *) exit 1 ;;
+esac
 exit 0

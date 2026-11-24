@@ -90,6 +90,29 @@ proof (uid, SMACK label, mounts), a file copied each way between stick and
 `/rw_data`, optional stock-updater restore (with `stock/KEEP_STOCK` to
 leave it stock), and result files. Start from it.
 
+`payload/dump_qml.sample.sh` is the read-only twin: it copies the unit's own
+home-screen QML back to the stick (`dump/qml/…`, with a manifest) and prints the
+payload markers and the variant name the installers derive from them. That is
+the file every per-package QML matrix is built against — and because the head
+unit has no address and no sshd until a package puts one there, the failsafe
+stick is the way to get it, not the network. Copy the sample to the stick root
+as `run_stuff.sh`.
+
+## Getting the bundle onto the stick (and proving it)
+
+A plain `cp` plus `md5sum -c` looks clean even when bytes never reached the
+medium, because the check reads through the page cache. `scripts/24_sync_combo_stick.sh`
+copies the built bundle, then **syncs, unmounts, remounts and verifies** — every
+package manifest, the two `combo/` helpers against the hashes baked into the master,
+and the root manifest — re-copying anything that came back wrong (up to six rounds).
+It exits non-zero rather than hand over a stick that will fail closed on the unit.
+
+```sh
+scripts/24_sync_combo_stick.sh                  # copy out/firstround to the RIGIMG stick
+scripts/24_sync_combo_stick.sh --verify-only    # only re-check what is on it
+scripts/24_sync_combo_stick.sh --payload out/x --mount /run/media/me/STICK
+```
+
 ## Combo sticks
 
 `packages/compose.sh` assembles several packages onto one stick with a

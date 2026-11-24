@@ -1,0 +1,5 @@
+base_sha256=1ad95b1b7b5d9143eff2338c6cabf1225aacf81515f7f56cd74457a192af26bb
+result_sha256=477eb661307a69d03357b6b51158e9ceff5dcfd945c939c9c478b2525d6128ca
+base=work/rootfs/app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Wide.qml
+artifact=packages/tweaks/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Wide.stock.qml
+sub=HomeScreen/QHMI_HomeScreenMain_Wide.stock.qml

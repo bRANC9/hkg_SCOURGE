@@ -907,36 +907,132 @@ def build_standbyclock() -> None:
     print("standbyclock artifacts written to", STANDBY_OUT)
 
 
+# SCOURGE install progress card.  The loader writes /rw_data/combo/combo.log from
+# its first second, so the home screen can show what the stick is doing without
+# opening an app: it tails the file, keeps the last line, and hides itself 15 s
+# after the log stops changing (or on tap).
+INSTALL_POPUP_QML = """
+    // SCOURGE install progress (added by packages/tweaks)
+    Item {
+        id: scourgeInstallPopup
+        property string line: ""
+        property int idle: 0
+        x: (parent.width - width) / 2
+        y: parent.height - height - 24
+        width: Math.min(parent.width - 80, 900)
+        height: 64
+        // Below the pages (they use z 2000+): the card belongs to the home screen and
+        // must not draw over an open app.
+        z: 100
+        visible: line !== ""
+
+        Rectangle {
+            anchors.fill: parent
+            radius: 12
+            color: "#E6000000"
+            border.color: "#4FC3F7"
+            border.width: 2
+        }
+        QText {
+            x: 16
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width - 60
+            text: scourgeInstallPopup.line
+            font.pixelSize: 20
+            color: "#FFFFFF"
+            elide: Text.ElideRight
+        }
+        MouseArea { anchors.fill: parent; onClicked: scourgeInstallPopup.line = "" }
+
+        Timer {
+            interval: 1000
+            running: true
+            repeat: true
+            onTriggered: {
+                var xhr = new XMLHttpRequest()
+                xhr.onreadystatechange = function() {
+                    if (xhr.readyState !== XMLHttpRequest.DONE) return
+                    if (xhr.status !== 200 && xhr.status !== 0) return
+                    var t = xhr.responseText || ""
+                    if (t.length > 200000) t = t.substring(t.length - 200000)
+                    var lines = t.split("\n")
+                    var last = ""
+                    // The loader also logs command output; a D-Bus reply is not
+                    // progress.  Skip the noise so the card shows a real step.
+                    for (var i = lines.length - 1; i >= 0; i--) {
+                        var l2 = lines[i]
+                        if (l2.length === 0) continue
+                        if (l2.indexOf("method return") >= 0) continue
+                        if (l2.indexOf("reply_serial") >= 0) continue
+                        if (l2.indexOf("sender=:") >= 0) continue
+                        if (l2.indexOf("array:byte") >= 0) continue
+                        last = l2; break
+                    }
+                    if (last === scourgeInstallPopup.line) {
+                        scourgeInstallPopup.idle++
+                        if (scourgeInstallPopup.idle > 15) scourgeInstallPopup.line = ""
+                    } else {
+                        scourgeInstallPopup.line = last
+                        scourgeInstallPopup.idle = 0
+                    }
+                }
+                xhr.open("GET", "file:///rw_data/combo/combo.log")
+                xhr.send()
+            }
+        }
+    }
+"""
+
+
+def with_install_popup(text: str) -> str:
+    """Append the progress card to a patched home-screen variant."""
+    cut = text.rfind("}")
+    if cut < 0:
+        return text
+    out = text[:cut] + INSTALL_POPUP_QML + "\n}\n"
+    if out.count("{") != out.count("}"):
+        raise SystemExit("install popup broke the QML brace balance; refusing to ship")
+    return out
+
+def _emit(out_rel: str, variant: str, rel: str, patch) -> None:
+    """Patch one variant, skipping the ones whose base was never generated.
+
+    The base matrix is per installed-package combination and only the dumps and
+    syntheses somebody has made exist locally, so a missing base must not abort
+    the package build: the installer reports "page installed, tile skipped" for
+    that combination instead.
+    """
+    src = variant_path(variant, rel)
+    if not os.path.isfile(src):
+        print(f"skip {out_rel}: no base {src}", file=sys.stderr)
+        return
+    write(os.path.join(OUT, out_rel), patch(src))
+
+
 def main() -> int:
     patch_theme_image()
 
     adv_variants = ["stock", "hello", "battery", "battery_hello",
                     "wifi", "hello_wifi", "battery_wifi", "hello_battery_wifi"]
     for v in adv_variants:
-        write(os.path.join(OUT, "HomeScreen", f"QHMI_HomeScreenMain_Advanced.{v}.qml"),
-              patch_advanced(variant_path(v, ADV)))
+        _emit(f"HomeScreen/QHMI_HomeScreenMain_Advanced.{v}.qml", v, ADV, patch_advanced)
 
     # New Battery-tile layout: use the global allocator used by the current
     # Battery/WiFi payloads, not the per-page helper.
     global_adv_variants = ["battery_tile", "battery_tile_hello",
                            "battery_tile_wifi", "hello_battery_tile_wifi"]
     for v in global_adv_variants:
-        write(os.path.join(OUT, "HomeScreen", f"QHMI_HomeScreenMain_Advanced.{v}.qml"),
-              patch_advanced_global(variant_path(v, ADV)))
+        _emit(f"HomeScreen/QHMI_HomeScreenMain_Advanced.{v}.qml", v, ADV, patch_advanced_global)
 
     wide_variants = ["stock", "hello", "wifi", "hello_wifi"]
     for v in wide_variants:
-        write(os.path.join(OUT, "HomeScreen", f"QHMI_HomeScreenMain_Wide.{v}.qml"),
-              patch_wide(variant_path(v, WIDE)))
+        _emit(f"HomeScreen/QHMI_HomeScreenMain_Wide.{v}.qml", v, WIDE, patch_wide)
 
     all_variants = ["stock", "hello", "wifi", "hello_wifi"]
     for v in all_variants:
-        write(os.path.join(OUT, "HomeScreen", f"Screen_HomeScreen_AllMenus.{v}.qml"),
-              patch_all_or_setup(variant_path(v, ALL)))
-        write(os.path.join(OUT, "HomeScreen", f"Screen_HomeScreen_Submenu_Setup.{v}.qml"),
-              patch_all_or_setup(variant_path(v, SETUP)))
-        write(os.path.join(OUT, "component", f"QCustomizedMenuListAllowEmpty.{v}.qml"),
-              patch_custom(variant_path(v, CUSTOM)))
+        _emit(f"HomeScreen/Screen_HomeScreen_AllMenus.{v}.qml", v, ALL, patch_all_or_setup)
+        _emit(f"HomeScreen/Screen_HomeScreen_Submenu_Setup.{v}.qml", v, SETUP, patch_all_or_setup)
+        _emit(f"component/QCustomizedMenuListAllowEmpty.{v}.qml", v, CUSTOM, patch_custom)
 
     build_standbyclock()
     print("artifacts written to", OUT)

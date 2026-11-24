@@ -1,0 +1,9 @@
+--- a/Q_ThemeImage.qml
++++ b/Q_ThemeImage.qml
+@@ -3,5 +3,5 @@
+ Image {
+     id: rootImage
+     property string themeSource: ""
+-    source: themeSource !== "" ? (themeSource + AppHomeModel.dayLightSuffix) : themeSource
++    source: themeSource !== "" ? ((themeSource.indexOf("file://") === 0) ? themeSource : (themeSource + AppHomeModel.dayLightSuffix)) : themeSource
+ } 

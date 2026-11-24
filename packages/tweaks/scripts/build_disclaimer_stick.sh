@@ -78,7 +78,8 @@ done
 
 cp "$HERE/run_stuff_disclaimer.sh" "$STAGE/run_stuff.sh"
 cp "$HERE/run_stuff_disclaimer_restore.sh" "$STAGE/run_stuff_restore.sh"
-chmod 755 "$STAGE/run_stuff.sh" "$STAGE/run_stuff_restore.sh"
+cp "$HERE/run_stuff_detect.sh" "$STAGE/run_stuff_detect.sh"
+chmod 755 "$STAGE/run_stuff.sh" "$STAGE/run_stuff_restore.sh" "$STAGE/run_stuff_detect.sh"
 
 cat > "$STAGE/README.txt" <<'EOF'
 SCOURGE - AppStandbyClock safety-disclaimer patch only
@@ -106,6 +107,13 @@ Restore
   Copy run_stuff_restore.sh over run_stuff.sh on the stick and plug it in.
   It restores the newest on-car backup, else the stock reference shipped in
   backup/AppStandbyClock.
+
+Inventory (read-only)
+  Copy run_stuff_detect.sh over run_stuff.sh and plug it in: it writes
+  inventory.txt on the stick with what is installed right now (Hello/Battery/
+  WiFi/Wifi1b/Tweaks/Reboot markers, the home-screen base md5, daemon and
+  service state, the disclaimer patch state and whether the boot message on
+  the unit is ours). It changes nothing on the car and sends no CAN frame.
 
 Diagnostics
   /rw_data/tweaks/disclaimer_install.log, /rw_data/tweaks/disclaimer_status.txt

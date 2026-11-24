@@ -1,4 +1,8 @@
 #!/bin/sh
+# Pin the compiler: the host glibc is x86-64-v3 and any -static glibc build
+# faults on the head unit (Atom-class CPU). musl-gcc keeps the baseline ISA.
+MUSL_CC="$(command -v musl-gcc 2>/dev/null || true)"
+
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 # TARGET: Ioniq 5 Gen5W_L EU 260128
@@ -22,22 +26,29 @@ echo "== QML artifacts =="
 python3 scripts/build_artifacts.py
 
 echo "== build daemon =="
-make -C src
+make -C src CC="${MUSL_CC:-cc}"
 
 echo "== assemble $OUT =="
 rm -rf "$OUT"
-mkdir -p "$OUT/payload/bin" "$OUT/payload/assets/wifi" "$OUT/payload/assets/hello" "$OUT/payload/assets/battery" "$OUT/payload/systemd" \
+mkdir -p "$OUT/payload/facts" "$OUT/payload/bin" "$OUT/payload/assets/wifi" "$OUT/payload/assets/hello" "$OUT/payload/assets/battery" "$OUT/payload/systemd" \
          "$OUT/payload/ref" "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen" \
          "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/common" \
          "$OUT/backup/AppHomeScreen/qml_eco3.0/HomeScreen" \
          "$OUT/backup/AppHomeScreen/qml_eco3.0/component/common"
+# AA cross-check: the BT socket-ownership probe from packages/aa, so the
+# install-time probe can report who owns SDP / RFCOMM 8 on this unit.
+if [ -x "$HERE/../aa/bt_owner.target" ]; then
+    cp -f "$HERE/../aa/bt_owner.target" "$OUT/payload/bin/bt_owner.target"
+fi
 mkdir -p "$OUT/payload/lib"
+[ -f "$HERE/artifacts/facts/hwinfo.txt" ] && cp -f "$HERE/artifacts/facts/hwinfo.txt" "$OUT/payload/facts/hwinfo.txt" || true
 cp "$ROOT/../common/install_io.sh" "$OUT/payload/lib/"
 
 cp src/wifi_daemon "$OUT/payload/bin/wifi_daemon"
 cp artifacts/assets/wifi/*.png "$OUT/payload/assets/wifi/"
-cp artifacts/assets/hello/*.png "$OUT/payload/assets/hello/" 2>/dev/null || true
-cp artifacts/assets/battery/*.png "$OUT/payload/assets/battery/" 2>/dev/null || true
+# The battery/hello assets are NOT installed by this stage (the battery stage
+# owns them), so shipping stale blue copies here only confused the audit.  Drop
+# them (2026-11-24: unified mint/glow set).
 cp artifacts/systemd/wifi-daemon.service "$OUT/payload/systemd/"
 cp artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/WifiPage.qml "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/"
 cp artifacts/qml/AppHomeScreen/qml_eco3.0/component/WifiTile.qml "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/"

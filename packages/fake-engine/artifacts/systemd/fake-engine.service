@@ -1,0 +1,18 @@
+[Unit]
+Description=SCOURGE fake engine sound (parked, localhost only)
+# After the boot transaction: a sound daemon must never slow the unit down.
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/rw_data/fake-engine/fake_engine_daemon --file /rw_data/fake-engine/engine_idle.wav --port 8095
+Restart=on-failure
+RestartSec=10
+User=root
+# Low priority: it only plays audio on request.
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=10
+
+[Install]
+WantedBy=multi-user.target

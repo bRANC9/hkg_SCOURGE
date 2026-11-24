@@ -3383,6 +3383,29 @@ static void handle_http(int fd)
             close(fd);
             return;
         }
+    } else if (!strcmp(decoded, "/ui-restart") && !strcmp(method, "POST")) {
+        /* Restart the home screen only: the QML is reloaded from disk, the
+         * daemons keep running and the unit does not reboot.  Same launcher call
+         * the wifi stage uses after a QML install; the reboot watchdog is not
+         * involved, so a failure leaves the unit running. */
+        if (!headers || remote_origin(headers) ||
+            !header_value_is(headers, "X-Reboot-App", "1")) {
+            send_response(fd, 403, "{\"ok\":false,\"reason\":\"forbidden\"}\n");
+        } else {
+            char cmd[512];
+            snprintf(cmd, sizeof(cmd),
+                     "%s --session --type=method_call --reply-timeout=3000 "
+                     "--dest=com.lge.avn.applauncher /Request "
+                     "com.lge.avn.applauncher.request.terminate int32:11 "
+                     ">>/rw_data/tweaks/daemon.log 2>&1",
+                     cfg.dbus_send_path);
+            int rc = system(cmd);
+            log_msg("ui-restart: launcher terminate rc=%d", rc);
+            snprintf(body, sizeof(body),
+                     "{\"ok\":%s,\"rc\":%d,\"state\":\"ui-restarted\"}\n",
+                     rc == 0 ? "true" : "false", rc);
+            send_response(fd, rc == 0 ? 200 : 500, body);
+        }
     } else if (!strcmp(decoded, "/set") && !strcmp(method, "POST")) {
         static const char *keys[] = {
             "cluster_fix", "infotainment_fix", "cluster_crtc", "main_crtc",

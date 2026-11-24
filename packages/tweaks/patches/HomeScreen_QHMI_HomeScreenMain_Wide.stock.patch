@@ -1,0 +1,109 @@
+--- a/QHMI_HomeScreenMain_Wide.qml
++++ b/QHMI_HomeScreenMain_Wide.qml
+@@ -1,3 +1,5 @@
++// REBOOT_PAYLOAD_260128
++// TWEAKS_PAYLOAD_260128
+ import QtQuick 2.0
+ import "../component"
+ import "../component/common"
+@@ -76,9 +78,9 @@
+         QHomeItem {
+             id: itemAllMenu
+             property bool atPressState: true
+-            width: AppHomeModel.isWideScr ? 250 : 207
++            width: AppHomeModel.isWideScr ? 150 : 207
+             height: 183
+-            x_icon: AppHomeModel.isWideScr ? 76 : 55
++            x_icon: AppHomeModel.isWideScr ? 42 : 55
+             x: AppHomeModel.isWideScr ? 4 : 1
+             icoPressed: gridAreaitemAllMenu.pressed && gridAreaitemAllMenu.containsMouse && itemAllMenu.atPressState
+             iconSource: [defineModel.home_allmenu_99_n, defineModel.home_bg_icon_p,"", defineModel.home_allmenu_99_d]
+@@ -165,7 +167,7 @@
+             width: itemMainMenu.width
+             anchors.top: parent.top
+             anchors.left: itemAllMenu.right
+-            cellWidth: AppHomeModel.isWideScr ? 250 : 207
++            cellWidth: AppHomeModel.isWideScr ? 150 : 207
+             cellHeight: 183
+             model: AppHomeModel.listMenuHomeItem
+             currentIndex : AppHomeModel.homePage1CurrentIdx
+@@ -263,6 +265,42 @@
+                 }
+             }
+         }
++        QHomeItem {
++            id: itemTweaks
++            visible: AppHomeModel.isWideScr
++            width: AppHomeModel.isWideScr ? 150 : 207
++            height: 183
++            x: itemAllMenu.right + mainGridItemMenu.cellWidth * 4
++            x_icon: AppHomeModel.isWideScr ? 42 : 55
++            iconSource: ["file:///app/share/AppHomeScreen/tweaks/tweaks_icon_n.png", defineModel.home_bg_icon_p, "", "file:///app/share/AppHomeScreen/tweaks/tweaks_icon_d.png"]
++            itemName: "Tweaks"
++            icoPressed: tweaksMouse.pressed
++            MouseArea {
++                id: tweaksMouse
++                anchors.fill: parent
++                onClicked: tweaksPage.visible = true
++            }
++        }
++        QHomeItem {
++            id: itemReboot
++            visible: AppHomeModel.isWideScr
++            width: AppHomeModel.isWideScr ? 150 : 207
++            height: 183
++            x: itemTweaks.right
++            x_icon: AppHomeModel.isWideScr ? 42 : 55
++            iconSource: ["file:///app/share/AppHomeScreen/tweaks/reboot_icon_n.png", defineModel.home_bg_icon_p, "", "file:///app/share/AppHomeScreen/tweaks/reboot_icon_d.png"]
++            itemName: "Reboot"
++            icoPressed: rebootMouse.pressed
++            MouseArea {
++                id: rebootMouse
++                anchors.fill: parent
++                onClicked: rebootPage.open()
++            }
++        }
++
++
++
++
+ 
+     }
+ 
+@@ -285,4 +323,36 @@
+         console.log("[3] QHMI_HomeScreenMain_Wide.qml onDestruction")
+     }
+ 
++    TweaksPage {
++        id: tweaksPage
++        visible: false
++    }
++
++    RebootPage {
++        id: rebootPage
++        x: 0
++        y: ConstantModel.MENU_BAR_Y
++        width: AppHomeModel.isWideScr ? DEVICE_WIDTH : ConstantModel.SCREEN_WIDTH
++        height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y
++        z: 2000
++        onGoHome: close()
++    }
++
++    // TWEAKS_BACK_CLOSE: Home/Back must dismiss the overlay.
++    Connections {
++        target: AppHomeModel
++        onButtonBackClicked: {
++            if (tweaksPage.visible)
++                tweaksPage.visible = false
++        }
++    }
++
++    Connections {
++        target: AppHomeEngine
++        onNotifyHomeMainChanged: {
++            if (tweaksPage.visible)
++                tweaksPage.visible = false
++        }
++    }
++
+ }

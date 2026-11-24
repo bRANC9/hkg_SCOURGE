@@ -1,0 +1,5 @@
+base_sha256=d09c5e370f59582f15cf05eaa1b6ac84e1b4edb369249988c85646613b8e76d8
+result_sha256=5a307e0e8ad52fa57a9657829a2418dd0666f0b708569ca9ec47d0b2ecc2fde1
+base=work/rootfs/app/share/AppHomeScreen/qml_eco3.0/component/QCustomizedMenuListAllowEmpty.qml
+artifact=packages/wifi/artifacts/qml/AppHomeScreen/qml_eco3.0/component/QCustomizedMenuListAllowEmpty.wifi.qml
+sub=component/QCustomizedMenuListAllowEmpty.wifi.qml

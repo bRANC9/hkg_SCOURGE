@@ -156,6 +156,30 @@ Summary for package authors:
   rule: never crash weston, its death triggers a MICOM watchdog reset of
   the whole unit).
 
+## Ambience (`packages/ambient`) — hub-delivered, WIP
+
+A fourth package, built for release through the SCOURGE Hub rather than a
+combo stick, so it ships **without a build-time QML base**: its installer
+copies `AmbientPage`/`AmbientTile`/`AmbientSlider` and injects the two
+instance snippets into the live `QHMI_HomeScreenMain_Advanced.qml`
+(`payload/lib/qml_inject.sh`, brace-matched, backed up, SMACK64 preserved).
+A base with the SCOURGE allocator gets tile + page; any other base gets the
+page appended before the root item's closing brace, and the result says
+`inject=page-only (no tile allocator)`.
+
+| Feature | Status |
+|---|---|
+| Effect engine (solid, breathe, pulse, rainbow, wave, comet, sparkle, cycle) + crossfade / through-black / cut transitions | host-tested (deterministic frame tests) |
+| HTTP API on `127.0.0.1:8094`, presets, atomic `config.conf`, status mirror | host-tested |
+| Music-reactive mode: S16LE capture process or FIFO, RMS + 3-band + beat detection | host-tested with synthetic PCM; the audio tap itself is unit-specific and unset |
+| Outputs: `none`, `file` (dry-run), `wled` (aftermarket controller over LAN), `micom` (raw frame, explicit template only) | `file`/`wled` host-tested against a socket fake; `micom` **car-unvalidated** and ships no default frame |
+| Installer, tile/page injection, idempotent reinstall, restore round-trip | host-tested (`tests/test_installer.sh`) |
+| On-car behaviour | **not validated** — no car has run this package |
+
+The factory ambient-lighting frame layout is not known for this unit; see
+`packages/ambient/docs/HARDWARE.md` before selecting the `micom` backend. The
+package is deliberately marked WIP everywhere it appears.
+
 ## Vehicle/version/region specificity
 
 Everything above is pinned to 260128 EU (`config/firmware_locks.env`):

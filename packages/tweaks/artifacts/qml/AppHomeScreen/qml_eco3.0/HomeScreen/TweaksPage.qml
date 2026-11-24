@@ -241,15 +241,49 @@ Item {
         onClosed: zonePicker.visible = false
     }
 
+    // Factory-style back chevron, same place and weight as the stock Notifications
+    // page: thin "<" top-left, closes the overlay exactly like Exit.
+    Item {
+        objectName: "tweaksBack"
+        z: 10
+        // Launcher header slot: the page starts at MENU_BAR_Y, so y:-40 puts the
+        // chevron on the header row the stock Notifications page uses.
+        x: 132
+        y: -40
+        width: 52
+        height: 52
+        Rectangle { anchors.fill: parent; radius: 26; color: bm3.pressed ? "#3A3A3A" : "transparent" }
+        QText {
+            anchors.centerIn: parent
+            text: "\u2039"
+            font.pixelSize: 54
+            textBold: true
+            color: "#D8D8D8"
+        }
+        MouseArea { id: bm3; anchors.fill: parent; preventStealing: true; onClicked: root.close() }
+    }
+    // Scrollable: the card list is taller than the page area on the 1280x720 unit
+    // (the bottom row was cut off), so the content scrolls instead of being clipped.
+    Flickable {
+        id: contentScroll
+        width: 1180
+        height: 630
+        anchors.horizontalCenter: parent.horizontalCenter
+        clip: true
+        contentWidth: width
+        contentHeight: Math.max(height, content.height)
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+
     Item {
         id: content
-        width: 1180
+        width: parent.width
         height: 630
         anchors.horizontalCenter: parent.horizontalCenter
 
         Image {
             id: headerIcon
-            x: 0
+            x: 62
             y: 4
             width: 56
             height: 56
@@ -259,7 +293,7 @@ Item {
 
         QText {
             id: title
-            x: 72
+            x: 132
             y: 0
             text: "Tweaks"
             font.pixelSize: 44
@@ -743,5 +777,6 @@ Item {
             color: "#7A7A7A"
             elide: Text.ElideRight
         }
+    }
     }
 }

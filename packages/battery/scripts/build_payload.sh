@@ -1,4 +1,8 @@
 #!/bin/sh
+# Pin the compiler: the host glibc is x86-64-v3 and any -static glibc build
+# faults on the head unit (Atom-class CPU). musl-gcc keeps the baseline ISA.
+MUSL_CC="$(command -v musl-gcc 2>/dev/null || true)"
+
 # SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
 # SPDX-License-Identifier: AGPL-3.0-only
 # Assemble a USB payload tree for the Battery app.
@@ -25,7 +29,7 @@ if [ -e "$OUT/payload" ] || [ -e "$OUT/run_stuff.sh" ]; then
 fi
 
 # Build the daemon.
-( cd "$HERE/src" && make )
+( cd "$HERE/src" && make CC="${MUSL_CC:-cc}" )
 
 mkdir -p "$OUT/payload/qml" "$OUT/payload/assets" "$OUT/payload/bin" \
          "$OUT/payload/systemd" "$OUT/backup" "$OUT/backup_current" "$OUT/docs"

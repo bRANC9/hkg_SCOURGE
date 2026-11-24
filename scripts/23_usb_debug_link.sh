@@ -40,6 +40,12 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "$ACTION" ] || die "one of --on, --off, --status is required"
+# --on/--off write /sys and stop toctou-gadget. Without this guard a non-root run
+# on the build host reaches a bare `systemctl stop` and blocks on a polkit auth
+# dialog for a unit that host does not have. --status stays read-only.
+if [ "$ACTION" != "status" ] && [ "$(id -u)" -ne 0 ]; then
+    die "$ACTION must run as root on the rig: sudo $0 --$ACTION"
+fi
 
 udc() {
     local found

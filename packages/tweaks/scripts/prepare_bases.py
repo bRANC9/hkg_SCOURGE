@@ -15,15 +15,27 @@ if dest.exists() and not (dest / '.scourge-generated').is_file():
     raise SystemExit('Existing unowned tweaks/base: preserve it; move it aside explicitly before rebuilding')
 with tempfile.TemporaryDirectory(prefix='tweaks-base-', dir=root / 'out') as d:
     stage = Path(d) / 'base'
+    # Only the variants somebody dumped or synthesised exist locally; a missing
+    # base is skipped, not fatal - the installer then reports "tile skipped" for
+    # that combination instead of the package failing to build at all.
     for variant in ('stock', 'hello', 'battery', 'battery_hello', 'battery_tile', 'battery_tile_hello'):
-        shutil.copytree(wifi / 'base' / variant, stage / variant)
+        src = wifi / 'base' / variant
+        if not src.is_dir():
+            print(f'skip base {variant}: {src} missing')
+            continue
+        shutil.copytree(src, stage / variant)
     advanced = 'HomeScreen/QHMI_HomeScreenMain_Advanced'
-    shutil.copyfile(stage / 'battery_hello' / f'{advanced}.hello.qml',
-                    stage / 'battery_hello' / f'{advanced}.qml')
+    if (stage / 'battery_hello' / f'{advanced}.hello.qml').is_file():
+        shutil.copyfile(stage / 'battery_hello' / f'{advanced}.hello.qml',
+                        stage / 'battery_hello' / f'{advanced}.qml')
     source = wifi / 'artifacts/qml/AppHomeScreen/qml_eco3.0'
     for variant in ('wifi', 'hello_wifi', 'battery_wifi', 'hello_battery_wifi', 'battery_tile_wifi', 'hello_battery_tile_wifi'):
+        base_from = wifi / 'base' / ('hello' if variant.startswith('hello') else 'stock')
+        if not base_from.is_dir() or not (source / f'HomeScreen/QHMI_HomeScreenMain_Advanced.{variant}.qml').is_file():
+            print(f'skip wifi variant {variant}: base or artifact missing')
+            continue
         base = stage / variant
-        shutil.copytree(wifi / 'base' / ('hello' if variant.startswith('hello') else 'stock'), base)
+        shutil.copytree(base_from, base)
         for name in ('HomeScreen/QHMI_HomeScreenMain_Advanced',):
             shutil.copyfile(source / f'{name}.{variant}.qml', base / f'{name}.qml')
         short = 'hello_wifi' if variant.startswith('hello') else 'wifi'

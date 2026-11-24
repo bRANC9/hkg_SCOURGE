@@ -1,0 +1,5 @@
+base_sha256=38d51eeaed565f644a92b89808251e463dd6cd189b60b4197d136a2dd3fca415
+result_sha256=dcb657fe231f83570d3cb79214c75b0e621ee46a473105328cb1168d801cf256
+base=work/rootfs/app/share/AppHomeScreen/qml_eco3.0/HomeScreen/Screen_HomeScreen_AllMenus.qml
+artifact=packages/wifi/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/Screen_HomeScreen_AllMenus.wifi.qml
+sub=HomeScreen/Screen_HomeScreen_AllMenus.wifi.qml

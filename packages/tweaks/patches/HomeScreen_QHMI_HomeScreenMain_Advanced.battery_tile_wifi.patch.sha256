@@ -1,0 +1,5 @@
+base_sha256=6ae95ac5a8b0361e3eb22c8f4f147277efd8f79da21fa6cdf03750cb250e7b9a
+result_sha256=3716ed26a9002f85bf3443e125fa78dd4dd62a7532d0058b270622943bb5369c
+base=work/rootfs/app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml
+artifact=packages/tweaks/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.battery_tile_wifi.qml
+sub=HomeScreen/QHMI_HomeScreenMain_Advanced.battery_tile_wifi.qml

@@ -19,6 +19,14 @@ Item {
 
     signal goHome()
 
+    // Fixed dark theme, like the WiFi/Battery/Tweaks pages: the vendor theme
+    // helper flips light/dark and the pages drifted apart.
+    Rectangle {
+        anchors.fill: parent
+        z: 0
+        color: "#0E0E0E"
+    }
+
     property bool requested: false
     property bool atOtherApp: typeof AppHomeModel !== "undefined"
                                ? AppHomeModel.isAtOtherApp : false
@@ -35,6 +43,7 @@ Item {
     property bool serviceError: false
     property string rebootState: "idle"
     property string rebootError: ""
+    property string bodyTextOverride: ""
     property int homeSeq: 0
     property bool homeSeqSeeded: false
     property string homeSource: "none"
@@ -184,7 +193,30 @@ Item {
         xhr.send()
     }
 
+
+    // Restart the home screen only: the QML is re-read from disk, the daemons
+    // keep running and the head unit does not reboot.  A failure is harmless -
+    // the screen stays as it is.
+    function restartUi() {
+        var xhr = new XMLHttpRequest()
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return
+            if (xhr.status === 200) {
+                mode = "pending"
+                bodyTextOverride = "Restarting the home screen\u2026\n\nThe page returns in a few seconds."
+                pendingTimer.restart()
+            } else {
+                mode = "error"
+                rebootError = "The home screen restart request failed. Try the head-unit restart instead."
+            }
+        }
+        xhr.open("POST", daemonBase + "/ui-restart")
+        xhr.setRequestHeader("X-Reboot-App", "1")
+        xhr.send()
+    }
+
     readonly property string bodyText: {
+        if (bodyTextOverride !== "") return bodyTextOverride
         if (mode === "pending")
             return "Restarting the head unit\u2026\n\nThe screen will return in about a minute."
         if (mode === "error")
@@ -292,7 +324,7 @@ Item {
             width: parent.width - 84
             text: root.bodyText + AppHomeModel.textUpdate
             font.pixelSize: ConstantModel.FONT_SIZE_39
-            color: HomeThemeHelper.normalTextColor
+            color: "#FFFFFF"
             wrapMode: Text.WordWrap
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
@@ -303,7 +335,7 @@ Item {
         Item {
             id: yesWrap
             visible: root.mode === "confirm"
-            width: (popup.width - 36) / 2
+            width: (popup.width - 48) / 3
             height: ConstantModel.APP_HOME_POPUP_BUTTON_HEIGHT
             anchors.left: parent.left
             anchors.leftMargin: 12
@@ -316,7 +348,7 @@ Item {
                 height: parent.height
                 label: TranslationsModel.STR_HOME_YES + AppHomeModel.textUpdate
                 labelSize: ConstantModel.FONT_SIZE_39
-                labelColor: HomeThemeHelper.normalTextColor
+                labelColor: "#FFFFFF"
                 enabled: root.serviceOk
                 opacity: enabled ? 1 : 0.4
                 onBtnRelease: root.confirm()
@@ -324,9 +356,30 @@ Item {
         }
 
         Item {
+            id: restartUiWrap
+            visible: root.mode === "confirm"
+            width: (popup.width - 48) / 3
+            height: ConstantModel.APP_HOME_POPUP_BUTTON_HEIGHT
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 12
+
+            QHMI_ToggleButton {
+                width: parent.width
+                height: parent.height
+                label: "UI restart"
+                labelSize: ConstantModel.FONT_SIZE_39
+                labelColor: "#FFFFFF"
+                enabled: root.serviceOk
+                opacity: enabled ? 1 : 0.4
+                onBtnRelease: root.restartUi()
+            }
+        }
+
+        Item {
             id: noWrap
             visible: root.mode === "confirm"
-            width: (popup.width - 36) / 2
+            width: (popup.width - 48) / 3
             height: ConstantModel.APP_HOME_POPUP_BUTTON_HEIGHT
             anchors.right: parent.right
             anchors.rightMargin: 12
@@ -338,7 +391,7 @@ Item {
                 height: parent.height
                 label: TranslationsModel.STR_HOME_NO + AppHomeModel.textUpdate
                 labelSize: ConstantModel.FONT_SIZE_39
-                labelColor: HomeThemeHelper.normalTextColor
+                labelColor: "#FFFFFF"
                 onBtnRelease: root.dismiss()
             }
         }
@@ -358,7 +411,7 @@ Item {
                 height: parent.height
                 label: TranslationsModel.STR_HOME_OK + AppHomeModel.textUpdate
                 labelSize: ConstantModel.FONT_SIZE_39
-                labelColor: HomeThemeHelper.normalTextColor
+                labelColor: "#FFFFFF"
                 onBtnRelease: root.dismiss()
             }
         }

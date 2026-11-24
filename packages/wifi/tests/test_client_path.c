@@ -82,15 +82,18 @@ int main(void)
     set_net_ssid(0, "Franci_wifi");
     set_net_psk(0, "fixture-key-123");
 
-    /* 1. Client mode: no network blocks - ConnMan owns the networks there, and a
-     * local block made it answer with Interface.Disconnect. */
+    /* 1. Client mode writes the configured networks.  This unit masks
+     * supplicantmanager, so ConnMan has no wifi technology and never adds a
+     * network; an empty file made our own supplicant associate and immediately
+     * drop the link ("No network configuration found for the current AP").
+     * We are the association owner here, so the profile has to be in this file. */
     unlink(WPA_CONF);
     ensure_wpa_conf();
     char conf[4096] = "";
     read_file(WPA_CONF, conf, sizeof(conf));
     assert(strstr(conf, "ctrl_interface="));
-    assert(!strstr(conf, "network={"));
-    /* AP mode keeps the profile: there ConnMan must keep out. */
+    assert(strstr(conf, "network={") && strstr(conf, "Franci_wifi"));
+    /* AP mode keeps the same profile: there ConnMan must keep out. */
     g_cfg.mode = MODE_CARPLAY;
     ensure_wpa_conf();
     read_file(WPA_CONF, conf, sizeof(conf));
@@ -137,6 +140,6 @@ int main(void)
     assert(!strcmp(band_label(2427), "2.4") && band_channel(2427) == 4);
     assert(!strcmp(band_label(2412), "2.4") && band_channel(2412) == 1);
     assert(!strcmp(band_label(0), "?") && band_channel(0) == 0);
-    printf("PASS: client path (no network blocks, radio truth, no-technology, static fallback, scan bands)\n");
+    printf("PASS: client path (network blocks in client mode, radio truth, no-technology, static fallback, scan bands)\n");
     return 0;
 }

@@ -1,0 +1,5 @@
+base_sha256=4d9c5795a6d46d0f280367280366c4456488ccf9c48bcd83defb691ee1cd6f58
+result_sha256=d95ef73a63d73c38416c852ec17ea1cf58dec7cbb8464d5b711bb63317035e95
+base=work/rootfs/app/share/AppHomeScreen/qml_eco3.0/component/common/Q_ThemeImage.qml
+artifact=packages/wifi/artifacts/qml/AppHomeScreen/qml_eco3.0/component/common/Q_ThemeImage.qml
+sub=component/common/Q_ThemeImage.qml

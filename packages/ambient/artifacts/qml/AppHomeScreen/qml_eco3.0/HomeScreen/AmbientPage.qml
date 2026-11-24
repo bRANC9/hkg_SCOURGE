@@ -57,6 +57,27 @@ Item {
     }
     // Close only when home_seq changes after open (see the parse site).
 
+    // Factory-style back chevron, same place and weight as the stock Notifications
+    // page: thin "<" top-left, closes the overlay exactly like Exit.
+    Item {
+        objectName: "ambientBack"
+        z: 10
+        // Launcher header slot: the page starts at MENU_BAR_Y, so y:-40 puts the
+        // chevron on the header row the stock Notifications page uses.
+        x: 132
+        y: -40
+        width: 52
+        height: 52
+        Rectangle { anchors.fill: parent; radius: 26; color: bm2.pressed ? "#3A3A3A" : "transparent" }
+        QText {
+            anchors.centerIn: parent
+            text: "\u2039"
+            font.pixelSize: 54
+            textBold: true
+            color: "#D8D8D8"
+        }
+        MouseArea { id: bm2; anchors.fill: parent; preventStealing: true; onClicked: root.close() }
+    }
     // ---- daemon state --------------------------------------------------
     property bool serviceOk: false
     property bool power: true
@@ -235,7 +256,7 @@ Item {
         // ---- header ----------------------------------------------------
         Image {
             id: headerIcon
-            x: 0
+            x: 62
             y: 8
             width: 52
             height: 52
@@ -244,7 +265,7 @@ Item {
         }
 
         QText {
-            x: 64
+            x: 124
             y: 2
             text: "Ambience"
             font.pixelSize: ConstantModel.FONT_SIZE_42
@@ -337,6 +358,57 @@ Item {
                 }
             }
         }
+
+
+          // On-demand factory-ambient capture: baseline, then an audible
+          // "toggle now" beep, then the 15 s window.  Result: hw_capture.txt.
+          Rectangle {
+              id: captureButton
+              property bool pressActive: false
+              anchors.right: homeButton.left
+              anchors.rightMargin: 12
+              y: 8
+              width: 190
+              height: 50
+              radius: 25
+              color: captureMouse.pressed && pressActive
+                     ? ConstantModel.GENERAL_COLOR_FOCUS_GREY
+                     : ConstantModel.GENERAL_COLOR_BUTTON_GREY
+              border.color: ConstantModel.GENERAL_COLOR_FOCUS_GREY
+              border.width: 1
+              opacity: root.serviceOk ? 1.0 : 0.55
+
+              QText {
+                  anchors.centerIn: parent
+                  text: "Capture frames"
+                  font.pixelSize: ConstantModel.FONT_SIZE_21
+                  color: HomeThemeHelper.normalTextColor
+              }
+
+              MouseArea {
+                  id: captureMouse
+                  anchors.fill: parent
+                  onPressed: captureButton.pressActive = true
+                  onPositionChanged: if (!containsMouse) captureButton.pressActive = false
+                  onReleased: {
+                      if (captureButton.pressActive && root.serviceOk) {
+                          root.post("/capture")
+                          root.captureTimer.restart()
+                      }
+                      captureButton.pressActive = false
+                  }
+              }
+          }
+
+          // Beep exactly when the capture enters the "toggle a light" window.
+          Timer {
+              id: captureTimer
+              interval: 8000
+              repeat: false
+              onTriggered: {
+                  QML_Handler.qmlSendEvtKey(HMIEVENTS.EVT_HOME_SOUND_BEEP_PLAY)
+              }
+          }
 
         // ---- effects ---------------------------------------------------
         Rectangle {

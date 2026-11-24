@@ -1,0 +1,5 @@
+base_sha256=6ae95ac5a8b0361e3eb22c8f4f147277efd8f79da21fa6cdf03750cb250e7b9a
+result_sha256=c8463c609fc8252477aad8b3650ef7dab52b599d7674e89096bcb5a6ab07b094
+base=work/rootfs/app/share/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.qml
+artifact=packages/tweaks/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.battery_tile.qml
+sub=HomeScreen/QHMI_HomeScreenMain_Advanced.battery_tile.qml

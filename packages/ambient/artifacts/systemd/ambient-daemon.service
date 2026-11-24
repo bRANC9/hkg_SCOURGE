@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=Ambience ambient-lighting daemon (Ioniq 5 Gen5W)
+# Dbuslaunch.service writes the session-bus address the Home/Star monitor
+# needs, so start after it when both are in the boot transaction.
+After=multi-user.target Dbuslaunch.service
+ConditionPathExists=/rw_data/ambient/ambient_daemon
+
+[Service]
+Type=simple
+Environment=PATH=/bin:/sbin:/usr/bin:/usr/sbin
+# No SmackProcessLabel: the vendor 4.1.27 kernel only supports
+# /proc/attr/current and systemd reports status 237/SMACK_PROCESS_LABEL.
+# The daemon (and its helpers) carry the installer's SMACK64EXEC label.
+# Output defaults to the file backend so a fresh install lights nothing
+# until the driver picks a controller in the app.
+# No --status-file: this daemon build does not take that flag, so the unit was
+# restart-looping with "unknown argument: --status-file" (exit 2) and the app
+# never had a backend (2026-11-24 ambient_daemon.txt).  With --state-dir it
+# writes <state-dir>/status.json itself.
+ExecStart=/bin/sh -c 'exec /rw_data/ambient/ambient_daemon --port 8094 --state-dir /rw_data/ambient --micom-send /rw_data/ambient/bin/micom-send --dbus-monitor /rw_data/ambient/bin/dbus-monitor >> /rw_data/ambient/daemon.log 2>&1'
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

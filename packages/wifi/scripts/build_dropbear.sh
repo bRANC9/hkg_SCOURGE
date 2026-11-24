@@ -56,7 +56,9 @@ else
             cd /src
             [ -d dropbear ] || git clone --depth 1 --branch '"$DROPBEAR_VERSION"' https://github.com/mkj/dropbear
             cd dropbear
-            ./configure CC=musl-gcc --disable-zlib --disable-syslog --disable-harden LDFLAGS=-static
+            # The container gcc is already a musl toolchain; musl-gcc does not
+            # exist in the image, so the configure line uses plain gcc there.
+            ./configure CC=gcc --disable-zlib --disable-syslog --disable-harden LDFLAGS=-static
             make PROGRAMS="dropbear dbclient dropbearkey scp" MULTI=1 STATIC=1
             file dropbearmulti
         '

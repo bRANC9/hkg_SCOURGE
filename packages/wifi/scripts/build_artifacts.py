@@ -446,44 +446,59 @@ def patch_theme_image() -> None:
     write(os.path.join(OUT, "component", "common", "Q_ThemeImage.qml"), text)
 
 
+def _have(*parts) -> bool:
+    """True when that base file exists; missing bases are skipped, not fatal.
+
+    The base matrix is per combination of installed packages, and only the ones
+    somebody has dumped or synthesised exist locally. Failing here meant the
+    wifi package could not be built at all on a stock unit - it now ships the
+    variants it has a base for and the installer says
+    "page installed, tile skipped" for the rest.
+    """
+    return os.path.isfile(os.path.join(BASE, *parts))
+
+
+def _write(out_dir, name, func, *src):
+    if not _have(*src):
+        print(f"skip {name}: no base {os.path.join(*src)}", file=sys.stderr)
+        return
+    write(os.path.join(OUT, out_dir, name), func(os.path.join(BASE, *src)))
+
+
 def main() -> int:
     patch_theme_image()
 
     # Advanced variants.
-    write(os.path.join(OUT, "HomeScreen", "QHMI_HomeScreenMain_Advanced.wifi.qml"),
-          patch_advanced(os.path.join(BASE, "stock", "HomeScreen", "QHMI_HomeScreenMain_Advanced.qml")))
-    write(os.path.join(OUT, "HomeScreen", "QHMI_HomeScreenMain_Advanced.hello_wifi.qml"),
-          patch_advanced(os.path.join(BASE, "hello", "HomeScreen", "QHMI_HomeScreenMain_Advanced.qml")))
-    write(os.path.join(OUT, "HomeScreen", "QHMI_HomeScreenMain_Advanced.battery_wifi.qml"),
-          patch_advanced(os.path.join(BASE, "battery", "HomeScreen", "QHMI_HomeScreenMain_Advanced.qml")))
-    write(os.path.join(OUT, "HomeScreen", "QHMI_HomeScreenMain_Advanced.hello_battery_wifi.qml"),
-          patch_advanced(os.path.join(BASE, "battery_hello", "HomeScreen", "QHMI_HomeScreenMain_Advanced.hello.qml")))
-    write(os.path.join(OUT, "HomeScreen", "QHMI_HomeScreenMain_Advanced.battery_tile_wifi.qml"),
-          patch_advanced(os.path.join(BASE, "battery_tile", "HomeScreen", "QHMI_HomeScreenMain_Advanced.qml")))
-    write(os.path.join(OUT, "HomeScreen", "QHMI_HomeScreenMain_Advanced.hello_battery_tile_wifi.qml"),
-          patch_advanced(os.path.join(BASE, "battery_tile_hello", "HomeScreen", "QHMI_HomeScreenMain_Advanced.qml")))
+    A = "QHMI_HomeScreenMain_Advanced"
+    _write("HomeScreen", f"{A}.wifi.qml", patch_advanced,
+           "stock", "HomeScreen", f"{A}.qml")
+    _write("HomeScreen", f"{A}.hello_wifi.qml", patch_advanced,
+           "hello", "HomeScreen", f"{A}.qml")
+    _write("HomeScreen", f"{A}.battery_wifi.qml", patch_advanced,
+           "battery", "HomeScreen", f"{A}.qml")
+    _write("HomeScreen", f"{A}.hello_battery_wifi.qml", patch_advanced,
+           "battery_hello", "HomeScreen", f"{A}.hello.qml")
+    _write("HomeScreen", f"{A}.battery_tile_wifi.qml", patch_advanced,
+           "battery_tile", "HomeScreen", f"{A}.qml")
+    _write("HomeScreen", f"{A}.hello_battery_tile_wifi.qml", patch_advanced,
+           "battery_tile_hello", "HomeScreen", f"{A}.qml")
 
     # Wide variants.
-    write(os.path.join(OUT, "HomeScreen", "QHMI_HomeScreenMain_Wide.wifi.qml"),
-          patch_wide(os.path.join(BASE, "stock", "HomeScreen", "QHMI_HomeScreenMain_Wide.qml")))
-    write(os.path.join(OUT, "HomeScreen", "QHMI_HomeScreenMain_Wide.hello_wifi.qml"),
-          patch_wide(os.path.join(BASE, "hello", "HomeScreen", "QHMI_HomeScreenMain_Wide.qml")))
+    W = "QHMI_HomeScreenMain_Wide"
+    _write("HomeScreen", f"{W}.wifi.qml", patch_wide, "stock", "HomeScreen", f"{W}.qml")
+    _write("HomeScreen", f"{W}.hello_wifi.qml", patch_wide, "hello", "HomeScreen", f"{W}.qml")
 
     # All Menus + Setup variants.
-    write(os.path.join(OUT, "HomeScreen", "Screen_HomeScreen_AllMenus.wifi.qml"),
-          patch_all_or_setup(os.path.join(BASE, "stock", "HomeScreen", "Screen_HomeScreen_AllMenus.qml")))
-    write(os.path.join(OUT, "HomeScreen", "Screen_HomeScreen_AllMenus.hello_wifi.qml"),
-          patch_all_or_setup(os.path.join(BASE, "hello", "HomeScreen", "Screen_HomeScreen_AllMenus.qml")))
-    write(os.path.join(OUT, "HomeScreen", "Screen_HomeScreen_Submenu_Setup.wifi.qml"),
-          patch_all_or_setup(os.path.join(BASE, "stock", "HomeScreen", "Screen_HomeScreen_Submenu_Setup.qml")))
-    write(os.path.join(OUT, "HomeScreen", "Screen_HomeScreen_Submenu_Setup.hello_wifi.qml"),
-          patch_all_or_setup(os.path.join(BASE, "hello", "HomeScreen", "Screen_HomeScreen_Submenu_Setup.qml")))
+    for screen in ("Screen_HomeScreen_AllMenus", "Screen_HomeScreen_Submenu_Setup"):
+        _write("HomeScreen", f"{screen}.wifi.qml", patch_all_or_setup,
+               "stock", "HomeScreen", f"{screen}.qml")
+        _write("HomeScreen", f"{screen}.hello_wifi.qml", patch_all_or_setup,
+               "hello", "HomeScreen", f"{screen}.qml")
 
     # Shared menu list variants.
-    write(os.path.join(OUT, "component", "QCustomizedMenuListAllowEmpty.wifi.qml"),
-          patch_custom(os.path.join(BASE, "stock", "component", "QCustomizedMenuListAllowEmpty.qml")))
-    write(os.path.join(OUT, "component", "QCustomizedMenuListAllowEmpty.hello_wifi.qml"),
-          patch_custom(os.path.join(BASE, "hello", "component", "QCustomizedMenuListAllowEmpty.qml")))
+    C = "QCustomizedMenuListAllowEmpty"
+    _write("component", f"{C}.wifi.qml", patch_custom, "stock", "component", f"{C}.qml")
+    _write("component", f"{C}.hello_wifi.qml", patch_custom, "hello", "component", f"{C}.qml")
 
     print("artifacts written to", OUT)
     return 0

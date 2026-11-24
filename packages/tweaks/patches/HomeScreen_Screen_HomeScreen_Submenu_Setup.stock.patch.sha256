@@ -1,0 +1,5 @@
+base_sha256=11e8a2ca0f015a1b2bc010c6a0f1ce5617a97e88f614d3ef25723dcf9dd4fb2c
+result_sha256=67a11023c7a1f1652b8ed7df48859339be2b0607734c3b2b8b2079f4af6e05c2
+base=work/rootfs/app/share/AppHomeScreen/qml_eco3.0/HomeScreen/Screen_HomeScreen_Submenu_Setup.qml
+artifact=packages/tweaks/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/Screen_HomeScreen_Submenu_Setup.stock.qml
+sub=HomeScreen/Screen_HomeScreen_Submenu_Setup.stock.qml

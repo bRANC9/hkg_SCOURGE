@@ -57,6 +57,36 @@ Item {
         requested = false
     }
 
+    // Factory-style back chevron, same place and weight as the stock Notifications
+    // page: thin "<" top-left, closes the overlay exactly like Exit.
+    Item {
+        objectName: "batteryBack"
+        z: 10
+        // Launcher header slot: the page starts at MENU_BAR_Y, so y:-40 puts the
+        // chevron on the header row the stock Notifications page uses.
+        x: 132
+        y: -40
+        width: 52
+        height: 56
+        Rectangle {
+            anchors.fill: parent
+            radius: 26
+            color: bm.pressed ? "#3A3A3A" : "transparent"
+        }
+        QText {
+            anchors.centerIn: parent
+            text: "\u2039"
+            font.pixelSize: 54
+            textBold: true
+            color: "#D8D8D8"
+        }
+        MouseArea {
+            id: bm
+            anchors.fill: parent
+            preventStealing: true
+            onClicked: root.close()
+        }
+    }
     // The steering-wheel Home/Star key is delivered through the app manager
     // (session-bus NotifyRequestHomeScreen / custom_key_value), never as a
     // QML key event.  The daemon tails the session bus and bumps home_seq;
@@ -105,6 +135,8 @@ Item {
     property int doorOpt: 0
     property bool doorBusy: false
     property string doorMessage: ""
+    // Charging controls: the daemon answers 501 until the factory frame is known.
+    property string chargeHint: "factory frame not decoded yet"
     property string doorBlockReason: ""
     property string lastTx: ""
     property string daemonVer: ""
@@ -582,6 +614,16 @@ Item {
         onWheel: wheel.accepted = true
     }
 
+    // Fixed dark theme, same as the WiFi/Tweaks pages: the vendor theme helper
+    // flips the page between light and dark (and another change touched
+    // Q_ThemeImage.qml), which left white text on white and the new back chevron
+    // invisible.  A fixed background plus fixed colours cannot drift.
+    Rectangle {
+        anchors.fill: parent
+        z: 0
+        color: "#0E0E0E"
+    }
+
     Item {
         id: content
         z: 2
@@ -591,7 +633,7 @@ Item {
 
         Image {
             id: headerIcon
-            x: 0
+            x: 62
             y: 8
             width: 56
             height: 56
@@ -601,12 +643,12 @@ Item {
 
         QText {
             id: title
-            x: 74
+            x: 134
             y: 2
             text: "Battery"
             font.pixelSize: ConstantModel.FONT_SIZE_42
             textBold: true
-            color: HomeThemeHelper.normalTextColor
+            color: "#FFFFFF"
         }
 
         QText {
@@ -620,7 +662,7 @@ Item {
                        + "   \u00b7   BMS " + raw
             }
             font.pixelSize: ConstantModel.FONT_SIZE_21
-            color: HomeThemeHelper.normalTextColor
+            color: "#FFFFFF"
         }
 
         Rectangle {
@@ -643,7 +685,7 @@ Item {
                 anchors.centerIn: parent
                 text: root.dumpBusy ? "Saving\u2026" : "Save logs"
                 font.pixelSize: ConstantModel.FONT_SIZE_21
-                color: HomeThemeHelper.normalTextColor
+                color: "#FFFFFF"
             }
 
             MouseArea {
@@ -678,7 +720,7 @@ Item {
                 anchors.centerIn: parent
                 text: "\u2039  Home"
                 font.pixelSize: ConstantModel.FONT_SIZE_24
-                color: HomeThemeHelper.normalTextColor
+                color: "#FFFFFF"
             }
 
             MouseArea {
@@ -713,7 +755,7 @@ Item {
                 y: 14
                 text: "Battery temperature"
                 font.pixelSize: ConstantModel.FONT_SIZE_27
-                color: HomeThemeHelper.normalTextColor
+                color: "#FFFFFF"
             }
             QText {
                 x: 28
@@ -721,14 +763,14 @@ Item {
                 text: root.battValid ? (root.battMin + "\u00b0C") : "--"
                 font.pixelSize: ConstantModel.FONT_SIZE_44
                 textBold: true
-                color: root.tempHigh ? "#FFB300" : HomeThemeHelper.normalTextColor
+                color: root.tempHigh ? "#FFB300" : "#FFFFFF"
             }
             QText {
                 x: 28
                 y: 104
                 text: "Minimum cell temperature"
                 font.pixelSize: ConstantModel.FONT_SIZE_21
-                color: HomeThemeHelper.disableTextColor
+                color: "#9A9A9A"
             }
         }
 
@@ -748,7 +790,7 @@ Item {
                 y: 14
                 text: "Exterior temperature"
                 font.pixelSize: ConstantModel.FONT_SIZE_27
-                color: HomeThemeHelper.normalTextColor
+                color: "#FFFFFF"
             }
             QText {
                 x: 28
@@ -756,14 +798,14 @@ Item {
                 text: root.outsideTemp
                 font.pixelSize: ConstantModel.FONT_SIZE_44
                 textBold: true
-                color: HomeThemeHelper.normalTextColor
+                color: "#FFFFFF"
             }
             QText {
                 x: 28
                 y: 104
                 text: "From the climate controller"
                 font.pixelSize: ConstantModel.FONT_SIZE_21
-                color: HomeThemeHelper.disableTextColor
+                color: "#9A9A9A"
             }
         }
 
@@ -783,7 +825,7 @@ Item {
                 y: 14
                 text: "State of charge"
                 font.pixelSize: ConstantModel.FONT_SIZE_27
-                color: HomeThemeHelper.normalTextColor
+                color: "#FFFFFF"
             }
             QText {
                 x: 28
@@ -791,7 +833,7 @@ Item {
                 text: root.socValid ? root.socPct.toFixed(1) + "%" : "--"
                 font.pixelSize: ConstantModel.FONT_SIZE_42
                 textBold: true
-                color: root.socLow ? "#FFB300" : HomeThemeHelper.normalTextColor
+                color: root.socLow ? "#FFB300" : "#FFFFFF"
             }
 
             Rectangle {
@@ -814,7 +856,7 @@ Item {
                 y: 110
                 text: "Preheating needs at least 20%"
                 font.pixelSize: ConstantModel.FONT_SIZE_18
-                color: HomeThemeHelper.disableTextColor
+                color: "#9A9A9A"
             }
         }
 
@@ -834,7 +876,7 @@ Item {
                 y: 14
                 text: "Battery heater"
                 font.pixelSize: ConstantModel.FONT_SIZE_27
-                color: HomeThemeHelper.normalTextColor
+                color: "#FFFFFF"
             }
             QText {
                 x: 28
@@ -844,14 +886,14 @@ Item {
                 font.pixelSize: ConstantModel.FONT_SIZE_42
                 textBold: true
                 color: root.heaterState === "timeout" ? "#E53935"
-                     : (root.preheatOn ? "#4CAF50" : HomeThemeHelper.normalTextColor)
+                     : (root.preheatOn ? "#4CAF50" : "#FFFFFF")
             }
             QText {
                 x: 28
                 y: 104
                 text: root.heaterSubText()
                 font.pixelSize: ConstantModel.FONT_SIZE_21
-                color: HomeThemeHelper.disableTextColor
+                color: "#9A9A9A"
             }
         }
 
@@ -871,7 +913,7 @@ Item {
                 y: 8
                 text: "Engage battery preheater"
                 font.pixelSize: ConstantModel.FONT_SIZE_24
-                color: root.serviceOk ? HomeThemeHelper.normalTextColor : HomeThemeHelper.disableTextColor
+                color: root.serviceOk ? "#FFFFFF" : "#9A9A9A"
             }
             QText {
                 x: 28
@@ -917,7 +959,7 @@ Item {
                 y: 8
                 text: "Cluster display test"
                 font.pixelSize: ConstantModel.FONT_SIZE_24
-                color: root.serviceOk ? HomeThemeHelper.normalTextColor : HomeThemeHelper.disableTextColor
+                color: root.serviceOk ? "#FFFFFF" : "#9A9A9A"
             }
             QText {
                 x: 28
@@ -926,7 +968,7 @@ Item {
                       ? "0x4E8 + 0x4CC countdown \u2014 sending"
                       : "0x4E8 + 0x4CC countdown \u2014 test without preheat"
                 font.pixelSize: ConstantModel.FONT_SIZE_18
-                color: HomeThemeHelper.disableTextColor
+                color: "#9A9A9A"
             }
 
             BatterySwitch {
@@ -941,9 +983,10 @@ Item {
 
         // ---- charge door ---------------------------------------------
         Rectangle {
+            id: doorCard
             x: 0
             y: 456
-            width: 1180
+            width: 580
             height: 64
             radius: 14
             color: ConstantModel.GENERAL_COLOR_BUTTON_GREY
@@ -951,29 +994,119 @@ Item {
             border.width: root.doorOpen ? 2 : 1
 
             QText {
-                x: 28
+                x: 24
+                width: 380
                 y: 6
                 text: "Open/Close charge door"
                 font.pixelSize: ConstantModel.FONT_SIZE_24
-                color: root.doorAllowed ? HomeThemeHelper.normalTextColor : HomeThemeHelper.disableTextColor
+                color: root.doorAllowed ? "#FFFFFF" : "#9A9A9A"
+                elide: Text.ElideRight
             }
             QText {
-                x: 28
+                x: 24
+                width: 380
                 y: 34
                 text: root.doorSubText()
                 font.pixelSize: ConstantModel.FONT_SIZE_18
-                color: root.doorAllowed ? HomeThemeHelper.normalTextColor : "#FFB300"
+                color: root.doorAllowed ? "#FFFFFF" : "#FFB300"
+                elide: Text.ElideRight
             }
 
             BatterySwitch {
+                id: doorSwitch
                 anchors.right: parent.right
-                anchors.rightMargin: 24
+                anchors.rightMargin: 20
                 anchors.verticalCenter: parent.verticalCenter
                 checked: root.doorOpen
                 switchEnabled: root.doorAllowed && !root.doorBusy
                 onToggled: root.toggleDoor()
             }
         }
+
+        // ---- charging start/stop -------------------------------------
+        // Its own control, like the preheater and the cluster test: the door is one
+        // action, charging is another.  Not a switch: the daemon does not know the
+        // factory charge frame yet, so the buttons report the reason instead of
+        // pretending; when the TmsRemoteApp EVRemoteCharge* pair is decoded only the
+        // daemon endpoint has to change.
+        Rectangle {
+            id: chargeCard
+            x: 600
+            y: 456
+            width: 580
+            height: 64
+            radius: 14
+            color: ConstantModel.GENERAL_COLOR_BUTTON_GREY
+            border.color: ConstantModel.GENERAL_COLOR_FOCUS_GREY
+            border.width: 1
+
+            QText {
+                x: 24
+                width: 290
+                y: 6
+                text: "Charging start / stop"
+                font.pixelSize: ConstantModel.FONT_SIZE_24
+                color: "#FFFFFF"
+                elide: Text.ElideRight
+            }
+            QText {
+                x: 24
+                width: 290
+                y: 34
+                text: root.chargeHint
+                font.pixelSize: ConstantModel.FONT_SIZE_18
+                color: "#FFB300"
+                elide: Text.ElideRight
+            }
+
+            Row {
+                anchors.right: parent.right
+                anchors.rightMargin: 20
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 8
+                QText {
+                    width: 96
+                    height: 40
+                    text: "Start"
+                    font.pixelSize: 20
+                    color: "#FFFFFF"
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    Rectangle {
+                        anchors.fill: parent
+                        z: -1
+                        radius: 8
+                        color: chargeStartArea.pressed ? "#3A3A3A" : "#232323"
+                    }
+                    MouseArea {
+                        id: chargeStartArea
+                        anchors.fill: parent
+                        onClicked: { root.post("/charge/start"); root.chargeHint = "charge start requested" }
+                    }
+                }
+                QText {
+                    width: 96
+                    height: 40
+                    text: "Stop"
+                    font.pixelSize: 20
+                    color: "#FFFFFF"
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    Rectangle {
+                        anchors.fill: parent
+                        z: -1
+                        radius: 8
+                        color: chargeStopArea.pressed ? "#3A3A3A" : "#232323"
+                    }
+                    MouseArea {
+                        id: chargeStopArea
+                        anchors.fill: parent
+                        onClicked: { root.post("/charge/stop"); root.chargeHint = "charge stop requested" }
+                    }
+                }
+            }
+        }
+
 
         // ---- warnings ------------------------------------------------
         Column {
@@ -1053,7 +1186,7 @@ Item {
             }
             font.pixelSize: ConstantModel.FONT_SIZE_15
             color: (root.smackOk && root.dumpState !== "error")
-                   ? HomeThemeHelper.disableTextColor : "#FFB300"
+                   ? "#9A9A9A" : "#FFB300"
         }
     }
 

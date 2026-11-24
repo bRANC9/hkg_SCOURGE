@@ -172,6 +172,19 @@ Item {
     property string carplayBtaddr: ""
     property string carplayId: ""
     property string daemonMessage: ""
+    // ---- live activity popup -------------------------------------------
+    // The daemon reports what it is doing through /status (message + applying),
+    // so the page can show it as an interactive "what is happening now" card
+    // instead of making the user hunt for the log console.
+    property bool applying: false
+    property bool showActivity: false
+    property bool activitySeen: false
+    // The popup defaults to the INSTALLER log: after a stick run the question is
+    // "where did it stop", and the daemon runtime log rarely answers it.
+    // "root" is the bundle log the loader writes while it runs: that is the live
+    // one, the stage logs are per package.
+    property string logSource: "root"
+    property var logSources: ["root", "install", "battery", "tweaks", "stages", "daemon", "wpa"]
     property bool btDiscoverable: false
     property bool btPairable: false
     property string pairMessage: ""
@@ -185,6 +198,18 @@ Item {
 
     readonly property string daemonBase: "http://127.0.0.1:8090"
     readonly property bool carplayMode: mode === "carplay"
+    // The AP is started through the same tether path as CarPlay, so the mode alone
+    // cannot tell them apart - the advertised SSID can.  Without this the Status
+    // readout said "CarPlay AP" for an Android Auto access point.
+    // The daemon reports which access point this is (aa_ap); the SSID is only a
+    // fallback for an older daemon, so the AA button no longer lit up CarPlay state
+    // and vice versa (2026-11-24).
+    // Green only while the Android Auto access point is actually up, not merely
+    // configured: the old SSID fallback matched the default SCOURGE-AA profile and
+    // kept the button lit forever (2026-11-24).
+    readonly property bool aaApActive: statusAaAp && apActive
+    property bool statusAaAp: false
+                                       || (carplayMode && carplaySsid === "SCOURGE-AA")
 
     function applyStatus(d) {
         // A parseable status file is not proof the daemon is alive: require a
@@ -201,6 +226,7 @@ Item {
         signalLevel = d.signal
         apActive = d.ap_active
         apSsid = d.ap_ssid
+        statusAaAp = d.aa_ap === true
         apClients = d.ap_clients
         carplayReady = d.carplay_ready
         carplayIe = d.carplay_ie === true
@@ -226,6 +252,8 @@ Item {
         carplayBtaddr = d.carplay_btaddr
         carplayId = d.carplay_id
         daemonMessage = d.message
+        if (d.applying !== undefined) applying = d.applying === true
+        // Show the card when work starts; keep it if the user opened it.
         btDiscoverable = d.bt_discoverable === true
         btPairable = d.bt_pairable === true
         pairMessage = d.pair_message || ""
@@ -344,25 +372,64 @@ Item {
         xhr.send()
     }
 
+    function logUrl() {
+        if (logSource === "install") return "/install?source=wifi"
+        if (logSource === "stages") return "/install?source=stages"
+        if (logSource === "battery" || logSource === "tweaks" || logSource === "root")
+            return "/install?source=" + logSource
+        return "/logs?source=" + logSource
+    }
+    function cycleLogSource() {
+        var i = logSources.indexOf(logSource)
+        logSource = logSources[(i + 1) % logSources.length]
+        refreshConsole()
+    }
+
+    // Installer logs are plain files, and the loader writes /rw_data/combo/combo.log
+    // from its first second - long before any of our daemons runs.  Reading them
+    // through file:// is what makes the popup live from the very beginning.
+    function fileLogPath() {
+        if (logSource === "root") return "file:///rw_data/combo/combo.log"
+        if (logSource === "stages") return "file:///rw_data/combo/stages.log"
+        if (logSource === "battery") return "file:///rw_data/battery/install.log"
+        if (logSource === "tweaks") return "file:///rw_data/tweaks/install.log"
+        if (logSource === "install") return "file:///rw_data/wifi/install.log"
+        return ""
+    }
+
+    function showLines(t) {
+        // Keep the tail: QML cannot seek, so a big log is sliced after the read.
+        if (t.length > 200000) t = t.substring(t.length - 200000)
+        var lines = t.split("\n")
+        var start = Math.max(0, lines.length - 40)
+        consoleModel.clear()
+        for (var i = start; i < lines.length; i++) {
+            if (lines[i].length > 0)
+                consoleModel.append({ line: lines[i] })
+        }
+    }
+
     function refreshConsole() {
+        // The activity popup renders the same model, so refreshing must not depend
+        // on the right-hand console being open.
         if (!showConsole) return
+        var filePath = ""
         var xhr = new XMLHttpRequest()
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
-            if (xhr.status !== 200) return
+            if (xhr.status !== 200 && xhr.status !== 0) return
+            var body = xhr.responseText || ""
+            if (filePath !== "") { showLines(body); return }
             try {
-                var d = JSON.parse(xhr.responseText)
-                var t = d.log || ""
-                var lines = t.split("\n")
-                var start = Math.max(0, lines.length - 40)
-                consoleModel.clear()
-                for (var i = start; i < lines.length; i++) {
-                    if (lines[i].length > 0)
-                        consoleModel.append({ line: lines[i] })
-                }
+                var d = JSON.parse(body)
+                showLines(d.log || "")
             } catch (e) {}
         }
-        xhr.open("GET", daemonBase + "/logs?source=" + consoleSource)
+        if (filePath !== "") {
+            xhr.open("GET", filePath)
+        } else {
+            xhr.open("GET", daemonBase + "/logs?source=" + consoleSource)
+        }
         xhr.send()
     }
 
@@ -395,7 +462,8 @@ Item {
 
     function modeText() {
         if (!wlanOn || mode === "off") return "Off"
-        return mode === "carplay" ? "CarPlay AP" : "Client"
+        if (mode === "carplay") return aaApActive ? "Android Auto AP" : "CarPlay AP"
+        return "Client"
     }
 
     function ipText() {
@@ -434,7 +502,9 @@ Item {
         running: true
         repeat: true
         triggeredOnStart: true
-        onTriggered: root.refresh()
+        // The AA tab reads its state from /aa/check, and it must be current while the
+        // tab is open - otherwise the panel shows the values of the last press.
+        onTriggered: { root.refresh(); if (root.currentTab === 4) root.aaCheck() }
     }
 
     // ---- background ---------------------------------------------------
@@ -486,6 +556,38 @@ Item {
         }
     }
 
+    // Factory-style back chevron.  The stock Notifications page puts a thin "<"
+    // in the top-left of its own header; our overlays are full-page, so they draw
+    // their own and it does exactly what Exit does.
+    Item {
+        objectName: "wifiBack"
+        z: 10
+        // Sit in the launcher header band (the page starts at MENU_BAR_Y on screen),
+        // in the same slot the stock Notifications page puts its back chevron, so it
+        // reads as the header control instead of a second button below it.
+        x: 132
+        y: -40
+        width: 52
+        height: 56
+        Rectangle {
+            anchors.fill: parent
+            radius: 26
+            color: backMouse.pressed ? "#3A3A3A" : "transparent"
+        }
+        QText {
+            anchors.centerIn: parent
+            text: "\u2039"
+            font.pixelSize: 54
+            textBold: true
+            color: "#D8D8D8"
+        }
+        MouseArea {
+            id: backMouse
+            anchors.fill: parent
+            preventStealing: true
+            onClicked: root.close()
+        }
+    }
     Item {
         id: content
         z: 2
@@ -495,7 +597,7 @@ Item {
 
         Image {
             id: headerIcon
-            x: 0
+            x: 62
             y: 24
             width: 56
             height: 56
@@ -505,7 +607,7 @@ Item {
 
         QText {
             id: title
-            x: 76
+            x: 136
             y: 18
             text: "WiFi"
             font.pixelSize: 46
@@ -515,7 +617,7 @@ Item {
 
         QText {
             id: subtitle
-            x: 78
+            x: 138
             y: 72
             text: "WLAN \u00b7 Wireless CarPlay \u00b7 SSH"
             font.pixelSize: 22
@@ -529,32 +631,38 @@ Item {
             y: 110
             spacing: 10
 
+            // Tab widths are sized so the five tabs AND the page-level action row
+            // fit on one line: at 190/170 the fifth tab sat exactly under Import
+            // USB, which is why "Android Auto" was unreachable on the car.
+            // Widths: the five tabs end at 780 (130+130+180+110+190 + 4*10), the
+            // page action row starts at 800 and ends at 1136 of the 1180 panel, so
+            // nothing can slide under anything else.
             WifiButton {
-                width: 190
+                width: 130
                 label: "Status"
                 selected: root.currentTab === 0
                 onClicked: root.currentTab = 0
             }
             WifiButton {
-                width: 190
+                width: 130
                 label: "Client"
                 selected: root.currentTab === 1
                 onClicked: root.currentTab = 1
             }
             WifiButton {
-                width: 210
+                width: 180
                 label: "CarPlay AP"
                 selected: root.currentTab === 2
                 onClicked: root.currentTab = 2
             }
             WifiButton {
-                width: 190
+                width: 110
                 label: "SSH"
                 selected: root.currentTab === 3
                 onClicked: root.currentTab = 3
             }
             WifiButton {
-                width: 170
+                width: 190
                 label: "Android Auto"
                 selected: root.currentTab === 4
                 onClicked: { root.currentTab = 4; root.aaCheck() }
@@ -566,27 +674,28 @@ Item {
         // that used to live in Status/Client/CarPlay AP were the same POST.
         Row {
             x: 800
-            y: 104
-            spacing: 10
+            y: 110
+            spacing: 8
 
             WifiButton {
-                width: 190
+                width: 104
                 label: "Import USB"
                 buttonEnabled: root.serviceOk
                 onClicked: root.post("/import")
             }
             WifiButton {
-                width: 170
+                width: 96
                 label: "Save logs"
                 buttonEnabled: root.serviceOk
                 onClicked: root.post("/logs/dump")
             }
             WifiButton {
-                width: 190
+                width: 120
                 label: root.showKeypad ? "Hide keypad" : "Manual join"
                 buttonEnabled: true
                 onClicked: root.showKeypad = !root.showKeypad
             }
+
         }
 
         // ================= STATUS ====================================
@@ -699,9 +808,27 @@ Item {
                 WifiButton {
                     width: 240
                     label: "CarPlay AP"
-                    selected: root.mode === "carplay" && root.wlanOn
+                    // Mutually exclusive with the Android Auto button: both are the
+                    // same "carplay" role on the radio, so keying this off mode alone
+                    // lit CarPlay and AA at once and read as two active modes
+                    // (2026-11-24 screenshot).
+                    selected: root.mode === "carplay" && root.wlanOn && !root.aaApActive
                     buttonEnabled: root.serviceOk
                     onClicked: root.post("/mode?value=carplay")
+                }
+                // Same radio path, AA preset: the status surface used to offer only
+                // Off/Client/CarPlay, so there was no way to start the AA AP there.
+                WifiButton {
+                    width: 240
+                    label: root.aaApActive ? "Android Auto (on)" : "Android Auto"
+                    selected: root.aaApActive
+                    buttonEnabled: true
+                    onClicked: {
+                        // aa=1: serve Android Auto, not CarPlay, so the car does not
+                        // announce CarPlay when the driver pressed Android Auto.
+                        root.post("/ap/start?ssid=SCOURGE-AA&channel=36&aa=1")
+                        root.aaCheck()
+                    }
                 }
                 // Import USB / Save logs live in the shared action row above.
             }
@@ -1045,6 +1172,9 @@ Item {
           property int aaChannel: 0
           property bool aaBluez: false
           property bool aaVbtd: false
+          // The vendor vbtd exports the SDP/RFCOMM entry points AA needs, so
+          // "no BlueZ" alone is not a blocker (docs/18 §5c).
+          property bool aaVendorApi: false
 
           function aaCheck() {
               get("/aa/check", function(xhr) {
@@ -1058,7 +1188,11 @@ Item {
                           aaBand = d.ap.band || 0
                           aaChannel = d.ap.channel || 0
                       }
-                      if (d.bt) { aaBluez = d.bt.bluez === true; aaVbtd = d.bt.vbtd === true }
+                      if (d.bt) {
+                aaBluez = d.bt.bluez === true
+                aaVbtd = d.bt.vbtd === true
+                aaVendorApi = d.bt.sdp_api === true && d.bt.rfcomm_api === true
+            }
                       aaVerdict = d.verdict || ""
                   } catch (e) {}
               })
@@ -1720,72 +1854,60 @@ Item {
             height: 450
             visible: root.currentTab === 4
 
+            // Same visual language as the CarPlay tab: two cards, the access-point
+            // facts on the left, the transport state on the right, then the action
+            // row, the daemon message and a full-width verdict card.
             Rectangle {
                 x: 0
                 y: 0
                 width: 570
-                height: 250
+                height: 240
                 radius: 14
                 color: "#1B1B1B"
                 border.color: "#333333"
                 border.width: 1
 
                 QText {
-                    x: 24; y: 18
+                    x: 24
+                    y: 16
                     text: "Android Auto access point"
-                    font.pixelSize: 24; color: "#FFFFFF"
+                    font.pixelSize: 28
+                    color: "#9A9A9A"
                 }
                 QText {
-                    x: 24; y: 60
+                    x: 24
+                    y: 58
+                    text: root.aaApSsid !== "" ? root.aaApSsid : root.carplaySsid
+                    font.pixelSize: 40
+                    textBold: true
+                    color: "#FFFFFF"
                     width: 520
-                    text: "Ready: " + (root.aaApReady ? "yes" : "no")
-                          + "   ·   SSID: " + (root.aaApSsid !== "" ? root.aaApSsid : "—")
-                    font.pixelSize: 21; color: "#B0B0B0"
                     elide: Text.ElideRight
                 }
                 QText {
-                    x: 24; y: 92
-                    width: 520
-                    text: "Band: " + (root.aaBand === 2 ? "5 GHz" : root.aaBand === 1 ? "2.4 GHz" : "—")
-                          + "   ·   ch " + (root.aaChannel > 0 ? root.aaChannel : "—")
-                          + "   ·   IP: " + (root.aaApIp !== "" ? root.aaApIp : "—")
-                    font.pixelSize: 21; color: "#B0B0B0"
-                    elide: Text.ElideRight
+                    x: 24
+                    y: 112
+                    text: "Key: " + (root.carplayPsk ? root.carplayPsk : "(not set)")
+                    font.pixelSize: 22
+                    color: "#7A7A7A"
                 }
                 QText {
-                    x: 24; y: 124
-                    width: 520
-                    text: "Bluetooth: BlueZ " + (root.aaBluez ? "present" : "absent")
-                          + "   ·   vendor vbtd " + (root.aaVbtd ? "running" : "stopped")
+                    x: 24
+                    y: 142
+                    text: "Band: " + root.bandText(root.carplayBand) +
+                          "   \u00b7   Channel: " + root.carplayChannel +
+                          "   \u00b7   Max clients: " + (root.apActive ? root.apClients : 2)
                     font.pixelSize: 21
-                    color: root.aaBluez ? "#8BC34A" : "#FFB300"
-                    elide: Text.ElideRight
+                    color: "#B0B0B0"
                 }
-
-                Row {
-                    x: 24; y: 164
-                    spacing: 10
-                    WifiButton {
-                        width: 200
-                        label: root.aaApReady ? "Restart AA AP" : "Start AA AP"
-                        buttonEnabled: root.serviceOk
-                        onClicked: {
-                            root.post("/ap/start?ssid=SCOURGE-AA&channel=36")
-                            root.aaCheck()
-                        }
-                    }
-                    WifiButton {
-                        width: 140
-                        label: "Stop AP"
-                        buttonEnabled: root.serviceOk
-                        onClicked: { root.post("/carplay/stop"); root.aaCheck() }
-                    }
-                    WifiButton {
-                        width: 140
-                        label: "Re-check"
-                        buttonEnabled: true
-                        onClicked: root.aaCheck()
-                    }
+                QText {
+                    x: 24
+                    y: 176
+                    text: (root.apActive ? "AP running" : "AP stopped")
+                          + (root.aaApIp !== "" ? "   \u00b7   " + root.aaApIp : "")
+                    font.pixelSize: 24
+                    textBold: true
+                    color: root.apActive ? "#4CAF50" : "#FFB300"
                 }
             }
 
@@ -1793,46 +1915,159 @@ Item {
                 x: 610
                 y: 0
                 width: 570
-                height: 250
+                height: 240
                 radius: 14
                 color: "#1B1B1B"
                 border.color: "#333333"
                 border.width: 1
 
                 QText {
-                    x: 24; y: 18
-                    text: "Verdict"
-                    font.pixelSize: 24; color: "#FFFFFF"
+                    x: 24
+                    y: 16
+                    text: "Android Auto transport"
+                    font.pixelSize: 28
+                    color: "#9A9A9A"
                 }
                 QText {
-                    x: 24; y: 60
+                    x: 24
+                    y: 50
+                    text: "Bluetooth: " + (root.aaVbtd ? "vendor stack (vbtd) running"
+                                                     : "no BT stack seen")
+                    font.pixelSize: 24
+                    color: root.aaVbtd ? "#4CAF50" : "#FFFFFF"
+                }
+                QText {
+                    x: 24
+                    y: 82
+                    // BlueZ is absent on this unit by design; the vendor stack is the
+                    // API AA needs, so this line reports what is actually usable.
+                    text: "SDP/RFCOMM API: " + (root.aaVendorApi ? "present" : "absent")
+                          + (root.aaBluez ? "   \u00b7   BlueZ present" : "")
+                    font.pixelSize: 24
+                    color: root.aaVendorApi ? "#4CAF50" : "#FFFFFF"
+                }
+                QText {
+                    x: 24
+                    y: 114
+                    text: "Ready: " + (!root.observationsFresh ? "checking"
+                                      : (root.aaApReady ? "yes" : "no"))
+                    font.pixelSize: 24
+                    color: root.aaApReady ? "#4CAF50" : "#FFB300"
+                }
+                QText {
+                    x: 24
+                    y: 148
                     width: 520
-                    text: root.aaVerdict !== "" ? root.aaVerdict : "press Re-check"
-                    font.pixelSize: 21
-                    color: root.aaVerdict === "aa-wireless-possible" ? "#8BC34A"
-                           : root.aaVerdict === "" ? "#7A7A7A" : "#FFB300"
+                    text: "Start AA AP, then pair the phone over Bluetooth: the car "
+                          + "appears in Android Auto > Connection settings."
+                    font.pixelSize: 19
+                    color: "#B0B0B0"
                     wrapMode: Text.WordWrap
                 }
                 QText {
-                    x: 24; y: 120
+                    x: 24
+                    y: 196
                     width: 520
-                    text: "Without BlueZ the RFCOMM bootstrap cannot run on this unit, so "
-                          + "wireless AA needs the bridge board (docs/18 route B). The AP "
-                          + "half is still the useful test: it is what the phone would join."
-                    font.pixelSize: 19; color: "#7A7A7A"
+                    text: "The CarPlay advertisement stays off in this mode, so the "
+                          + "car does not answer as a CarPlay device."
+                    font.pixelSize: 17
+                    color: "#8FD18F"
+                    wrapMode: Text.WordWrap
+                }
+            }
+
+            Row {
+                x: 0
+                y: 252
+                spacing: 10
+
+                WifiButton {
+                    width: 230
+                    label: root.aaApReady ? "Restart AA AP" : "Start AA AP"
+                    // Not gated on serviceOk: a grey, dead-looking button was exactly
+                    // what the car showed, and the POST reports the real error through
+                    // the daemon message line below.
+                    buttonEnabled: true
+                    onClicked: {
+                        root.post("/ap/start?ssid=SCOURGE-AA&channel=36&aa=1")
+                        root.aaCheck()
+                    }
+                }
+                WifiButton {
+                    width: 170
+                    label: "Stop AP"
+                    buttonEnabled: true
+                    onClicked: { root.post("/carplay/stop"); root.aaCheck() }
+                }
+                WifiButton {
+                    width: 150
+                    label: "Re-check"
+                    buttonEnabled: true
+                    onClicked: root.aaCheck()
+                }
+            }
+
+            QText {
+                x: 0
+                y: 308
+                width: 1180
+                text: root.daemonMessage !== "" ? root.daemonMessage : "no daemon message"
+                font.pixelSize: 18
+                color: root.daemonMessage !== "" ? "#FFB300" : "#7A7A7A"
+                elide: Text.ElideRight
+            }
+
+            Rectangle {
+                x: 0
+                y: 326
+                width: 1180
+                height: 124
+                radius: 14
+                color: "#1B1B1B"
+                border.color: "#333333"
+                border.width: 1
+
+                QText {
+                    x: 24
+                    y: 8
+                    text: "Wireless Android Auto verdict"
+                    font.pixelSize: 24
+                    color: "#9A9A9A"
+                }
+                QText {
+                    x: 24
+                    y: 40
+                    width: 700
+                    text: root.aaVerdict !== "" ? root.aaVerdict : "press Re-check"
+                    font.pixelSize: 24
+                    textBold: true
+                    color: root.aaVerdict === "aa-wireless-possible" ? "#4CAF50"
+                           : root.aaVerdict === "" ? "#7A7A7A" : "#FFB300"
+                    elide: Text.ElideRight
+                }
+                QText {
+                    x: 24
+                    y: 78
+                    width: 1120
+                    text: "The AP half is what the phone joins; the Bluetooth bootstrap "
+                          + "needs an RFCOMM channel with our UUID. If the vendor stack "
+                          + "exposes no way to register one, bridge board (docs/18 route B)."
+                    font.pixelSize: 19
+                    color: "#7A7A7A"
                     wrapMode: Text.WordWrap
                 }
             }
         }
 
+
     ListModel { id: consoleModel }
 
     Timer {
+        // The right-hand console refreshes while it is open.
         interval: 2000
         running: root.visible && root.showConsole
         repeat: true
         triggeredOnStart: true
         onTriggered: root.refreshConsole()
     }
-
 }

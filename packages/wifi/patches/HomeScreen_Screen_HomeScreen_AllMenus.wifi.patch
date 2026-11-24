@@ -1,0 +1,29 @@
+--- a/Screen_HomeScreen_AllMenus.qml
++++ b/Screen_HomeScreen_AllMenus.qml
+@@ -1,3 +1,4 @@
++// WIFI_PAYLOAD_260128
+ import QtQuick 2.3
+ import QtGraphicalEffects 1.0
+ import HMIEVENTS 1.0
+@@ -138,6 +139,7 @@
+             onMenuItemClicked: {
+                 QML_Handler.qmlSendEvtKey(HMIEVENTS.EVT_MAIN_LIST_ITEMCLICKED, _itemID)
+             }
++            onWifiClicked: wifiPage.open()
+             onSwapMenuItem: {
+                 AppHomeModel.editAllMenus(1, dragItemIdx, dropItemIdx) // 1 is the enum for All Menu list, refer to AppHome_Enum::E_LIST_ALL_MENUS
+             }
+@@ -341,4 +343,13 @@
+             menuList.updateHistoryPage()
+         }
+     }
++    WifiPage {
++        id: wifiPage
++        x: 0
++        y: ConstantModel.MENU_BAR_Y
++        width: AppHomeModel.isWideScr ? DEVICE_WIDTH : ConstantModel.SCREEN_WIDTH
++        height: DEVICE_HEIGHT - ConstantModel.MENU_BAR_Y
++        z: 2000
++    }
++
+ }

@@ -7,19 +7,37 @@
 io_root_options() (
     # Vendor BusyBox awk aborts on this path (V6 car readback). Keep the
     # safety-critical mount parser in ash; never interpret parser failure as ro.
+    #
+    # Fields are split with \`set --\` on the shell's own whitespace handling, not
+    # with IFS=' ' read: the kernel pads some rows with runs of spaces, and a
+    # single-space IFS turned the mount point into the filesystem name. That is
+    # what "cannot identify root mount" was on the car - the table was fine.
     [ -r "$IO_MOUNTS" ] || { log "ERROR: cannot read mount table: $IO_MOUNTS"; return 1; }
     found=""
-    while IFS=' ' read -r device point filesystem options rest; do
-        [ "$point" = "$IO_ROOT" ] || continue
-        [ -z "$found" ] || { log "ERROR: ambiguous root mount: $IO_ROOT"; return 1; }
+    seen=""
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        # shellcheck disable=SC2086  # intentional word splitting of the row
+        set -- $line
+        [ "$#" -ge 4 ] || continue
+        [ "$2" = "$IO_ROOT" ] || continue
+        options=$4
+        [ -z "$seen" ] || { log "ERROR: ambiguous root mount: $IO_ROOT"; return 1; }
+        seen=1
         case ",$options," in
             *,ro,*) case ",$options," in *,rw,*) log "ERROR: conflicting root mount options"; return 1;; esac ;;
             *,rw,*) : ;;
-            *) log "ERROR: malformed root mount options: $IO_ROOT"; return 1 ;;
+            *) log "ERROR: malformed root mount options ($IO_ROOT): $options"; return 1 ;;
         esac
         found=$options
     done < "$IO_MOUNTS"
-    [ -n "$found" ] || { log "ERROR: root mount not found: $IO_ROOT"; return 1; }
+    [ -n "$found" ] || {
+        log "ERROR: root mount not found: $IO_ROOT (table head below)"
+        # Bounded: enough to see the shape, never a 200-line dump into a log
+        # that the owner has to read on a phone.
+        head -n 8 "$IO_MOUNTS" 2>/dev/null | while IFS= read -r row; do log "  mounts| $row"; done
+        return 1
+    }
     printf '%s\n' "$found"
 )
 

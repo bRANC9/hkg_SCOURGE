@@ -130,6 +130,11 @@ typedef struct {
 
     char imported_from[256];
     bool imported;
+    /* The access point serves Android Auto, not CarPlay: the radio role is the
+     * same, but the CarPlay advertisement (IE, iAP2, mDNS, VBT) must stay off or
+     * the car announces CarPlay while the user asked for Android Auto
+     * (2026-11-24: "a carplay módot indítja az Android autó is"). */
+    bool aa_ap;
 } config_t;
 
 static config_t g_cfg;
@@ -208,6 +213,13 @@ typedef struct {
 } observation_t;
 static observation_t g_observed;
 static int64_t g_observed_ms;
+
+static bool dhcp_acquire(void);
+/* Set when the D-Bus attempt failed: the vendor supplicant manager owns
+ * fi.w1.wpa_supplicant1, so -u makes wpa_supplicant die at startup with
+ * "dbus: Could not request service name: already registered / Failed to
+ * initialize wpa_supplicant" and the control socket never appears. */
+static bool g_supp_no_dbus;
 
 static void home_monitor_tick(void);
 static void apply_reap(void);
@@ -778,22 +790,38 @@ static void iface_down(void)
 static bool wlan_ip(char *out, size_t n)
 {
     char buf[2048];
-    if (sh_out(buf, sizeof(buf), "ifconfig wlan0 2>/dev/null") != 0)
-        return false;
-
-    const char *p = strstr(buf, "inet addr:");
-    if (p) {
-        p += 10;
-    } else {
-        p = strstr(buf, "inet ");
-        if (!p) return false;
-        p += 5;
+    /* Vendor images differ: `ifconfig` may be missing or print a shape this
+     * parser does not know, and when it does the daemon believed it had no
+     * address while wlan0 really had one (2026-11-23: 192.168.1.60/24 on the
+     * interface, ip="" in status.json, so the dropbear gate never fired and SSH
+     * stayed down run after run).  iproute2 is present on the unit. */
+    if (sh_out(buf, sizeof(buf), "ifconfig wlan0 2>/dev/null") == 0) {
+        const char *p = strstr(buf, "inet addr:");
+        if (p) {
+            p += 10;
+        } else {
+            p = strstr(buf, "inet ");
+            if (p) p += 5;
+        }
+        if (p) {
+            size_t i = 0;
+            while (*p && *p != ' ' && *p != '\n' && *p != '\t' && *p != '/' && i + 1 < n)
+                out[i++] = *p++;
+            out[i] = 0;
+            if (i > 0 && strcmp(out, "127.0.0.1") != 0 && strcmp(out, "0.0.0.0") != 0)
+                return true;
+        }
     }
-    size_t i = 0;
-    while (*p && *p != ' ' && *p != '\n' && *p != '\t' && i + 1 < n)
-        out[i++] = *p++;
-    out[i] = 0;
-    return i > 0 && strcmp(out, "127.0.0.1") != 0 && strcmp(out, "0.0.0.0") != 0;
+    if (sh_out(buf, sizeof(buf), "ip -4 -o addr show dev wlan0 2>/dev/null") != 0)
+        return false;
+    const char *q = strstr(buf, " inet ");
+    if (!q) return false;
+    q += 6;
+    size_t j = 0;
+    while (*q && *q != ' ' && *q != '\n' && *q != '\t' && *q != '/' && j + 1 < n)
+        out[j++] = *q++;
+    out[j] = 0;
+    return j > 0 && strcmp(out, "127.0.0.1") != 0 && strcmp(out, "0.0.0.0") != 0;
 }
 
 static void wlan_link(char *ssid, size_t ssid_n, int *signal)
@@ -1057,6 +1085,8 @@ static void config_load(void)
                 g_cfg.ssh_port = SSH_DEFAULT_PORT;
         } else if (!strcmp(k, "config_version")) {
             has_version = true;
+        } else if (!strcmp(k, "aa_ap")) {
+            g_cfg.aa_ap = atoi(v) != 0;
         } else if (!strcmp(k, "imported")) {
             g_cfg.imported = atoi(v) != 0;
         } else if (!strcmp(k, "imported_from")) {
@@ -1115,6 +1145,7 @@ static bool config_save(void)
              "carplay_btaddr=%s\n"
              "ssh=%d\n"
              "ssh_port=%d\n"
+             "aa_ap=%d\n"
              "imported=%d\n"
              "imported_from=%s\n",
              g_cfg.mode == MODE_CLIENT ? "client" :
@@ -1131,6 +1162,7 @@ static bool config_save(void)
              g_cfg.cp_manufacturer, g_cfg.cp_model, g_cfg.cp_name,
              g_cfg.cp_id, g_cfg.cp_btaddr,
              g_cfg.ssh_enabled ? 1 : 0, g_cfg.ssh_port,
+             g_cfg.aa_ap ? 1 : 0,
              g_cfg.imported ? 1 : 0, g_cfg.imported_from);
 
     mkdir(APP_DIR, 0755);
@@ -1525,10 +1557,16 @@ static void ensure_wpa_conf(void)
                      "ap_scan=1\n");
     if (n < 0) return;
     at = (size_t)n;
-    /* Client mode: ConnMan owns the networks (it adds them through D-Bus), so the
-     * file must NOT carry network blocks - a network here fights its service and
-     * ConnMan answers with Interface.Disconnect. */
-    for (int i = 0; g_cfg.mode != MODE_CLIENT && i < net_total() && at + 320 < sizeof(want); i++) {
+    /* Every mode writes the network blocks.  The old rule ("ConnMan owns the
+     * networks in client mode, so the file must stay empty") is what kept WiFi
+     * dead on this unit: supplicantmanager is masked, so ConnMan has no wifi
+     * technology and never adds a network.  The supplicant then associated and
+     * immediately dropped the link itself - unit live log 2026-11-23:
+     *   wlan0: State: INACTIVE -> ASSOCIATED
+     *   wlan0: No network configuration found for the current AP
+     *   wlan0: Request to deauthenticate - bssid=... reason=3 locally_generated=1
+     * We are the association owner here, so the blocks have to be in this file. */
+    for (int i = 0; i < net_total() && at + 320 < sizeof(want); i++) {
         const char *ssid = net_ssid(i);
         const char *psk = net_psk(i);
         if (!ssid[0]) continue;
@@ -1563,7 +1601,7 @@ static void ensure_wpa_conf(void)
         write_file_atomic(WPA_CONF, want, 0600);
 }
 
-static bool start_wpa_supplicant_args(const char *driver)
+static bool supplicant_try(const char *driver)
 {
     ensure_wpa_conf();
     sh("mkdir -p /var/run/wpa_supplicant /run/wpa_supplicant 2>/dev/null");
@@ -1604,7 +1642,7 @@ static bool start_wpa_supplicant_args(const char *driver)
          * lease (there is no udhcpc/dhcpcd/dhclient on it at all).  In AP mode we
          * keep the D-Bus handle out: ConnMan would otherwise grab the AP
          * interface and disconnect it. */
-        const char *dbusarg = (g_cfg.mode == MODE_CLIENT) ? "-u" : NULL;
+        const char *dbusarg = (g_cfg.mode == MODE_CLIENT && !g_supp_no_dbus) ? "-u" : NULL;
         if (driver && *driver) {
             if (dbusarg)
                 execl("/usr/sbin/wpa_supplicant", "wpa_supplicant", dbusarg, drv,
@@ -1635,6 +1673,33 @@ static bool start_wpa_supplicant_args(const char *driver)
         usleep(250000);
     }
     return false;
+}
+
+/* Start the supplicant, and if the D-Bus name is already taken, start it again
+ * without -u.  Evidence (unit live log, 2026-11-23): every start died with
+ * "dbus: Could not request service name: already registered" /
+ * "Failed to initialize wpa_supplicant", so the control socket was never made,
+ * wpa_cli could not talk to it and the watchdog restarted it forever - the
+ * client never associated in a way that survived.  Without -u we keep the
+ * socket and take the lease ourselves (dhcp_acquire), which exists for exactly
+ * the case where ConnMan does not hand us one. */
+static bool start_wpa_supplicant_args(const char *driver)
+{
+    g_supp_no_dbus = false;
+    if (supplicant_try(driver)) return true;
+    char tail[600] = "";
+    log_tail(WPA_LOG, tail, sizeof(tail));
+    if (!strstr(tail, "already registered") &&
+        !strstr(tail, "Failed to initialize wpa_supplicant"))
+        return false;
+    log_msg("supplicant: the D-Bus name is already taken by another owner; retrying without -u "
+            "(ConnMan cannot drive this instance, our own DHCP takes the lease)");
+    stop_wpa_supplicant();
+    g_supp_no_dbus = true;
+    if (!supplicant_try(driver)) return false;
+    set_msg("client mode: supplicant runs without the D-Bus name");
+    dhcp_acquire();
+    return true;
 }
 
 static bool ensure_wpa_supplicant(void)
@@ -1948,7 +2013,13 @@ static void ap_probe(ap_probe_t *p)
     read_file(AP_STATION_IP, station_ip, sizeof(station_ip));
     p->state = AP_UNKNOWN;
     if (!p->conflict) {
-        if (p->role == 0 && p->tether == 0) p->state = AP_ABSENT;
+        /* tether == -1 means "no ConnMan wifi technology to ask" (this unit keeps
+         * supplicantmanager masked).  That is not evidence of an AP: with no AP
+         * role on the interface the AP is absent, and demanding tether == 0 here
+         * left state=AP_UNKNOWN for ever, which blocked every AP start with
+         * "station transition/absence not confirmed" (unit log 2026-11-23 19:39:59,
+         * state=0 role=0 tether=-1 ip=192.168.1.60). */
+        if (p->role == 0 && (p->tether == 0 || p->tether < 0)) p->state = AP_ABSENT;
         else if (p->role == 1) {
             p->state = AP_INTERFACE_UP;
             if (!strcmp(p->ssid, g_cfg.cp_ssid) && p->ip[0] && strcmp(p->ip, trim(station_ip)))
@@ -1999,7 +2070,15 @@ static bool ap_disable(bool explicit_stop)
     {
         ap_probe_t quick;
         ap_probe(&quick);
-        already_ok = (quick.state == AP_ABSENT && iw_type_managed());
+        /* ConnMan has no wifi technology on this unit, so the tether field is
+         * -1 (unknown) and the probe can never report AP_ABSENT - the teardown
+         * then stayed "unconfirmed" forever and the CarPlay AP was refused before
+         * it even started (unit live log 2026-11-23 17:28:46: state=0 role=0
+         * tether=-1).  Role 0 (no AP role) with a managed station and no
+         * configured AP ssid IS the absence proof. */
+        already_ok = (quick.state == AP_ABSENT ||
+                      (quick.role == 0 && quick.tether < 0 && !quick.configured_ssid[0])) &&
+                     iw_type_managed();
     }
     int rc = sh("connmanctl tether wifi off 2>/dev/null");
     /* Our own teardown: with no ConnMan wifi technology, `tether wifi off` is a
@@ -2020,7 +2099,8 @@ static bool ap_disable(bool explicit_stop)
         /* Proof of absence: the AP probe says gone, or the interface is a
          * managed station again.  ConnMan owns nothing here, so its tether
          * command cannot be the only evidence. */
-        if (p.state == AP_ABSENT || iw_type_managed()) {
+        if (p.state == AP_ABSENT || iw_type_managed() ||
+            (p.role == 0 && p.tether < 0 && !p.configured_ssid[0])) {
             if (++absent >= 2) return true;
         } else absent = 0;
         usleep(500000);
@@ -3376,11 +3456,45 @@ static bool client_connect(void)
         return false;
     }
     if (client_associated() && client_wait_ip(service, 2)) return true;
+    /* Radio truth first.  On this unit the supplicant completes the association
+     * (CTRL-EVENT-CONNECTED) while ConnMan has no service for our SSID, so asking
+     * ConnMan first burned the whole agent timeout (~30 s) and then reported
+     * "expected station association/address not ready" on a link that was up
+     * (2026-11-24 strong-repeat log).  The reverse order costs one iw call. */
+    if (client_associated() || iw_link_any_configured()) {
+        char ipr[64] = "";
+        if (dhcp_acquire() || (wlan_ip(ipr, sizeof(ipr)) && ipr[0])) {
+            if (!ipr[0]) wlan_ip(ipr, sizeof(ipr));
+            set_msg("client connected to '%s' (%s) via the radio (no ConnMan service)",
+                    net_ssid(g_client_net), ipr);
+            return true;
+        }
+    }
     bool agent_ok = client_connman_agent(service);
     /* A cached connection can finish between the precheck and connect reply
      * (including an AlreadyConnected error). Actual identity/DHCP readback is
      * authoritative, not the CLI's wording or exit code. */
     if (client_wait_ip(service, 40)) return true;
+
+    /* This unit lists a wifi technology in ConnMan but never a service for our
+     * SSID (supplicantmanager is masked), so the ConnMan path can never complete
+     * even when the radio IS associated.  Treating that as a failure made the
+     * daemon deauthenticate a working link (CTRL-EVENT-DISCONNECTED reason=3,
+     * locally_generated=1) and retry forever - the 2026-11-24 daemon.log loop
+     * "expected station association/address not ready".  Fall back to the
+     * radio-level truth and take the lease ourselves. */
+    if (client_associated() || iw_link_any_configured()) {
+        char ip[64] = "";
+        if (dhcp_acquire() || (wlan_ip(ip, sizeof(ip)) && ip[0])) {
+            if (!ip[0]) wlan_ip(ip, sizeof(ip));
+            set_msg("client connected to '%s' (%s) via the radio (no ConnMan service)",
+                    net_ssid(g_client_net), ip);
+            return true;
+        }
+        set_msg("client: associated to '%s' but no address (no DHCP client on this unit; set static_ip)",
+                net_ssid(g_client_net));
+        return false;
+    }
 
     char st[2048];
     sh_out(st, sizeof(st), "wpa_cli -p " WPA_CTRL_DIR " -i wlan0 status 2>/dev/null");
@@ -3747,7 +3861,18 @@ static bool ssh_start(void)
         ap_probe(&p);
         ready = p.state == AP_READY;
         if (ready) str_copy(ip, sizeof(ip), p.ip);
-    } else if (g_cfg.wlan_on && g_cfg.mode == MODE_CLIENT && client_associated() && wlan_ip(ip, sizeof(ip))) {
+    } else if (g_cfg.wlan_on && wlan_ip(ip, sizeof(ip))) {
+        /* Any IPv4 on wlan0 is enough to listen on, in every mode.  Keying this on
+         * MODE_CLIENT left SSH "Stopped" while the unit was in AP mode even though
+         * the interface had an address (2026-11-24 WiFi page screenshot: mode
+         * Android Auto AP, SSH Stopped).  The AP branch above still wins when the
+         * access point really reports an address. */
+        /* An IPv4 address on wlan0 is enough to start listening: requiring the
+         * association as well left SSH deferred on units where the link is up but
+         * the stack cannot report it (and a static address works without it).
+         * The log says which of the two was missing. */
+        if (!client_associated())
+            log_msg("ssh: wlan0 has %s but the association is unconfirmed", ip);
         /* An associated link with an IPv4 address IS the ready state here.
          * The old extra check demanded that ConnMan report the service ready -
          * but this unit has no wifi technology at all (supplicantmanager is
@@ -3910,7 +4035,13 @@ static bool apply_mode_work(bool pair)
     if (g_cfg.mode == MODE_CLIENT) {
         bt_pair_stop();
         if (!ensure_wifi_ready()) { ssh_stop(); return false; }
-        if (!ap_stop()) {
+        /* Only tear the AP down when one is actually up.  Calling ap_stop() on
+         * every retry killed the supplicant that also serves the client link, so
+         * each cycle started from zero: "watchdog: supplicant process gone;
+         * re-applying" then a fresh association that never finished (2026-11-24). */
+        ap_probe_t apnow;
+        ap_probe(&apnow);
+        if (apnow.state != AP_ABSENT && apnow.state != AP_UNKNOWN && !ap_stop()) {
             ssh_stop();
             set_msg("Client mode blocked: AP teardown not confirmed");
             return false;
@@ -3938,6 +4069,15 @@ static bool apply_mode_work(bool pair)
             return false;
         }
     }
+    /* Take wlan0 off the client before the AP can own it.  Skipping this left the
+     * client supplicant (and any lease) on the interface, so hostapd could not
+     * take it over and ap_start() died with "station transition/absence not
+     * confirmed" (2026-11-24).  Idempotent: re-applying while the AP is up just
+     * brings the interface back up and ap_start() binds again. */
+    client_disconnect();
+    stop_wpa_supplicant();
+    iface_down();
+    iface_up();
     if (pair)
         bt_pair_start();
     else if (g_pairing_stop_requested)
@@ -3960,13 +4100,22 @@ static bool apply_mode_work(bool pair)
         return false;
     }
     bool fw_ok = carplay_fw_open();
-    bool ie_ok = carplay_ie_on();
-    g_carplay_ie = ie_ok;
-    ensure_carplay_services();
-
-    bool vbt_changed = false;
-    bool vbt_ok = vbt_set_wireless_carplay(true, &vbt_changed);
-    restart_vbtd_if_needed(vbt_changed);
+    bool ie_ok = false;
+    bool services_ok = true;
+    bool vbt_ok = true;
+    if (g_cfg.aa_ap) {
+        /* Android Auto access point: same radio role, but no CarPlay
+         * advertisement.  Otherwise the car announced CarPlay (IE + iAP2 +
+         * mDNS + VBT) while the user pressed Android Auto (2026-11-24). */
+        carplay_ie_off();
+    } else {
+        ie_ok = carplay_ie_on();
+        g_carplay_ie = ie_ok;
+        ensure_carplay_services();
+        bool vbt_changed = false;
+        vbt_ok = vbt_set_wireless_carplay(true, &vbt_changed);
+        restart_vbtd_if_needed(vbt_changed);
+    }
 
     if (g_cfg.ssh_enabled) ssh_start();
     else ssh_stop();
@@ -3978,14 +4127,21 @@ static bool apply_mode_work(bool pair)
         set_msg("CarPlay AP lost readiness during service setup");
         return false;
     }
-    set_msg("CarPlay AP running (SSID=%s, %d MHz)%s",
-            p.ssid, channel_to_freq(),
-            ie_ok ? "" : " - CarPlay IE not set");
-    bool services_ok = sh("systemctl is-active --quiet carplay_iAP2.service 2>/dev/null") == 0 &&
+    if (g_cfg.aa_ap) {
+        set_msg("Android Auto AP running (SSID=%s, %d MHz)", p.ssid, channel_to_freq());
+    } else {
+        set_msg("CarPlay AP running (SSID=%s, %d MHz)%s",
+                p.ssid, channel_to_freq(),
+                ie_ok ? "" : " - CarPlay IE not set");
+        services_ok = sh("systemctl is-active --quiet carplay_iAP2.service 2>/dev/null") == 0 &&
                        sh("systemctl is-active --quiet carplay_mdnsd.service 2>/dev/null") == 0;
+    }
     if (!services_ok) set_msg("CarPlay AP up, but transport services are not ready");
     if (!vbt_ok) set_msg("CarPlay AP up, but wireless CarPlay configuration could not be confirmed");
     if (!fw_ok) set_msg("CarPlay AP up, but owned firewall rules could not be installed");
+    /* In AA mode the CarPlay half is deliberately off, so ie_ok/vbt_ok stay at
+     * their neutral values and only the AP itself has to be healthy. */
+    if (g_cfg.aa_ap) return services_ok && fw_ok;
     return ie_ok && services_ok && vbt_ok && fw_ok;
 }
 
@@ -4230,12 +4386,34 @@ static void watchdog(void)
      * reason to tear the stack down. */
     int64_t retry_ms = g_network_failed ? 60000 : 15000;
     bool stack_dead = !wpa_process_alive();
-    if ((stack_dead || oem_respawned) && now - g_last_mode_ms > retry_ms) {
-        log_msg("watchdog: supplicant process gone; re-applying (backoff=%ds)",
-                g_apply_failed ? 60 : 15);
+    /* A lease is proof the link works, whatever the supplicant process says:
+     * on 2026-11-23 the unit had 192.168.1.60 and SSH up while this watchdog
+     * restarted the supplicant every 15 s ("supplicant process gone"), which
+     * dropped the association and made SSH unusable in practice.  Hold the
+     * restart while an address exists; only rebuild the stack when the link is
+     * really gone (no address) or the OEM stack came back. */
+    char _ip[64] = "";
+    bool have_ip = wlan_ip(_ip, sizeof(_ip));
+    /* The vendor supplicantmanager takes the control socket away and kills our
+     * supplicant.  When it comes back while our link is up and addressed, remove IT
+     * instead of rebuilding our own stack: the old branch re-applied every 15 s and
+     * the link never settled (2026-11-24: "client connected ... SSH started", then
+     * "supplicant process gone" 20 s later, forever). */
+    if (oem_respawned && have_ip) {
+        log_msg("watchdog: vendor supplicantmanager respawned while %s is up; stopping it, keeping the link", _ip);
+        sh("systemctl stop supplicantmanager.path 2>/dev/null; systemctl stop supplicantmanager.service 2>/dev/null");
+        int _mpid = pid_by_executable("supplicantmanager");
+        if (_mpid > 0) kill_pid(_mpid);
+        oem_respawned = pid_by_executable("supplicantmanager") > 0;
+    }
+    if ((stack_dead || oem_respawned) && now - g_last_mode_ms > retry_ms && !(have_ip && !oem_respawned)) {
+        log_msg("watchdog: supplicant process gone; re-applying (backoff=%ds, ip=%s)",
+                g_apply_failed ? 60 : 15, have_ip ? _ip : "none");
         apply_mode(false);
         return;
     }
+    if (have_ip && stack_dead)
+        log_msg("watchdog: supplicant process gone but wlan0 holds %s; not restarting", _ip);
 
     /* Missing/stale observations are not evidence of a radio failure. */
     if (!g_observed_ms || now - g_observed_ms > 15000 || g_observed.gen != g_apply_gen) {
@@ -4449,6 +4627,7 @@ static void build_status(char *out, size_t n)
              "\"ip\":\"%s\","
              "\"ssid\":\"%s\","
              "\"signal\":%d,"
+             "\"aa_ap\":%s,"
              "\"ap_active\":%s,"
              "\"ap_interface\":%s,"
              "\"ap_state\":%d,"
@@ -4490,7 +4669,7 @@ static void build_status(char *out, size_t n)
              g_cfg.wlan_on ? "true" : "false",
              o->driver ? "true" : "false",
              radio_owner[0] ? radio_owner : "",
-             ip_e, ssid_e, o->signal,
+             ip_e, ssid_e, o->signal, g_cfg.aa_ap ? "true" : "false",
              o->ap_on ? "true" : "false", o->ap.role == 1 ? "true" : "false",
              o->ap.state, fresh ? o->ap.tether : -1, ap_e, o->clients,
              /* "ready" requires every wireless-CarPlay component, not just
@@ -5168,6 +5347,25 @@ static void http_handle(int fd)
             code = 202;
             snprintf(body, sizeof(body), "{\"ok\":true,\"scanning\":true,\"networks\":[]}\n");
         }
+    } else if (!strcmp(method, "GET") && !strcmp(path, "/install")) {
+        /* Installer logs, not the daemon log: after a stick run the first question
+         * is "where did it stop", and that answer is in the stage logs. */
+        char src[32] = "";
+        query_get(query, "source", src, sizeof(src));
+        const char *log_path = "/rw_data/wifi/install.log";
+        if (!strcmp(src, "battery")) log_path = "/rw_data/battery/install.log";
+        else if (!strcmp(src, "tweaks")) log_path = "/rw_data/tweaks/install.log";
+        else if (!strcmp(src, "root")) log_path = "/rw_data/combo/combo.log";
+        else if (!strcmp(src, "stages")) log_path = "/rw_data/combo/stages.log";
+        char log[16384] = "";
+        if (read_tail(log_path, log, sizeof(log)) < 0)
+            snprintf(log, sizeof(log), "(no %s install log at %s)",
+                     src[0] ? src : "wifi", log_path);
+        char esc[32768];
+        json_escape(esc, sizeof(esc), log);
+        snprintf(body, sizeof(body),
+                 "{\"ok\":true,\"source\":\"%s\",\"path\":\"%s\",\"log\":\"%s\"}\n",
+                 src[0] ? src : "wifi", log_path, esc);
     } else if (!strcmp(method, "GET") && !strcmp(path, "/logs")) {
         char src[64] = "";
         const char *log_path = LOG_PATH;
@@ -5245,9 +5443,30 @@ static void http_handle(int fd)
         bool bluezd = sh("command -v bluetoothd >/dev/null 2>&1") == 0;
         bool vbtd = sh("pidof vbtd >/dev/null 2>&1") == 0;
         bool ap_ready = ap.state == AP_READY && tether == 1;
-        const char *verdict = bluezd ? (ap_ready ? "aa-wireless-possible"
-                                                  : "aa-wireless-needs-ap")
-                                     : "aa-wireless-blocked-no-bluez-bridge-required";
+        /* BlueZ is not the gate: the vendor vbtd exports the SDP/RFCOMM entry
+         * points AA needs (docs/18 §5c).  The AA package measures that once at
+         * install time with a real ELF .dynsym walk (exported vs imported) and
+         * leaves /rw_data/aa/bt_api.json; reading it is correct where a byte scan
+         * is not, because an imported symbol name also lives in .dynstr.  No ELF
+         * parsing in the HTTP handler, no nm on the unit. */
+        static int sdp_api = -1, rfcomm_api = -1;
+        if (sdp_api < 0 || rfcomm_api < 0) {
+            char btjson[2048] = "";
+            sdp_api = 0;
+            rfcomm_api = 0;
+            if (read_file("/rw_data/aa/bt_api.json", btjson, sizeof(btjson)) > 0) {
+                sdp_api = strstr(btjson, "\"sdp_api\":true") != NULL ||
+                          strstr(btjson, "\"sdp_api\": true") != NULL;
+                rfcomm_api = strstr(btjson, "\"rfcomm_api\":true") != NULL ||
+                             strstr(btjson, "\"rfcomm_api\": true") != NULL;
+            } else {
+                log_msg("aa/check: /rw_data/aa/bt_api.json missing - vendor SDP/RFCOMM API unmeasured (the AA probe writes it at install time)");
+            }
+        }
+        const char *verdict = ap_ready ? (bluezd || sdp_api ? "aa-wireless-possible"
+                                                           : "aa-wireless-bt-vendor-api")
+                                     : "aa-wireless-needs-ap";
+        if (!vbtd && !sdp_api) verdict = "aa-wireless-bt-missing";
         char ssid_e[192], ip_e[128], cp_e[192];
         json_escape(ssid_e, sizeof(ssid_e), ap_ssid[0] ? ap_ssid : g_cfg.cp_ssid);
         json_escape(ip_e, sizeof(ip_e), ap.ip);
@@ -5261,8 +5480,9 @@ static void http_handle(int fd)
                  ip_e, g_cfg.cp_band, g_cfg.cp_channel, bluezd ? "true" : "false");
         used = strlen(body);
         snprintf(body + used, sizeof(body) - used,
-                 "\"vbtd\":%s},\"configured_ssid\":\"%s\",\"verdict\":\"%s\"}\n",
-                 vbtd ? "true" : "false", cp_e, verdict);
+                 "\"vbtd\":%s,\"sdp_api\":%s,\"rfcomm_api\":%s},\"configured_ssid\":\"%s\",\"verdict\":\"%s\"}\n",
+                 vbtd ? "true" : "false", sdp_api ? "true" : "false",
+                 rfcomm_api ? "true" : "false", cp_e, verdict);
     } else if (!strcmp(method, "POST") && !strcmp(path, "/client/pair")) {
         /* Manual join from the on-screen keyboard: the same validation the
          * import path applies, so a typo cannot store a key that can never
@@ -5333,6 +5553,13 @@ static void http_handle(int fd)
             g_cfg.cp_channel = atoi(ch);
             g_cfg.cp_band = g_cfg.cp_channel >= 32 ? 2 : 1;
         }
+        /* aa=1: this access point serves Android Auto, so the CarPlay
+         * advertisement stays off.  Without the flag the AA button lit CarPlay
+         * (same radio role) and phones joined as CarPlay (2026-11-24). */
+        {
+            char aa[8] = "";
+            g_cfg.aa_ap = query_get(query, "aa", aa, sizeof(aa)) && atoi(aa) != 0;
+        }
         if (!config_save()) {
             code = 500;
             snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"cannot persist AP profile\"}\n");
@@ -5363,6 +5590,7 @@ static void http_handle(int fd)
         snprintf(body, sizeof(body), "{\"ok\":true}\n");
     } else if (!strcmp(method, "POST") && !strcmp(path, "/carplay/start")) {
         g_cfg.mode = MODE_CARPLAY;
+        g_cfg.aa_ap = false;
         g_cfg.wlan_on = true;
         apply_mode(false);
         snprintf(body, sizeof(body), "{\"ok\":true}\n");

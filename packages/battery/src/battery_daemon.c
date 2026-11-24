@@ -2219,6 +2219,19 @@ static void http_handle(int fd)
         g_dash_override = false;
         snprintf(body, sizeof(body), "{\"ok\":true,\"dash\":false}\n");
     } else if (!strcmp(method, "POST") &&
+               (!strcmp(path, "/charge/start") || !strcmp(path, "/charge/stop"))) {
+        /* Charging start/stop is a micom frame like the charge door, but the
+         * factory IDs are not in this tree yet: the door frames came from the
+         * decompiled TmsRemoteApp (EVRemoteChargeDoorOpen/Close), and the charge
+         * pair has to be sourced the same way.  Until then the endpoint answers
+         * honestly instead of sending a guessed frame at the BMS. */
+        set_message("charge start/stop: the factory frame ID is not known yet");
+        request_error_dump("charge_frame_unknown");
+        code = 501;
+        snprintf(body, sizeof(body),
+                 "{\"ok\":false,\"error\":\"not implemented\",\"reason\":\"charge frame not known\","
+                 "\"need\":\"the TmsRemoteApp EVRemoteCharge* frame pair\"}\n");
+    } else if (!strcmp(method, "POST") &&
                (!strcmp(path, "/chargedoor/open") ||
                 !strcmp(path, "/chargedoor/close") ||
                 !strcmp(path, "/chargedoor/toggle"))) {

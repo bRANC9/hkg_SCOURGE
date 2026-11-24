@@ -17,6 +17,15 @@
 #   (no package list = interactive prompt)
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# Build the car daemons against musl when the cross toolchain is present: the host
+# glibc on a rolling distro is built for x86-64-v3, and a -static binary carries
+# those routines with it. The head unit is an Atom-class CPU and faults with SIGILL
+# (exit 132) on the first v3 instruction, which is what killed every daemon.
+MUSL_BIN="$HERE/../work/x86_64-linux-musl-cross/bin"
+if [ -x "$MUSL_BIN/musl-gcc" ]; then
+    PATH="$MUSL_BIN:$PATH"
+    export PATH
+fi
 TARGET="${1:?usage: compose.sh /path/to/stick [pkg,pkg,...]}"
 SELECTION="${2:-}"
 
@@ -28,7 +37,7 @@ trap '[ -z "${BATTERY_BUILD:-}" ] || rm -rf "$BATTERY_BUILD"' EXIT
 [ "$TARGET" != "/" ] || { echo "refusing to deploy to /" >&2; exit 1; }
 
 # --- package selection -----------------------------------------------------------
-AVAILABLE="battery wifi tweaks wifi1b migrate button-gate applauncher dmclient-gate"
+AVAILABLE="battery wifi tweaks ambient fake-engine wifi1b migrate button-gate applauncher dmclient-gate"
 DEFAULT_ORDER="battery wifi tweaks"
 WIP_STAGES="button-gate applauncher dmclient-gate"
 
@@ -37,6 +46,8 @@ if [ -z "$SELECTION" ]; then
     echo "  battery — Battery tile + preconditioning/charge-door daemon"
     echo "  wifi    — WiFi client / CarPlay AP / SSH (dropbear)"
     echo "  tweaks  — night-mode fixes, auto-DST, OTA block, disclaimer, Reboot app"
+    echo "  ambient — Ambience: ambient-light page/tile, reactive to music levels"
+    echo "  fake-engine — parked engine sound (own synthesised loop, 127.0.0.1:8095)"
     echo "  wifi1b  — separate CarPlay AP/client app beside WiFi (or standalone)"
     echo "  migrate — one-way: remove WiFi, keep Battery/Tweaks and rebase Wifi1b"
     echo "  [WIP, signatureless-update research — docs/08; VM-validated, car-pending]"
@@ -91,12 +102,15 @@ fi
 if [ "${SCOURGE_SKIP_BUILD:-0}" != "1" ]; then
     for pkg in $SELECTED; do
         case "$pkg" in
-        battery|wifi|tweaks|wifi1b|migrate)
+        battery|wifi|tweaks|wifi1b|migrate|ambient|fake-engine)
             echo "== building package: $pkg"
             if [ "$pkg" = battery ]; then
                 mkdir -p "$HERE/battery/out"
                 BATTERY_BUILD=$(mktemp -d "$HERE/battery/out/compose.XXXXXX")
                 sh "$HERE/battery/scripts/build_payload.sh" "$BATTERY_BUILD"
+            elif [ "$pkg" = ambient ] || [ "$pkg" = fake-engine ]; then
+                rm -rf "$HERE/$pkg/out/usb"
+                sh "$HERE/$pkg/scripts/build_payload.sh" "$HERE/$pkg/out/usb"
             else
                 sh "$HERE/$pkg/scripts/build_payload.sh"
             fi || {
@@ -118,7 +132,41 @@ mkdir -p "$STAGE/combo"
 # cleanup policy has one implementation and one integrity gate.
 cp "$HERE/common/install_io.sh" "$STAGE/combo/install_io.sh"
 cp "$HERE/common/runtime_cleanup.sh" "$STAGE/combo/runtime_cleanup.sh"
+cp "$HERE/common/boot_profile.sh" "$STAGE/combo/boot_profile.sh"
+cp "$HERE/common/perf_snapshot.sh" "$STAGE/combo/perf_snapshot.sh"
 RUNTIME_CLEANUP_MD5=$(md5sum "$STAGE/combo/runtime_cleanup.sh" | cut -d' ' -f1)
+# The helpers are also verified by their own hashes baked into the master: the
+# preflight manifest is a tiny file and this stick corrupts tiny files in combo/
+# (seen 2026-11-22, twice), which failed the run before a single stage started.
+INSTALL_IO_MD5=$(md5sum "$STAGE/combo/install_io.sh" | cut -d' ' -f1)
+
+# Minimal HTTP client: the unit has neither wget nor nc, so the installer could
+# not drive the daemon API (every api_walk step said "no wget/nc").  Static,
+# baseline ISA, next to the helpers it belongs with.
+if [ -f "$HERE/../tools/httpreq.c" ]; then
+    mkdir -p "$STAGE/combo/bin"
+    _cc=$(command -v musl-gcc 2>/dev/null || echo cc)
+    "$_cc" -O2 -static -march=x86-64 -o "$STAGE/combo/bin/httpreq" "$HERE/../tools/httpreq.c" 2>/dev/null || \
+        echo "warning: httpreq not built" >&2
+fi
+
+# Audible fallback assets.  The stick copies disappear (reformat, media player
+# cleanup) and then the loader has nothing to play: ship the two tones with the
+# bundle so the signal survives.  1 kHz for start, 1.4 kHz for done, 150 ms each.
+if command -v python3 >/dev/null 2>&1; then
+    python3 - "$STAGE/combo/bin" <<'PY'
+import struct, sys, math, os
+out = sys.argv[1]
+os.makedirs(out, exist_ok=True)
+def wav(path, freq, ms=150, rate=44100):
+    n = int(rate * ms / 1000)
+    data = b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * freq * i / rate))) for i in range(n))
+    hdr = b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16) + b"data" + struct.pack("<I", len(data))
+    open(path, "wb").write(hdr + data)
+wav(os.path.join(out, "beep-start.dat"), 1000)
+wav(os.path.join(out, "beep-done.dat"), 1400)
+PY
+fi
 if [ "$STANDALONE" = 1 ]; then
     printf 'standalone=1\nlayout=battery,tweaks,wifi1b\n' > "$STAGE/combo/standalone"
     STANDALONE_MD5=$(md5sum "$STAGE/combo/standalone" | cut -d' ' -f1)
@@ -151,6 +199,11 @@ stage_pkg() {
     mkdir -p "$dst/backup_current"
     cp -f "$src/manifest.md5" "$dst/"
     cp -f "$src/run_stuff.sh" "$dst/stage.sh"
+    # The per-package manifest never covered stage.sh, so a stage corrupted on
+    # the medium only showed up in the car as "cannot execute binary file" or a
+    # digest-gate refusal.  Add it here: the host-side copy -> remount -> verify
+    # then catches it before the stick leaves the desk (3rd corruption, 2026-11-23).
+    ( cd "$dst" && md5sum stage.sh >> manifest.md5 )
     cp -f "$src/run_stuff_restore.sh" "$dst/restore.sh" 2>/dev/null || true
     # Unchanged-stage skip data (see the master's stage_skippable) allows a
     # rebuilt bundle to leave already-installed packages untouched.
@@ -159,8 +212,22 @@ stage_pkg() {
     done
     (cd "$dst" && md5sum -c manifest.md5 >/dev/null) || exit 1
     if [ "$name" = tweaks ]; then
-        python3 "$HERE/common/check_layout.py" \
-            "$dst/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.battery_tile_wifi.qml"
+        # The layout check wanted one specific variant, which only exists when the
+        # base matrix was generated for that combination. Check the richest
+        # Advanced variant the payload actually carries; skip when it carries none.
+        # The check asserts the placement bindings of the Battery/WiFi/Tweaks
+        # tiles, so it only means anything on a variant that carries all three;
+        # a stock/wifi-only variant has no tweaksTile to check.
+        layout_sample=""
+        for prefer in battery_tile_wifi hello_battery_tile_wifi; do
+            cand="$dst/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/QHMI_HomeScreenMain_Advanced.$prefer.qml"
+            [ -f "$cand" ] && { layout_sample="$cand"; break; }
+        done
+        if [ -n "$layout_sample" ]; then
+            python3 "$HERE/common/check_layout.py" "$layout_sample"
+        else
+            echo "  (no Advanced variant in the tweaks payload - layout check skipped)"
+        fi
     fi
 }
 
@@ -190,7 +257,7 @@ stage_wip() {
 
 for pkg in $SELECTED; do
     case "$pkg" in
-    battery|wifi|tweaks|wifi1b|migrate) stage_pkg "$pkg" ;;
+    battery|wifi|tweaks|wifi1b|migrate|ambient|fake-engine) stage_pkg "$pkg" ;;
     *) stage_wip "$pkg" ;;
     esac
 done
@@ -205,6 +272,17 @@ ORDER_SPACES="$SELECTED"
 PAYLOAD_ID=$(cd "$STAGE" && find combo -type f \( -name manifest.md5 -o -name stage.sh -o -name restore.sh \
     -o -name runtime_cleanup.sh -o -name standalone \) -print0 \
     | LC_ALL=C sort -z | xargs -0 md5sum | md5sum | cut -c1-16)
+
+# Per-installer digests, baked into the master.  The per-package manifest
+# cannot protect an installer whose own bytes (or the manifest itself) came
+# back corrupt from the medium: on 2026-11-23 combo/battery/stage.sh arrived as
+# binary garbage after a sync that verified clean, and the run died inside the
+# install with "cannot execute binary file" (rc=126).  With the digests in this
+# file a corrupt installer is refused before it runs.
+STAGE_DIGESTS=$(cd "$STAGE" && for _f in combo/*/stage.sh combo/*/restore.sh; do
+    [ -f "$_f" ] || continue
+    printf '%s %s\n' "$(md5sum "$_f" | cut -d' ' -f1)" "$_f"
+done)
 
 cat > "$STAGE/run_stuff.sh" <<EOF
 #!/bin/sh
@@ -223,8 +301,13 @@ PAYLOAD_ID="$PAYLOAD_ID"
 BUNDLE_LAYOUT="$BUNDLE_LAYOUT"
 STOPS_WIFI="$STOPS_WIFI"
 RUNTIME_CLEANUP_MD5="$RUNTIME_CLEANUP_MD5"
+INSTALL_IO_MD5="$INSTALL_IO_MD5"
 STANDALONE_MARKER_MD5="$STANDALONE_MD5"
 STAGE_ORDER="$ORDER_SPACES"
+# <md5> <relative path>, one per installer: the bytes this master expects.
+STAGE_DIGESTS="
+$STAGE_DIGESTS
+"
 #
 # MODE (edit the line below; the md5 change makes the loader re-run it):
 #   all       every selected package, in dependency-safe order (default)
@@ -233,6 +316,12 @@ STAGE_ORDER="$ORDER_SPACES"
 MODE="\${SCOURGE_MODE:-all}"
 
 set -u
+
+# The unit runs a Korean locale, so the date command prints a Korean weekday and
+# tools emit localised text - that lands in combo.log, the probes and the UI
+# popup.  Pin the C locale so every log line is ASCII.  (No backticks here: this
+# text is inside an expanding heredoc.)
+export LC_ALL=C LANG=C LC_TIME=C 2>/dev/null || true
 PATH="\${COMBO_PATH:-/bin:/sbin:/usr/bin:/usr/sbin}"
 USB_DIR="\${USB_DIR:-\$(CDPATH= cd -- "\$(dirname "\$0")" && pwd)}"
 STICK_DIR="\${SCOURGE_STICK_DIR:-\$USB_DIR}"
@@ -253,19 +342,65 @@ RUNTIME_CLEANUP_SHA256="\$SHA256SUM_BIN"
 # reclaim bounded runtime log space before any other runtime write.  A full
 # /rw_data makes every later write fail.  Stale temps are handled later, only
 # after owned radios are verified stopped.
+# runtime_cleanup.sh is best effort (kill owned daemons, bound runtime logs). A
+# missing or corrupted copy must not stop the run: this stick corrupted the small
+# files under combo/ three times on 2026-11-22 and every attempt died right here,
+# before a single stage. Warn instead, and use no-ops that report "not alive" so
+# the radio bookkeeping stays conservative.
 CLEANUP_LIB="\$COMBO/runtime_cleanup.sh"
-if [ ! -f "\$CLEANUP_LIB" ] || [ -L "\$CLEANUP_LIB" ] || [ ! -r "\$CLEANUP_LIB" ]; then
-    printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=cleanup_helper_missing\n' \
-        > "\$USB_DIR/run_stuff_result.txt" 2>/dev/null || true
-    exit 1
+_cleanup_ok=0
+if [ -f "\$CLEANUP_LIB" ] && [ ! -L "\$CLEANUP_LIB" ] && [ -r "\$CLEANUP_LIB" ]; then
+    _cleanup_md5=\$("\$MD5SUM_BIN" "\$CLEANUP_LIB" 2>/dev/null | cut -d' ' -f1)
+    [ -n "\$_cleanup_md5" ] && [ "\$_cleanup_md5" = "\$RUNTIME_CLEANUP_MD5" ] && _cleanup_ok=1
 fi
-_cleanup_md5=\$("\$MD5SUM_BIN" "\$CLEANUP_LIB" 2>/dev/null | cut -d' ' -f1)
-if [ -z "\$_cleanup_md5" ] || [ "\$_cleanup_md5" != "\$RUNTIME_CLEANUP_MD5" ]; then
-    printf 'SCOURGE_COMBO\nstatus=FAIL\nerror=cleanup_helper_integrity\n' \
-        > "\$USB_DIR/run_stuff_result.txt" 2>/dev/null || true
-    exit 1
+if [ "\$_cleanup_ok" = 1 ]; then
+    . "\$CLEANUP_LIB"
+else
+    echo "combo: runtime_cleanup.sh missing or corrupt - continuing without it" \
+        >> "\$USB_DIR/combo_second_run.log" 2>/dev/null || true
+    cleanup_bounded_logs(){ :; }
+    runtime_cleanup_kill_owned(){ :; }
+    runtime_cleanup_process_alive(){ return 1; }
 fi
-. "\$CLEANUP_LIB"
+# One run at a time. The loader re-executes run_stuff.sh on a content change, and
+# every stage writes its own result and backup_current into the stick - which is a
+# content change. Two overlapping runs then fight over combo/ and the second one
+# fails the helper check while the first is still installing (2026-11-22: the root
+# result was the integrity stub while the stages had already run).
+# Breadcrumb before anything else: the run lock, the helper checks and the first
+# stage all come later, and every one of them can exit without a sound. If this
+# file does not change when the stick is plugged, the loader never started us at
+# all (md5 gate, unreadable medium, or the unit was asleep).
+printf 'started=%s boot=%s mode=%s payload=%s\n' \
+    "\$(date -u 2>/dev/null)" "\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" \
+    "\${SCOURGE_MODE:-all}" "\$PAYLOAD_ID" >> "\$USB_DIR/run_stuff_started.log" 2>/dev/null || true
+printf 'started=%s payload=%s\n' "\$(date -u 2>/dev/null)" "\$PAYLOAD_ID" >> "\$RW_DIR/started.log" 2>/dev/null || true
+# The audible start tone is played right after the log is opened (below), so the
+# log says which beep the run made before it reached the preflight.
+
+RUN_LOCK="\$USB_DIR/.scourge-run"
+_boot_id=\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)
+if ! mkdir "\$RUN_LOCK" 2>/dev/null; then
+    _held=\$(cat "\$RUN_LOCK/started" 2>/dev/null || echo 0)
+    _held_boot=\$(cat "\$RUN_LOCK/boot" 2>/dev/null || echo none)
+    _now=\$(date +%s 2>/dev/null || echo 0)
+    # A lock from another boot is stale by definition: the process that took it
+    # cannot exist any more. Same-boot locks expire after 15 minutes. Without the
+    # boot id a killed run left the stick locked and the next plug did nothing at
+    # all - no beep, no output (2026-11-22).
+    if [ "\$_held_boot" = "\$_boot_id" ] && [ "\$_now" -gt 0 ] && \
+       [ "\$((_now - _held))" -lt 900 ] 2>/dev/null; then
+        echo "combo: another run holds \$RUN_LOCK (started \${_held}s, same boot) - exiting" >> "\$USB_DIR/combo_second_run.log" 2>/dev/null
+        exit 0
+    fi
+    echo "combo: clearing a stale run lock (boot=\$_held_boot started=\$_held)" >> "\$USB_DIR/combo_second_run.log" 2>/dev/null || true
+    rm -rf "\$RUN_LOCK" 2>/dev/null || true
+    mkdir "\$RUN_LOCK" 2>/dev/null || exit 0
+fi
+printf '%s\n' "\$_boot_id" > "\$RUN_LOCK/boot" 2>/dev/null || true
+date +%s > "\$RUN_LOCK/started" 2>/dev/null || true
+trap 'rm -rf "\$RUN_LOCK" 2>/dev/null || true' EXIT INT TERM HUP
+
 RUNTIME_CLEANUP_LOG=""
 cleanup_bounded_logs "\$RUNTIME_ROOT" || true
 
@@ -275,6 +410,50 @@ LOG="\$RW_DIR/combo.log"
 RUNTIME_CLEANUP_LOG="\$LOG"
 [ -z "\$RUNTIME_CLEANUP_NOTES" ] || printf 'cleanup: %s\n' "\$RUNTIME_CLEANUP_NOTES" >> "\$LOG" 2>/dev/null
 log(){ echo "\$(date -u 2>/dev/null) \$*" >> "\$LOG" 2>/dev/null; }
+case "\$STAGE_DIGESTS" in
+    "") log "stage digest table: EMPTY" ;;
+    *)  log "stage digest table: present" ;;
+esac
+
+# Audible start: the micom beep is silent on this unit, so a local tone makes
+# "did the loader start us" a sound. Logged, because a run that dies later must
+# still tell which tone it made (the start and done tones differ).
+if [ -f "\$USB_DIR/beep-start.dat" ]; then
+    log "beep: start tone (pre-preflight)"
+    aplay -q -f S16_LE -r 44100 -c 1 "\$USB_DIR/beep-start.dat" >/dev/null 2>&1 || \
+        aplay -q -D plughw:0,0 -f S16_LE -r 44100 -c 1 "\$USB_DIR/beep-start.dat" >/dev/null 2>&1 || true
+fi
+
+# Every exit path publishes the run log to the stick.  combo.log lives on
+# /rw_data, which no cable reaches once the stick is out: without this export a
+# run that dies between the preflight and the first stage leaves nothing to read
+# (2026-11-23: three starts on the stick, no result, no log, and the tones
+# alternating between the start and the failure pattern).
+publish_logs(){
+    _ts=\$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo run)
+    _out="\$USB_DIR/combo_export_\$_ts.log"
+    {
+        echo "SCOURGE_COMBO_LOG"
+        echo "time=\$_ts rw=\$RW_DIR mode=\${MODE:-?} payload=\$PAYLOAD_ID"
+        echo "--- started"
+        tail -n 12 "\$RW_DIR/started.log" 2>/dev/null
+        echo "--- combo.log"
+        cat "\$LOG" 2>/dev/null
+        echo "--- resources (free/df)"
+        free 2>/dev/null | head -n 4
+        df -k / /rw_data /tmp 2>/dev/null | head -n 6
+        echo "--- stage logs (rw_data)"
+        for _sl in /rw_data/*/install.log; do
+            [ -f "\${_sl}" ] || continue
+            echo "## \${_sl}"
+            tail -n 250 "\${_sl}" 2>/dev/null
+        done
+        echo "--- stages.log"
+        cat "\${STAGES_LOG:-/dev/null}" 2>/dev/null
+    } > "\$_out" 2>/dev/null || true
+}
+# The lock must go whatever happens; the export must land before it does.
+trap 'publish_logs; rm -rf "\$RUN_LOCK" 2>/dev/null || true' EXIT INT TERM HUP
 
 result(){
     {
@@ -292,6 +471,8 @@ result(){
 }
 
 STAGES_LOG="\$RW_DIR/stages.log"
+# Where the WiFi daemon publishes its own build id (deferred verify reads it).
+RADIO_STATUS="\${WIFI_STATUS_FILE:-/rw_data/wifi/status.json}"
 : > "\$STAGES_LOG" 2>/dev/null
 FAILED=""
 
@@ -421,22 +602,57 @@ beep_init(){
 beep_once(){
     _b=\$BEEP_DBUS
     [ -x "\$_b" ] || _b=/usr/bin/dbus-send
-    [ -x "\$_b" ] || return 0
-    "\$_b" --system --print-reply --reply-timeout=1000 --dest=com.lge.car.micom \
-        /com/lge/car/micom com.lge.car.micom.audio.SetBeepPlay \
-        array:byte:0x00 >>"\$LOG" 2>&1 && return 0
-    # The system bus may still be coming up when the loader starts us.
-    sleep 0.3 2>/dev/null || sleep 1
-    "\$_b" --system --print-reply --reply-timeout=1000 --dest=com.lge.car.micom \
-        /com/lge/car/micom com.lge.car.micom.audio.SetBeepPlay \
-        array:byte:0x00 >>"\$LOG" 2>&1 || true
+    # The micom call is attempted first, but success there is NOT proof of sound:
+    # on this unit it returns OK and stays silent (amp/idle route at boot), which
+    # is why earlier builds never beeped. The local tone below is played
+    # regardless, so "micom OK but no audio" cannot swallow the signal.
+    if [ -x "\$_b" ]; then
+        "\$_b" --system --print-reply --reply-timeout=1000 --dest=com.lge.car.micom \
+            /com/lge/car/micom com.lge.car.micom.audio.SetBeepPlay \
+            array:byte:0x00 >/dev/null 2>&1 || {
+            # The system bus may still be coming up when the loader starts us.
+            sleep 0.3 2>/dev/null || sleep 1
+            "\$_b" --system --print-reply --reply-timeout=1000 --dest=com.lge.car.micom \
+                /com/lge/car/micom com.lge.car.micom.audio.SetBeepPlay \
+                array:byte:0x00 >/dev/null 2>&1 || true
+        }
+    fi
+    # The micom method is silent on some units (the 2021 car never beeped), so
+    # fall back to an audible tone: the raw-PCM files the dump script uses,
+    # played by aplay with an explicit format. The .dat extension is deliberate -
+    # the head unit media player must not loop them.
+    # Two sources, in order: the stick files, then the tones shipped in the
+    # bundle (combo/bin).  A missing medium must not silence the run, and nothing
+    # here may block or repeat (speaker-test looped on this alsa build).
+    _n=\${1:-1}
+    _wav="\$USB_DIR/beep-start.dat"
+    [ "\$_n" -ge 3 ] 2>/dev/null && _wav="\$USB_DIR/beep-done.dat"
+    if [ ! -f "\$_wav" ]; then
+        _bundle="\$USB_DIR/combo/bin/beep-start.dat"
+        [ "\$_n" -ge 3 ] 2>/dev/null && _bundle="\$USB_DIR/combo/bin/beep-done.dat"
+        [ -f "\$_bundle" ] && _wav="\$_bundle"
+    fi
+    # Audible signal must not depend on the medium: say in the log which path was
+    # taken, and fall back to synthesising the tone when the .dat files are gone.
+    if [ -f "\$_wav" ]; then
+        aplay -q -f S16_LE -r 44100 -c 1 "\$_wav" >>"\$LOG" 2>&1 && { log "beep: played \$(basename "\$_wav")"; return 0; }
+        aplay -q -D plughw:0,0 -f S16_LE -r 44100 -c 1 "\$_wav" >>"\$LOG" 2>&1 && { log "beep: played \$(basename "\$_wav") via plughw:0,0"; return 0; }
+        log "beep: aplay failed for \$_wav"
+    else
+        log "beep: \$_wav missing (the .dat files live on the stick root)"
+    fi
+    # speaker-test is deliberately NOT used as a fallback: on this alsa build it
+    # ran as a continuous tone (the loader then appeared to "beep forever"), and
+    # the tone must never block the run.
+    return 0
 }
 beep_n(){
     _n=\$1
+    log "beep: \$_n tone(s)"
     beep_init 2>/dev/null || true
     _i=0
     while [ "\$_i" -lt "\$_n" ]; do
-        beep_once
+        beep_once "\$_n"
         _i=\$((_i + 1))
         if [ "\$_i" -lt "\$_n" ]; then
             sleep 0.5 2>/dev/null || sleep 1
@@ -453,12 +669,51 @@ run_stage(){
     # not leave the previous run's result looking current on the stick.
     rm -f "\$stage_result" "\$USB_DIR/\${name}_result.txt"
     log "=== stage \$name ==="
+    publish_logs
     if [ ! -f "\$script" ]; then
         echo "stage_\$name=status=missing" >> "\$STAGES_LOG"
         FAILED="\$FAILED \$name"
         beep_n 2
         return 1
     fi
+    # Baked-digest gate: a corrupt installer must never run.  The lookup uses the
+    # read builtin over the table, not printf/awk: on 2026-11-23 the table was in
+    # this file and the pipeline still came back empty on the unit, so the gate
+    # said "no baked digest" for every stage and failed open.  No external tool,
+    # no multi-line printf.
+    _rel="combo\${script#\$COMBO}"
+    _want=""
+    if [ -n "\$STAGE_DIGESTS" ]; then
+        while read -r _d _p; do
+            [ "\$_p" = "\$_rel" ] || continue
+            _want="\$_d"
+            break
+        done <<EOF_STAGE_DIGESTS
+\$STAGE_DIGESTS
+EOF_STAGE_DIGESTS
+    fi
+    if [ -n "\$_want" ]; then
+        _got=\$(md5sum "\$script" 2>/dev/null | cut -d' ' -f1)
+        if [ "\$_got" != "\$_want" ]; then
+            echo "stage_\$name=status=corrupt got=\${_got:-none} want=\$_want" >> "\$STAGES_LOG"
+            log "stage \$name: installer bytes do not match the baked digest - refusing to run it (medium corruption; re-sync the stick)"
+            FAILED="\$FAILED \$name"
+            beep_n 2
+            return 1
+        fi
+        log "stage \$name: installer digest verified"
+    elif [ -n "\$STAGE_DIGESTS" ]; then
+        # The master carries a table, so every staged installer must have an
+        # entry: an unverified installer is treated as a failure, not a warning.
+        echo "stage_\$name=status=unverified path=\$_rel" >> "\$STAGES_LOG"
+        log "stage \$name: no digest entry for \$_rel in the baked table - refusing to run an unverified installer"
+        FAILED="\$FAILED \$name"
+        beep_n 2
+        return 1
+    else
+        log "stage \$name: this master carries no digest table; running \$_rel unverified"
+    fi
+
     # Unchanged stage: same packaged bytes as its last successful install and
     # every installed file/service/UI still matches. MODE=all only; an
     # explicit MODE=<package> (or restore) always runs the real installer.
@@ -482,10 +737,17 @@ run_stage(){
     # Wifi1b must not fail on unknown current bytes or patch them first.
     _defer=""
     [ "\$name" = wifi1b ] && [ -f "\$COMBO/migrate/stage.sh" ] && _defer=1
-    USB_DIR="\$stage_dir" SCOURGE_STICK_DIR="\$STICK_DIR" WIFI1B_DEFER_QML="\$_defer" \
+    USB_DIR="\$stage_dir" SCOURGE_STICK_DIR="\$STICK_DIR" WIFI1B_DEFER_QML="\$_defer" SCOURGE_DEFER_WIFI_WAIT="\${SCOURGE_DEFER_WIFI_WAIT:-1}" \
+        SCOURGE_DEFER_UI_RESTART=1 \
         /bin/sh "\$script" >> "\$LOG" 2>&1
     stage_rc=\$?
+    log "stage \$name exit=\$stage_rc"
+    log "stage \$name exit=\$stage_rc"
     status=\$(sed -n 's/^status=\([^ ]*\).*/\1/p' "\$stage_result" 2>/dev/null | tail -n 1)
+    if [ -z "\$status" ] && [ -f "/rw_data/\$name/run_stuff_result.txt" ]; then
+        status=\$(sed -n 's/^status=\([^ ]*\).*/\1/p' "/rw_data/\$name/run_stuff_result.txt" 2>/dev/null | tail -n 1)
+        log "stage \$name: result read from /rw_data/\$name (the stick copy is missing)"
+    fi
     [ ! -f "\$stage_result" ] || cp -f "\$stage_result" "\$USB_DIR/\${name}_result.txt"
     case "\$name" in wifi|wifi1b) rm -f "\$stage_dir/wifi.txt" "\$stage_dir/iphone_wifi.txt" "\$stage_dir/authorized_keys" "\$stage_dir/MDNSD_ROOT_ARM" ;; esac
     # A stage that exits 0 with status=REBOOT_REQUIRED succeeded: the WiFi
@@ -493,7 +755,11 @@ run_stage(){
     # spot.  Only rc=0 plus an accepted status counts; rc=0 with a failure
     # status is still a failure.
     case "\$stage_rc:\$status" in
-        0:OK|0:REBOOT_REQUIRED)
+        # DAEMON_UNVERIFIED is a deferred condition, not a failure: on this unit
+        # the WiFi module registers wlan0 ~110 s after boot, so the installer
+        # legitimately cannot see the daemon yet. Failing here stopped the whole
+        # combo before the tweaks stage ever ran (2026-11-22, three runs).
+        0:OK|0:REBOOT_REQUIRED|0:DAEMON_UNVERIFIED)
             echo "stage_\$name=status=\$status rc=0" >> "\$STAGES_LOG"
             [ "\$MODE" = restore ] || record_stage_digest "\$name"
             return 0
@@ -508,10 +774,49 @@ run_stage(){
 # One beep: installer started.
 beep_n 1
 
+log "step: preflight"
+publish_logs
+
 # Read-only preflight, before any stage creates backups or changes services.
-if ! (cd "\$USB_DIR" && "\$MD5SUM_BIN" -c combo/preflight.md5) >> "\$LOG" 2>&1; then
-    echo 'preflight=status=FAIL error=helper_manifest' >> "\$STAGES_LOG"
+# Helper integrity first, by baked hash: independent of combo/preflight.md5, which
+# has been observed corrupted on the medium. Then the manifest, when it parses.
+# install_io.sh is the safety-critical helper (root mount handling, verified
+# copies). Source the first copy whose bytes match the baked hash, preferring the
+# one inside a package payload: those are covered by the big per-package manifests,
+# which have been reliable, while the tiny files directly under combo/ have been
+# corrupted on the medium three times on 2026-11-22.
+IO_HELPER=""
+for _cand in "\$COMBO/battery/payload/lib/install_io.sh" "\$COMBO/wifi/payload/lib/install_io.sh" \
+             "\$COMBO/tweaks/payload/lib/install_io.sh" "\$COMBO/install_io.sh"; do
+    [ -f "\$_cand" ] || continue
+    if [ "\$("\$MD5SUM_BIN" "\$_cand" 2>/dev/null | cut -d' ' -f1)" = "\$INSTALL_IO_MD5" ]; then
+        IO_HELPER="\$_cand"
+        break
+    fi
+done
+if [ -z "\$IO_HELPER" ]; then
+    echo 'preflight=status=FAIL error=install_io_bytes (no intact copy found)' >> "\$STAGES_LOG"
     result FAIL; beep_n 2; exit 1
+fi
+[ "\$IO_HELPER" = "\$COMBO/install_io.sh" ] || \
+    echo "preflight=note=install_io_from_payload path=\$IO_HELPER" >> "\$STAGES_LOG"
+
+# runtime_cleanup.sh is best effort: it kills owned daemons and bounds logs. A
+# corrupted copy must not stop the install - warn, and carry on with no-ops that
+# report "not alive" so the radio bookkeeping stays conservative.
+CLEANUP_HELPER=""
+if [ "\$("\$MD5SUM_BIN" "\$COMBO/runtime_cleanup.sh" 2>/dev/null | cut -d' ' -f1)" = "\$RUNTIME_CLEANUP_MD5" ]; then
+    CLEANUP_HELPER="\$COMBO/runtime_cleanup.sh"
+else
+    echo 'preflight=status=warn error=runtime_cleanup_corrupt (continuing without it)' >> "\$STAGES_LOG"
+fi
+if [ -n "\$CLEANUP_HELPER" ]; then
+    CLEANUP_LIB="\$CLEANUP_HELPER"
+else
+    cleanup_bounded_logs(){ :; }
+    runtime_cleanup_kill_owned(){ :; }
+    runtime_cleanup_process_alive(){ return 1; }
+    : > /dev/null
 fi
 _layout_error=""
 case "\$BUNDLE_LAYOUT" in
@@ -535,7 +840,7 @@ if [ -n "\$_layout_error" ]; then
     echo "preflight=status=FAIL error=\$_layout_error" >> "\$STAGES_LOG"
     result FAIL; beep_n 2; exit 1
 fi
-. "\$COMBO/install_io.sh"
+. "\$IO_HELPER"
 if ! io_init; then
     echo 'preflight=status=FAIL error=root_mount_detection' >> "\$STAGES_LOG"
     result FAIL; beep_n 2; exit 1
@@ -545,6 +850,17 @@ echo 'preflight=status=OK' >> "\$STAGES_LOG"
 # Stop owned radios ourselves; never ask the owner to turn WiFi off manually.
 # Only units carrying our SPDX header and exact owned executable paths are
 # touched, so a foreign or owner-modified service is left alone.
+# A stop without a bound can wedge the run before the first stage (systemd on
+# this unit waits on the vendor radio stack): 30 s, then move on and let the
+# helper kill the leftover process by path.
+stop_bounded(){
+    log "step: stopping \$1"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 systemctl stop "\$1" >> "\$LOG" 2>&1 || true
+    else
+        systemctl stop "\$1" >> "\$LOG" 2>&1 || true
+    fi
+}
 unit_owned(){
     [ -f "\$1" ] && [ ! -L "\$1" ] && [ -r "\$1" ] &&
         grep -q 'SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors' "\$1" 2>/dev/null
@@ -553,10 +869,10 @@ if [ "\$MODE" != restore ]; then
     _stop_wifi=\$STOPS_WIFI
     if command -v systemctl >/dev/null 2>&1; then
         unit_owned "\$WIFI1B_SERVICE" && \
-            systemctl stop wifi1b-daemon.service >> "\$LOG" 2>&1 || true
+            stop_bounded wifi1b-daemon.service
         [ "\$_stop_wifi" = 0 ] || {
             unit_owned "\$WIFI_SERVICE" && \
-                systemctl stop wifi-daemon.service >> "\$LOG" 2>&1 || true
+                stop_bounded wifi-daemon.service
         }
     fi
     runtime_cleanup_kill_owned "\$RUNTIME_ROOT" wifi1b wifi1b_daemon || true
@@ -571,6 +887,8 @@ if [ "\$MODE" != restore ]; then
     else
         log "preflight: an owned radio is still running; stale temp cleanup deferred"
     fi
+    log "step: stale temp cleanup"
+    publish_logs
     cleanup_stale_temps "\$RUNTIME_ROOT" || true
     if [ "\$MODE" = all ]; then
         # Full removed-WiFi cleanup is evidence-gated inside the helper: a
@@ -603,6 +921,80 @@ cat >> "$STAGE/run_stuff.sh" <<'EOF'
   *) echo "unknown MODE: $MODE" >> "$STAGES_LOG"; FAILED="invalid-mode" ;;
 esac
 
+# Deferred WiFi verification. The radio registers wlan0 ~110 s after boot, so the
+# WiFi stage reports DAEMON_UNVERIFIED and moves on instead of blocking the run in
+# front of the tweaks install. Come back to it here: wait out the rest of the
+# radio's boot, then look for the build id the stage recorded in the daemon's own
+# status.json. The outcome lands in the stages log as wifi_verify.
+# Late import: the client profile needs a daemon that can see wlan0, which exists
+# only after the radio comes up. Retry once the build id shows in status.json.
+late_wifi_import(){
+    _wr="$COMBO/wifi/run_stuff_result.txt"
+    [ -f "$_wr" ] || return 0
+    grep -q 'wifi_import=deferred' "$_wr" 2>/dev/null || return 0
+    [ -x /rw_data/wifi/wifi_daemon ] || { echo 'wifi_import_late=no-daemon' >> "$STAGES_LOG"; return 0; }
+    [ -f /rw_data/wifi/wifi.txt ] || { echo 'wifi_import_late=no-file' >> "$STAGES_LOG"; return 0; }
+    if /rw_data/wifi/wifi_daemon --import-file /rw_data/wifi/wifi.txt >> "$LOG" 2>&1; then
+        echo 'wifi_import_late=OK' >> "$STAGES_LOG"
+    else
+        echo 'wifi_import_late=failed (UI can import again)' >> "$STAGES_LOG"
+    fi
+    return 0
+}
+
+# Same deferred idea for the tweaks daemon: its SMACK check runs seconds after
+# systemd starts it, so a "pending" verdict is re-checked here against the live
+# process label instead of failing the stage.
+verify_pending_tweaks(){
+    _tr="$COMBO/tweaks/run_stuff_result.txt"
+    [ -f "$_tr" ] || return 0
+    grep -q 'daemon_verify=pending' "$_tr" 2>/dev/null || return 0
+    _i=0
+    while [ "$_i" -lt 60 ]; do
+        for _p in /proc/[0-9]*; do
+            [ -r "$_p/comm" ] || continue
+            if [ "$(cat "$_p/comm" 2>/dev/null)" = "tweaks_daemon" ]; then
+                _lab=$(cat "$_p/attr/current" 2>/dev/null | tr -d '\r\n')
+                echo "tweaks_verify=status=OK label=\${_lab:-none} waited=$_i seconds" >> "$STAGES_LOG"
+                echo "tweaks_verify=status=OK label=\${_lab:-none} waited=$_i seconds" >> "$USB_DIR/tweaks_verify.txt"
+                return 0
+            fi
+        done
+        sleep 2
+        _i=$((_i + 2))
+    done
+    echo "tweaks_verify=status=unverified waited=$_i seconds" >> "$STAGES_LOG"
+    echo "tweaks_verify=status=unverified waited=$_i seconds" >> "$USB_DIR/tweaks_verify.txt"
+    { systemctl status tweaks-daemon.service --no-pager 2>&1 | head -n 10
+      journalctl -u tweaks-daemon.service -n 20 --no-pager 2>&1 | tail -n 20
+      tail -n 15 /rw_data/tweaks/daemon.log 2>&1
+    } >> "$USB_DIR/tweaks_verify.txt" 2>&1 || true
+    return 0
+}
+
+verify_pending_wifi(){
+    _wr="$COMBO/wifi/run_stuff_result.txt"
+    [ -f "$_wr" ] || return 0
+    grep -q 'daemon_verify=unverified' "$_wr" 2>/dev/null || return 0
+    _want=$(sed -n 's/.*build_id=\([0-9a-f]*\).*/\1/p' "$_wr" 2>/dev/null | tail -n 1)
+    [ -n "$_want" ] || { echo 'wifi_verify=status=skipped reason=no_build_id' >> "$STAGES_LOG"; return 0; }
+    _i=0
+    while [ "$_i" -lt 180 ]; do
+        if grep -q "\"build_id\":\"$_want\"" "$RADIO_STATUS" 2>/dev/null; then
+            echo "wifi_verify=status=OK build_id=$_want waited=$_i seconds" >> "$STAGES_LOG"
+            return 0
+        fi
+        sleep 2
+        _i=$((_i + 2))
+    done
+    echo "wifi_verify=status=unverified build_id=$_want waited=$_i seconds" >> "$STAGES_LOG"
+    return 0
+}
+
+verify_pending_wifi
+late_wifi_import
+verify_pending_tweaks
+
 if [ -n "$FAILED" ]; then
     result "FAIL"
     beep_n 3
@@ -617,10 +1009,107 @@ elif [ "$MODE" = all ]; then
     qml_now=$(qml_digest 2>/dev/null) || qml_now=""
     [ -z "$qml_now" ] || printf '%s\n' "$qml_now" > "$LEDGER/final-qml.digest" 2>/dev/null || true
 fi
+  # ---- one UI restart for the whole run ---------------------------------
+  # Every package used to terminate+relaunch AppHomeScreen after installing its
+  # QML, so a full combo flickered the home screen 4-5 times.  The stages now
+  # skip their own restart (SCOURGE_DEFER_UI_RESTART=1) and this single restart
+  # picks up ALL the injected pages/tiles at once (2026-11-24).
+  restart_ui_once() {
+      _launcher_pid=""
+      for _p in /proc/[0-9]*; do
+          [ -r "$_p/comm" ] || continue
+          [ "$(cat "$_p/comm" 2>/dev/null)" = "AppLauncher" ] || continue
+          _launcher_pid="${_p#/proc/}"
+          break
+      done
+      if [ -n "$_launcher_pid" ] && [ -r "/proc/$_launcher_pid/environ" ]; then
+          for _v in DBUS_SESSION_BUS_ADDRESS XDG_RUNTIME_DIR WAYLAND_DISPLAY QT_QPA_PLATFORM; do
+              _val=$(tr '\0' '\n' < "/proc/$_launcher_pid/environ" 2>/dev/null | grep "^$_v=" | head -n 1 | cut -d= -f2-)
+              [ -n "$_val" ] && export "$_v=$_val"
+          done
+      fi
+      if command -v dbus-send >/dev/null 2>&1; then
+          dbus-send --session --type=method_call --dest=com.lge.avn.applauncher /Request \
+              com.lge.avn.applauncher.request.terminate int32:11 >> "$LOG" 2>&1 || true
+          sleep 2
+          for _i in 1 2 3; do
+              dbus-send --session --type=method_call --dest=com.lge.avn.applauncher /Request \
+                  com.lge.avn.applauncher.request.launch int32:11 \
+                  string:AppHomeScreen string:/app/bin/AppHomeScreen >> "$LOG" 2>&1 && { log "restart_ui_once: dbus-ok"; return 0; }
+              sleep 2
+          done
+      fi
+      log "restart_ui_once: dbus-send failed; AppHomeScreen may return on its own"
+      return 1
+  }
+  restart_ui_once || true
+
 result "OK"
 # Five beeps: all requested stages completed successfully.  A short pause
 # separates this from the last stage's two-beep signal.
 sleep 0.8 2>/dev/null || sleep 1
+# ---- wait for WiFi, with the UI already up ------------------------------
+# The run is ordered the way the driver watches it: install, restart, then wait
+# for the association while the Live log is readable, and only then the beeps.
+# The wifi stage installed and restarted before this point; this only watches.
+wait_wifi(){
+    [ "${SCOURGE_WAIT_WIFI:-1}" = 1 ] || return 0
+    [ -f /rw_data/wifi/status.json ] || return 0
+    _budget=${SCOURGE_WIFI_WAIT_S:-90}
+    _w=0
+    while [ "${_w}" -lt "${_budget}" ]; do
+        _ip=$(grep -o '"ip":"[^"]*"' /rw_data/wifi/status.json 2>/dev/null | head -n 1 | cut -d'"' -f4)
+        _applying=$(grep -o '"applying":[a-z]*' /rw_data/wifi/status.json 2>/dev/null | head -n 1 | cut -d: -f2)
+        if [ -n "${_ip}" ]; then
+            log "wait-wifi: address ${_ip} after ${_w}s"
+            printf 'combo: wifi up, address %s (%ss)\n' "${_ip}" "${_w}" >> /rw_data/wifi/daemon.log 2>/dev/null || true
+            return 0
+        fi
+        if [ $((_w % 15)) -eq 0 ]; then
+            log "wait-wifi: ${_w}s applying=${_applying:-?} ip=none"
+            printf 'combo: waiting for wifi (%ss, applying=%s)\n' "${_w}" "${_applying:-?}" >> /rw_data/wifi/daemon.log 2>/dev/null || true
+        fi
+        sleep 5
+        _w=$((_w + 5))
+    done
+    log "wait-wifi: no address within ${_budget}s - the Live log has the supplicant reason"
+    printf 'combo: no wifi address within %ss\n' "${_budget}" >> /rw_data/wifi/daemon.log 2>/dev/null || true
+}
+wait_wifi
+
+# ---- boot profile -----------------------------------------------------------
+# One line per boot in /rw_data/boot_profile/boot.csv, copied to the stick so a
+# slow boot can be compared with a fast one later.  Cheap (no scans, /proc only),
+# and it also records our own daemons' start offsets.
+if [ -f "$COMBO/boot_profile.sh" ]; then
+    sh "$COMBO/boot_profile.sh" /rw_data/boot_profile >> "$LOG" 2>&1 || true
+    if [ -f /rw_data/boot_profile/boot.csv ]; then
+        cp -f /rw_data/boot_profile/boot.csv "$USB_DIR/boot_profile.csv" 2>/dev/null || true
+        log "boot profile: $(wc -l < /rw_data/boot_profile/boot.csv 2>/dev/null || echo 1) boot(s) on record"
+          # The full per-boot report has the vendor critical chain (systemd-analyze
+        # blame/critical-chain) that explains WHY the home app comes up late.
+        # Copy the newest one too, so the stick answers the interactivity
+        # question without a second run (2026-11-24).
+        _last_boot=$(ls -1t /rw_data/boot_profile/*.txt 2>/dev/null | head -n 1)
+        [ -n "$_last_boot" ] && cp -f "$_last_boot" "$USB_DIR/boot_profile_latest.txt" 2>/dev/null || true
+    fi
+fi
+
+# ---- perf snapshot ----------------------------------------------------------
+# "What is eating the CPU right now", taken when the install is done: the unit
+# ships htop/top but nobody can watch a screen in the car.  The report has a
+# dedicated line for the navigation map, which keeps drawing in the background.
+# perf.csv accumulates one line per run so a hot run can be compared later.
+if [ -f "$COMBO/perf_snapshot.sh" ]; then
+    _ps_secs=3
+    [ -f "$STICK_DIR/perf_sample_s" ] && _ps_secs=$(cat "$STICK_DIR/perf_sample_s" 2>/dev/null || echo 3)
+    sh "$COMBO/perf_snapshot.sh" "$_ps_secs" /rw_data/perf >> "$LOG" 2>&1 || true
+    for _pf in perf.txt perf.csv; do
+        [ -f "/rw_data/perf/$_pf" ] && cp -f "/rw_data/perf/$_pf" "$USB_DIR/$_pf" 2>/dev/null || true
+    done
+    log "perf snapshot: /rw_data/perf/perf.txt (sample $_ps_secs s)"
+fi
+
 beep_n 5
 exit 0
 EOF
@@ -643,6 +1132,16 @@ attribution terms in the project LICENSE). Firmware: Ioniq 5 Gen5W_L 260128.
 3. Read run_stuff_result.txt on the stick; every stage reports status=OK.
 4. To restore: edit MODE=restore in run_stuff.sh, replug, wait ~20 s.
 5. To re-run a single package: edit MODE=<package>, replug.
+
+Stick flags (drop the file at the root to change one run):
+  no_ui_restart  skip the AppHomeScreen restart - honoured only when the QML
+                 payload is unchanged, so a new page still goes live
+  api_walk       run the 7-step daemon API walk (adds ~1m40s of sleeps)
+  bt_tap_run     attach the LD_PRELOAD HCI tap to vbtd: the HCI stream goes to
+                 /rw_data/bt/tap.bin, BUT Bluetooth is stopped for the run
+                 (no hands-free, no phone audio, no BT CarPlay), and the tap
+                 only records what happens while it runs - the phone has to
+                 pair/connect during the run or the dump says nothing
 
 EOF
 if [ "$STANDALONE" = 1 ]; then
@@ -693,6 +1192,11 @@ EOF
 } > "$STAGE/README.txt"
 
 echo "== deploying to $TARGET"
+# The target may already hold a previous bundle; leaving its combo/ around
+# let stale files (e.g. renamed .wav -> .dat payloads) survive to the stick and
+# the HU media player kept playing them (2026-11-24).  Clean only combo/ -
+# root files like ota_package.tar and the ssh markers belong to the owner.
+rm -rf "$TARGET/combo"
 cp -R "$STAGE"/. "$TARGET"/
 [ -z "${BATTERY_BUILD:-}" ] || rm -rf "$BATTERY_BUILD"
 sync

@@ -1,0 +1,18 @@
+# Device facts measured once on the unit (Ioniq 5 Gen5W_L EU 260128)
+# Written by the wifi probe; re-used instead of re-probing.  Refresh with
+# SCOURGE_HWINFO_REFRESH=1 in the environment of run_stuff.sh.
+
+chip=CYW88359 / BCM4359 Rev 5 Pkg 2
+driver=bcmdhd 1.363.68 (r), firmware wl0 9.40.112.10 (r724590 CY) FWID 01-c52317a4
+mac_wlan0=28:0f:eb:02:21:8a
+nvram_ccode=GB (nvram.txt), regrev=0  ->  runtime: wldev_set_country DE (wl country: DE/0 GERMANY)
+micom_country=EU
+bands=Band1 2.4GHz (2412 MHz [1], 20 dBm); Band2 5GHz (5745 MHz [149], neither 160 nor 80+80)
+ap_mode=supported: #{ AP } <= 2, #{ managed } <= 2, #{ P2P-client, P2P-GO } <= 2, total <= 4, #channels <= 2
+regdomain_cfg80211=country 00 DFS-UNSET (world); 5 GHz passive-scan only, iw reg set has no effect
+bt_stack=no BlueZ (bluetooth.service not-found); vendor vbtd (BCM4349B1 patchram on ttyS0) + BluetoothHMI
+bt_dbus=vendor CommonAPI on the SESSION bus (DBUS_SESSION_BUS_ADDRESS); com.lge.hkmc.avn.BluetoothService is NOT on the system bus
+bt_api=v2::org::bluez::Adapter: setPairableAttribute/trySetPairableAttribute/setDiscoverableAttribute/SetDiscoverableConfig; DeviceManager::AddPairedDeviceInterface
+aa_enable_key=deviceSettings.phoneProjectionSettings.androidAutoSettings.enableAndroidAuto (BluetoothHMI)
+vess=own module, firmware vess_dsp1/vess_micom flashed by vess_fw_updater over micom CAN-TP; HU only sets VESS_VolLevel_RValue + visibility
+audio_capture=arecord present; capture test result recorded in audio_probe (see /rw_data/ambient/audio_probe.txt)

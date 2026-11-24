@@ -1,0 +1,5 @@
+base_sha256=d09c5e370f59582f15cf05eaa1b6ac84e1b4edb369249988c85646613b8e76d8
+result_sha256=b2cc0f8457817fec6012752212e1be177f652c4d839e307c2b1f17db27f921d0
+base=work/rootfs/app/share/AppHomeScreen/qml_eco3.0/component/QCustomizedMenuListAllowEmpty.qml
+artifact=packages/tweaks/artifacts/qml/AppHomeScreen/qml_eco3.0/component/QCustomizedMenuListAllowEmpty.stock.qml
+sub=component/QCustomizedMenuListAllowEmpty.stock.qml
