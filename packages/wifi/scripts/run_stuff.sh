@@ -1351,6 +1351,15 @@ log "wlan0 addr: $(ip -4 addr show wlan0 2>/dev/null | grep "inet " | tr '\n' ' 
 # ---- restart AppHomeScreen --------------------------------------------
 io_capture_qml "$QML_DIR" "$USB_DIR/qml_after" || log "WARNING: QML after-snapshot unavailable"
 restart="not-attempted"
+# The manifest paths are needed by the deferred path too (they are copied into
+# last_manifest.md5 after the daemon check).  Declaring them inside the else
+# branch below meant that with SCOURGE_DEFER_UI_RESTART=1 - the combo master's
+# normal mode since 2026-11-24 - the stage died on `set -u` at the `cp` far
+# below, rolled itself back and reported rc=1 after a clean install (on-car
+# 2026-11-24 20:28, "line 1501: _cur_manifest: unbound variable").
+_prev_manifest="$RW_DIR/last_manifest.md5"
+_cur_manifest="$PAYLOAD/manifest.md5"
+_qml_changed=0
 if [ "${SCOURGE_DEFER_UI_RESTART:-0}" = 1 ]; then
     # The master restarts AppHomeScreen once after every stage has installed,
     # instead of one restart per package (4-5 UI flickers per run, 2026-11-24).
@@ -1375,9 +1384,6 @@ fi
 # installed file (payload + stage.sh), so a digest comparison is the honest
 # signal for "the UI must restart".  Listing individual QML paths broke once:
 # NEW_FILES was used before it was defined and set -u killed the whole stage.
-_prev_manifest="$RW_DIR/last_manifest.md5"
-_cur_manifest="$PAYLOAD/manifest.md5"
-_qml_changed=0
 if [ -f "$_prev_manifest" ] && [ -f "$_cur_manifest" ]; then
     cmp -s "$_prev_manifest" "$_cur_manifest" || _qml_changed=1
 fi
@@ -1498,7 +1504,7 @@ else
     daemon_verify=ok
 fi
 if [ "$new_restore_point" = 1 ]; then ln -sfn "$BACKUP_HU" "$RW_DIR/backup/latest" || fail "cannot record restore point"; fi
-cp -f "$_cur_manifest" "$_prev_manifest" 2>/dev/null || true
+[ -n "${_cur_manifest:-}" ] && cp -f "$_cur_manifest" "$_prev_manifest" 2>/dev/null || true
 install_complete=1
 final_status=OK
 case "$restart" in *verified=0*) final_status=REBOOT_REQUIRED;; esac
