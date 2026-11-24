@@ -1655,8 +1655,12 @@ if [ -n "$_wip" ]; then
     # Last resort, because SSH is the only way to iterate without another stick
     # round: a worker stuck in "Applying mode..." keeps applying=true forever and
     # the daemon never reaches ssh_start (2026-11-24 20:36 and 20:54 snapshots).
-    # The direct start uses the same arguments the daemon uses, so its own
-    # ssh_running() sees the pid file and will not start a second copy.
+    # The started copy keeps its OWN pid file on purpose (dropbear-stage.pid, not
+    # dropbear.pid): the daemon's apply cycle calls stop_all() -> ssh_stop(), and
+    # with 10 supplicant restarts and 34 apply cycles in one log window
+    # (2026-11-24) it also tore down the link it had just built (reason=3,
+    # locally_generated=1). An SSH session that survives that churn is worth more
+    # than a tidy pid file; disable SSH on the page to get rid of it.
     if [ -z "$_l" ]; then
         _db=""
         for _c in "$RW_DIR/bin/dropbear" "$RW_DIR/bin/dropbearmulti"; do
@@ -1673,10 +1677,10 @@ if [ -n "$_wip" ]; then
                 [ -f "$_rsa" ] || "$_dkey" -t rsa -s 2048 -f "$_rsa" >> "$LOG" 2>&1 || true
             fi
             if [ -f "$_ed" ] && [ -f "$_rsa" ]; then
-                "$_db" -r "$_ed" -r "$_rsa" -p "$_wip:2222" -P "$RW_DIR/ssh/dropbear.pid" \
+                "$_db" -r "$_ed" -r "$_rsa" -p "$_wip:2222" -P "$RW_DIR/ssh/dropbear-stage.pid" \
                     >> "$RW_DIR/ssh.log" 2>&1 &
             else
-                "$_db" -R -p "$_wip:2222" -P "$RW_DIR/ssh/dropbear.pid" \
+                "$_db" -R -p "$_wip:2222" -P "$RW_DIR/ssh/dropbear-stage.pid" \
                     >> "$RW_DIR/ssh.log" 2>&1 &
             fi
             sleep 2
