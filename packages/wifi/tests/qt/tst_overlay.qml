@@ -95,6 +95,10 @@ Item {
             compare(page.requested, false)
             AppHomeModel.sysPopupShowing = false
             page.open()
+            // Leaving for another app is debounced by design: the host flags are
+            // stale for a moment after open and used to close the page instantly.
+            // Age the open so the test exercises the real (post-grace) path.
+            page.openedAt = 0
             AppHomeModel.isAtOtherApp = true
             compare(page.requested, false)
             AppHomeModel.isAtOtherApp = false

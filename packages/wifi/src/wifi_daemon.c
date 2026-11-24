@@ -193,6 +193,11 @@ static int64_t g_probe_start_ms, g_last_probe_ms;
 static bool g_probe_child;
 static int64_t g_ap_unready_ms;
 static int g_ap_unready_gen = -1;
+/* Set when the vendor refuses the tether request itself ("rejected=1", not
+ * permission denied).  See tether_rejected_active(). */
+static bool g_tether_rejected;
+static int64_t g_tether_rejected_ms;
+#define TETHER_REJECT_COOLDOWN_MS 600000
 
 typedef enum { AP_UNKNOWN, AP_ABSENT, AP_INTERFACE_UP, AP_READY } ap_state_t;
 typedef struct {
@@ -2150,6 +2155,21 @@ static ap_wait_t ap_wait_ready(bool seen, ap_probe_t *last)
     return absent >= 2 ? AP_WAIT_NEVER : AP_WAIT_UNKNOWN;
 }
 
+/* The vendor refuses the tether request itself ("AP tether request ...
+ * rejected=1"), which is not a permission problem and not a frequency
+ * problem.  Re-applying the AP every 60 s then only produced an apply loop
+ * that never let SSH run: the on-car bundle wifi_logs_20261124210007 showed
+ * mode=carplay, aa_ap=true, applying=true, ap_active=false, ssh_active=false
+ * and one "watchdog: CarPlay AP down; re-applying (backoff=60s)" per minute,
+ * while wlan0 held a station address (192.0.2.60) the whole time.  Remember
+ * the refusal, stop demanding the AP for a cooldown, and keep the box
+ * reachable as a station. */
+static bool tether_rejected_active(void)
+{
+    return g_tether_rejected && g_tether_rejected_ms &&
+           now_ms() - g_tether_rejected_ms < TETHER_REJECT_COOLDOWN_MS;
+}
+
 static bool ap_start(void)
 {
     if (!g_cfg.cp_ssid[0] || strlen(g_cfg.cp_ssid) > 32 ||
@@ -2253,8 +2273,16 @@ static bool ap_start(void)
         bool denied = strstr(out, "Permission denied") != NULL;
         bool rejected = rc != 0 || denied || strstr(out, "Error ") != NULL;
         log_msg("AP tether request frequency=%d rc=%d rejected=%d permission_denied=%d", freq, rc, rejected, denied);
+        if (rejected && !denied) {
+            g_tether_rejected = true;
+            g_tether_rejected_ms = now_ms();
+            log_msg("AP tether refused by the vendor (rc=%d); no AP retry for %d s", rc,
+                    (int)(TETHER_REJECT_COOLDOWN_MS / 1000));
+        }
         ap_wait_t result = ap_wait_ready(false, &p);
         if (result == AP_WAIT_READY) {
+            g_tether_rejected = false;
+            g_tether_rejected_ms = 0;
             if (attempt) {
                 g_cfg.cp_band = 1;
                 g_cfg.cp_channel = 6;
@@ -2263,7 +2291,9 @@ static bool ap_start(void)
             return true;
         }
         ap_evidence(result == AP_WAIT_LOST ? "enabled_then_lost" : result == AP_WAIT_NEVER ? "never_enabled" : "pending_or_unknown", &p);
-        if (result != AP_WAIT_NEVER || attempt || freq < 5000 || denied) {
+        /* A refused tether request is not a band problem: retrying on 2.4 GHz
+         * would only repeat the refusal. */
+        if (result != AP_WAIT_NEVER || attempt || freq < 5000 || rejected) {
             set_msg("CarPlay AP %s%s (rc=%d)",
                     result == AP_WAIT_LOST ? "enabled_then_lost" :
                     result == AP_WAIT_PENDING ? "interface up; SSID/address not ready" :
@@ -3856,11 +3886,20 @@ static bool ssh_start(void)
 {
     char ip[64] = "";
     bool ready = false;
+    int ap_state = AP_UNKNOWN;
     if (g_cfg.wlan_on && g_cfg.mode == MODE_CARPLAY) {
         ap_probe_t p;
         ap_probe(&p);
+        ap_state = (int)p.state;
         ready = p.state == AP_READY;
         if (ready) str_copy(ip, sizeof(ip), p.ip);
+        /* There is no AP address to listen on when the vendor refused the
+         * tether.  A station address on the same interface serves SSH just as
+         * well and is the only way to reach the box during the cooldown. */
+        else if (tether_rejected_active() && wlan_ip(ip, sizeof(ip))) {
+            log_msg("ssh: AP refused by the vendor; listening on station address %s", ip);
+            ready = true;
+        }
     } else if (g_cfg.wlan_on && wlan_ip(ip, sizeof(ip))) {
         /* Any IPv4 on wlan0 is enough to listen on, in every mode.  Keying this on
          * MODE_CLIENT left SSH "Stopped" while the unit was in AP mode even though
@@ -3881,6 +3920,12 @@ static bool ssh_start(void)
         ready = true;
     }
     if (!ready) {
+        /* Name the reason and the worker phase: "SSH deferred" alone left the
+         * on-car bundle unable to say whether the mode, the AP or a running
+         * apply was responsible. */
+        log_msg("ssh deferred: mode=%s wlan_on=%d ap_state=%d applying=%d worker_pid=%d",
+                g_cfg.mode == MODE_CARPLAY ? "carplay" : g_cfg.mode == MODE_CLIENT ? "client" : "off",
+                g_cfg.wlan_on, ap_state, g_apply_pid > 0 || g_work_pending, (int)g_apply_pid);
         ssh_stop();
         set_msg("SSH deferred: requested WLAN role/address not ready");
         return false;
@@ -4015,6 +4060,11 @@ static bool iface_confirmed_down(void)
 static bool apply_mode_work(bool pair)
 {
     bool active = g_cfg.wlan_on && g_cfg.mode != MODE_OFF;
+    /* Tag every transition: the on-car log could show "Applying mode..." and a
+     * stage-level failure, but never WHERE the worker was when it stalled. */
+    log_msg("apply: phase=start mode=%s wlan_on=%d ssh=%d pair=%d",
+            g_cfg.mode == MODE_CARPLAY ? "carplay" : g_cfg.mode == MODE_CLIENT ? "client" : "off",
+            g_cfg.wlan_on, g_cfg.ssh_enabled, pair);
     int ownership = radio_begin("wifi_daemon", active);
     if (ownership <= 0) {
         set_msg("%s", ownership == 0 ? "WLAN off; radio left untouched" :
@@ -4022,6 +4072,7 @@ static bool apply_mode_work(bool pair)
         return ownership == 0;
     }
     if (!g_cfg.wlan_on || g_cfg.mode == MODE_OFF) {
+        log_msg("apply: phase=stop_all");
         stop_oem_wifi();
         stop_all();
         bt_pair_stop();
@@ -4034,6 +4085,7 @@ static bool apply_mode_work(bool pair)
 
     if (g_cfg.mode == MODE_CLIENT) {
         bt_pair_stop();
+        log_msg("apply: phase=supplicant_start (client)");
         if (!ensure_wifi_ready()) { ssh_stop(); return false; }
         /* Only tear the AP down when one is actually up.  Calling ap_stop() on
          * every retry killed the supplicant that also serves the client link, so
@@ -4064,10 +4116,33 @@ static bool apply_mode_work(bool pair)
     /* MODE_CARPLAY */
     if (g_ap_restart_requested) {
         ssh_stop();
+        /* An explicit restart is user intent: retry the tether once, even after
+         * the vendor refused it inside the cooldown window. */
+        g_tether_rejected = false;
+        g_tether_rejected_ms = 0;
         if (!ap_stop()) {
             set_msg("CarPlay explicit restart blocked: AP teardown not confirmed");
             return false;
         }
+    }
+    if (tether_rejected_active()) {
+        /* Do not tear a working station down for an AP the vendor has already
+         * refused.  The cooldown ends the 60 s re-apply loop and keeps the box
+         * reachable; wlan0 keeps whatever address it holds. */
+        ap_probe_t refused;
+        ap_probe(&refused);
+        ap_evidence("tether-rejected", &refused);
+        if (pair) bt_pair_start();
+        else if (g_pairing_stop_requested) bt_pair_stop();
+        long left = (long)((TETHER_REJECT_COOLDOWN_MS - (now_ms() - g_tether_rejected_ms)) / 1000);
+        if (left < 0) left = 0;
+        log_msg("apply: phase=station_fallback (AP tether refused; retry in %ld s)", left);
+        bool cok = client_connect();
+        if (cok && g_cfg.ssh_enabled) ssh_start();
+        else if (!cok) ssh_stop();
+        set_msg(cok ? "AP refused by the vendor; running as a station (AP retry in %ld s)"
+                    : "AP refused by the vendor; station fallback also failed", left);
+        return cok;
     }
     /* Take wlan0 off the client before the AP can own it.  Skipping this left the
      * client supplicant (and any lease) on the interface, so hostapd could not
@@ -4082,6 +4157,7 @@ static bool apply_mode_work(bool pair)
         bt_pair_start();
     else if (g_pairing_stop_requested)
         bt_pair_stop();
+    log_msg("apply: phase=ap_start aa_ap=%d freq=%d channel=%d", g_cfg.aa_ap, channel_to_freq(), g_cfg.cp_channel);
     if (!ap_start()) {
         /* ap_start() already recorded the stage-specific failure; do not
          * replace it with a generic message. */
@@ -4099,6 +4175,7 @@ static bool apply_mode_work(bool pair)
         set_msg("CarPlay AP failed to start (SSID=%s): %s", g_cfg.cp_ssid, why);
         return false;
     }
+    log_msg("apply: phase=ap_services aa_ap=%d", g_cfg.aa_ap);
     bool fw_ok = carplay_fw_open();
     bool ie_ok = false;
     bool services_ok = true;
@@ -4117,6 +4194,7 @@ static bool apply_mode_work(bool pair)
         restart_vbtd_if_needed(vbt_changed);
     }
 
+    log_msg("apply: phase=ssh_service ssh=%d", g_cfg.ssh_enabled);
     if (g_cfg.ssh_enabled) ssh_start();
     else ssh_stop();
     ap_probe_t p;
@@ -4455,8 +4533,11 @@ static void watchdog(void)
         }
     } else g_ap_unready_ms = 0;
 
+    /* A refused tether request is not a transient AP outage: re-applying it
+     * every 60 s only starved the SSH start (2026-11-24 on-car loop).  The
+     * cooldown in tether_rejected_active() owns the retry timing instead. */
     if (g_apply_pid == 0 &&
-        g_cfg.mode == MODE_CARPLAY &&
+        g_cfg.mode == MODE_CARPLAY && !tether_rejected_active() &&
         (!g_observed.ap_on || !g_carplay_ie || !g_observed.carplay_svc || !g_observed.mdns_svc)) {
         if (now - g_last_mode_ms > retry_ms) {
             log_msg("watchdog: CarPlay AP down; re-applying (backoff=%ds)",
@@ -4474,7 +4555,10 @@ static void watchdog(void)
         }
     }
     if (g_cfg.ssh_enabled) {
-        bool role_ready = (g_cfg.mode == MODE_CARPLAY && g_observed.ap_on) ||
+        /* In carplay mode with a refused tether the box runs as a station:
+         * demanding ap_on here restarted SSH on every watchdog tick. */
+        bool role_ready = (g_cfg.mode == MODE_CARPLAY &&
+                           (g_observed.ap_on || tether_rejected_active())) ||
                           (g_cfg.mode == MODE_CLIENT && g_observed.associated);
         if (g_observed.ip[0] && role_ready) {
             if (!g_observed.ssh_ours) {
@@ -5231,6 +5315,11 @@ static bool dump_logs_to_usb(bool verbose)
                  "grep -iE 'WifiPage|qml' | tail -n 200");
         snap_cmd(f, "iw dev wlan0 link");
         snap_cmd(f, "ifconfig wlan0");
+        /* "Is anything listening on 2222?" was the question every bundle left
+         * unanswered; ss may be absent on this image, so fall back to the
+         * kernel table (2222 = 0x08AE). */
+        snap_cmd(f, "ss -ltn 2>&1 || netstat -ltn 2>&1");
+        snap_cmd(f, "grep -i ':08AE' /proc/net/tcp /proc/net/tcp6");
         snap_cmd(f, "iptables -S");
         snap_cmd(f, "dmesg | tail -n 200");
         snap_cmd(f, "grep -n ENABLE_WIRELESS_CARPLAY /app/data/vbt/VBTConfig.json /rw_data/app_data/vbt/VBTConfig.json");

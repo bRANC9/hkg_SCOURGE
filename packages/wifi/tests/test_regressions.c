@@ -16,7 +16,7 @@ static int commands;
 static bool powered;
 static bool fail_ap_power;
 static int ap_requests;
-static bool ap_active, stuck_off, unknown_role, no_actual_ssid, deny_tether;
+static bool ap_active, stuck_off, unknown_role, no_actual_ssid, deny_tether, refuse_tether;
 static int success_request, tether_field = -1, active_probes, delay_ip, lose_after, off_requests, disconnects;
 static int power_enables;
 static bool transient_ip;
@@ -67,6 +67,7 @@ static int mock_command(char *out, size_t n, const char *cmd)
     else if (strstr(cmd, "ifconfig wlan0")) reply = ip_reply ? ip_reply : station_intrusion && station_status ? "inet addr:192.0.2.10\n" : ap_active && active_probes > delay_ip ?
         "inet addr:10.42.0.1\n" : transient_ip ? "inet addr:192.0.2.10\n" : "";
     else if (strstr(cmd, "tether wifi on ") && deny_tether) reply = "Error enabling wifi tethering: Permission denied\n";
+    else if (strstr(cmd, "tether wifi on ") && refuse_tether) reply = "Error enabling wifi tethering: not supported on this technology\n";
     else if (strstr(cmd, "technologies")) reply = tether_field == 1 || (ap_active && tether_field < 0) ?
         "/net/connman/technology/wifi\n  Powered = True\n  Tethering = True\n  TetheringIdentifier = IONIQ5-CarPlay\n" : powered ?
         "/net/connman/technology/wifi\n  Powered = True\n  Tethering = False\n  TetheringIdentifier = IONIQ5-CarPlay\n/net/connman/technology/cellular\n  Tethering = True\n" :
@@ -124,7 +125,9 @@ static int fake_connmanctl(void)
 
 static void reset_ap_fixture(void)
 {
-    ap_active = stuck_off = unknown_role = no_actual_ssid = deny_tether = false;
+    ap_active = stuck_off = unknown_role = no_actual_ssid = deny_tether = refuse_tether = false;
+    g_tether_rejected = false;
+    g_tether_rejected_ms = 0;
     transient_ip = ap_after_off = station_intrusion = false;
     success_request = ap_requests = active_probes = delay_ip = lose_after = off_requests = disconnects = 0;
     power_enables = 0;
@@ -195,6 +198,16 @@ static void test_ap_states(void)
     assert(strstr(g_last_msg, "permission denied")); /* rc=0 is not success */
     reset_ap_fixture(); success_request = 1; deny_tether = true; tether_field = 0;
     assert(ap_start() && ap_requests == 1 && off_requests == 0); /* actual ready wins */
+
+    /* A refusal that is not a permission problem ("Error: ...") must stop the
+     * band fallback and be remembered: re-applying it from the watchdog every
+     * 60 s produced an apply loop that never let SSH start (on-car 2026-11-24:
+     * applying=true, aa_ap=true, ap_active=false, ssh_active=false). */
+    reset_ap_fixture(); refuse_tether = true;
+    assert(!ap_start() && ap_requests == 1 && off_requests == 0);
+    assert(tether_rejected_active());
+    reset_ap_fixture(); success_request = 1; refuse_tether = true; tether_field = 0;
+    assert(ap_start() && ap_requests == 1 && !tether_rejected_active()); /* a real AP clears it */
 
     reset_ap_fixture(); success_request = 1; station_intrusion = true;
     services_reply = "*AR Other wifi_b_4f74686572_managed_psk\n*AR DATA cellular_123_context1\n";

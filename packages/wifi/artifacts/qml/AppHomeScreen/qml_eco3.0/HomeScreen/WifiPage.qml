@@ -111,7 +111,11 @@ Item {
         onCurrentScreenChanged: root.autoClose()
         onCurrentHomeAdvancedPageIdxChanged: root.autoClose()
         onRequestHomeByPPChanged: if (AppHomeModel.requestHomeByPP) root.autoClose()
-        onSysPopupShowingChanged: if (AppHomeModel.sysPopupShowing) root.autoClose()
+        // A system popup is not a stale host flag: it must take the page down at
+        // once, so it does not wait for the autoClose() grace window.  Fighting a
+        // popup for the surface is the one thing the stock pages never do
+        // (styleguide 4.6).
+        onSysPopupShowingChanged: if (AppHomeModel.sysPopupShowing) root.close()
     }
 
     function acceptHome(d) {

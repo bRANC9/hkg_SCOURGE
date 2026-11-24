@@ -47,7 +47,9 @@ assert.match(qml, /id: closeButton\s+objectName: "wifiExit"\s+z: 10/);
 // AppHomeModel flags stale, and the raw close() shut the page a few hundred ms
 // after open (2026-11-22, "a wifi app pár pillanat után bezáródik").
 assert.match(qml, /function autoClose\(\)/);
-assert.match(qml, /onSysPopupShowingChanged: if \(AppHomeModel.sysPopupShowing\) root.autoClose\(\)/);
+// A system popup hides the page at once: the autoClose() grace window exists for
+// stale host flags, not for a popup the user is looking at.
+assert.match(qml, /onSysPopupShowingChanged: if \(AppHomeModel.sysPopupShowing\) root.close\(\)/);
 let requests = 0;
 function XHR() {
   this.open = (method, url) => { this.url = url; };

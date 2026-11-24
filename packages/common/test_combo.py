@@ -35,6 +35,10 @@ with tempfile.TemporaryDirectory(prefix="combo-regression-", dir="/tmp/opencode"
     shutil.copyfile(PACKAGES / "common/check_layout.py", packages / "common/check_layout.py")
     shutil.copyfile(PACKAGES / "common/install_io.sh", packages / "common/install_io.sh")
     shutil.copyfile(PACKAGES / "common/runtime_cleanup.sh", packages / "common/runtime_cleanup.sh")
+    # compose.sh stages the boot-timing collector for the unit; its absence here
+    # aborted every compose run with "cannot stat common/boot_profile.sh".
+    shutil.copyfile(PACKAGES / "common/boot_profile.sh", packages / "common/boot_profile.sh")
+    shutil.copyfile(PACKAGES / "common/perf_snapshot.sh", packages / "common/perf_snapshot.sh")
     bin_dir = root / "bin"
     bin_dir.mkdir()
     for name in ("sleep", "chsmack", "chown", "sync"):
@@ -172,12 +176,22 @@ exit 0
     (root / 'runtime/battery/restore.log').write_text('historical restore\n')
     (root / 'runtime/battery/status.json').write_text('{"ok":true}\n')
 
+    def beep_lines():
+        # The fixture dbus-send stub logs EVERY call to its file, including the
+        # AppHomeScreen terminate/launch of the single UI restart.  Count only the
+        # micom beep method, otherwise a run that restarts the UI looks like an
+        # extra beep pair (2026-11-24: 8 instead of 6 on the first run only).
+        path = root / "beeps"
+        if not path.exists():
+            return []
+        return [line for line in path.read_text().splitlines()
+                if "com.lge.car.micom.audio.SetBeepPlay" in line]
+
     def run(extra=None):
-        beeps_path = root / "beeps"
-        before = len(beeps_path.read_text().splitlines()) if beeps_path.exists() else 0
+        before = len(beep_lines())
         result = subprocess.run(["sh", str(wrapper)], env=dict(env, **(extra or {})),
                                 capture_output=True, text=True)
-        after = beeps_path.read_text().splitlines() if beeps_path.exists() else []
+        after = beep_lines()
         assert len(after) - before == 6, (len(after) - before, extra)
         return result
 
