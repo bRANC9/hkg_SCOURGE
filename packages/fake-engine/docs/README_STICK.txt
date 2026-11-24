@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
 Fake engine sound (parked)
 --------------------------
 Install: put run_stuff.sh + payload/ + manifest.md5 at the stick root, plug in.

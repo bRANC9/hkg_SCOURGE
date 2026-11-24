@@ -792,7 +792,7 @@ static bool wlan_ip(char *out, size_t n)
     char buf[2048];
     /* Vendor images differ: `ifconfig` may be missing or print a shape this
      * parser does not know, and when it does the daemon believed it had no
-     * address while wlan0 really had one (2026-11-23: 192.168.1.60/24 on the
+     * address while wlan0 really had one (2026-11-23: 192.0.2.60/24 on the
      * interface, ip="" in status.json, so the dropbear gate never fired and SSH
      * stayed down run after run).  iproute2 is present on the unit. */
     if (sh_out(buf, sizeof(buf), "ifconfig wlan0 2>/dev/null") == 0) {
@@ -2018,7 +2018,7 @@ static void ap_probe(ap_probe_t *p)
          * role on the interface the AP is absent, and demanding tether == 0 here
          * left state=AP_UNKNOWN for ever, which blocked every AP start with
          * "station transition/absence not confirmed" (unit log 2026-11-23 19:39:59,
-         * state=0 role=0 tether=-1 ip=192.168.1.60). */
+         * state=0 role=0 tether=-1 ip=192.0.2.60). */
         if (p->role == 0 && (p->tether == 0 || p->tether < 0)) p->state = AP_ABSENT;
         else if (p->role == 1) {
             p->state = AP_INTERFACE_UP;
@@ -3190,7 +3190,7 @@ static bool iw_link_ssid(char *out, size_t n)
 }
 
 /* SSID compare that tolerates the whitespace an imported wifi.txt can carry:
- * the association was up ("iw dev wlan0 link" showed SSID Franci_wifi) while
+ * the association was up ("iw dev wlan0 link" showed SSID example-net) while
  * the daemon insisted none of the configured networks was visible, because the
  * configured value had a trailing space/CR. */
 static bool ssid_same(const char *a, const char *b)
@@ -4387,7 +4387,7 @@ static void watchdog(void)
     int64_t retry_ms = g_network_failed ? 60000 : 15000;
     bool stack_dead = !wpa_process_alive();
     /* A lease is proof the link works, whatever the supplicant process says:
-     * on 2026-11-23 the unit had 192.168.1.60 and SSH up while this watchdog
+     * on 2026-11-23 the unit had 192.0.2.60 and SSH up while this watchdog
      * restarted the supplicant every 15 s ("supplicant process gone"), which
      * dropped the association and made SSH unusable in practice.  Hold the
      * restart while an address exists; only rebuild the stack when the link is

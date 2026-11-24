@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
 [Unit]
 Description=SCOURGE fake engine sound (parked, localhost only)
 # After the boot transaction: a sound daemon must never slow the unit down.

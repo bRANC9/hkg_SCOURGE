@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
 # Device facts measured once on the unit (Ioniq 5 Gen5W_L EU 260128)
 # Written by the wifi probe; re-used instead of re-probing.  Refresh with
 # SCOURGE_HWINFO_REFRESH=1 in the environment of run_stuff.sh.

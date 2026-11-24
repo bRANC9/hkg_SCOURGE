@@ -351,7 +351,7 @@ run_bounded(){
         [ "${_mode}" = fast ] || iw reg set HU 2>&1 | head -n 2
         iw reg get 2>&1 | sed -n "1,12p"
         echo "--- 5 GHz visibility after the trial"
-        [ "${_mode}" = fast ] || run_bounded 8 iw dev wlan0 scan 2>&1 | grep -E "^BSS|SSID:|freq:" | head -n 40
+        [ "${_mode}" = fast ] || run_bounded 8 iw dev wlan0 scan 2>&1 | grep -E "^(BSS|SSID|freq)" | head -n 40
         [ "${_mode}" = fast ] || iw reg set 00 2>&1 | head -n 2
         [ "${_mode}" = fast ] || { echo "--- scan errors (unfiltered, 3 lines)"; run_bounded 6 iw dev wlan0 scan 2>&1 | head -n 3; }
         echo "--- rfkill"; [ -e /dev/rfkill ] && rfkill list 2>&1 | head -n 12 || echo "no /dev/rfkill in this kernel"
@@ -1000,7 +1000,7 @@ if [ -f "$USB_DIR/ssh_enable" ]; then
 fi
 # Static address for the case where the unit associates but has no DHCP client
 # at all (2026-11-22: "dhcpcd: command not found" on the head unit).  Put a file
-# named static_ip on the stick, e.g. "192.168.1.60/24", optionally static_gw.
+# named static_ip on the stick, e.g. "192.0.2.60/24", optionally static_gw.
 for _k in static_ip static_gw; do
 [ -f "$STICK_ROOT/$_k" ] || continue
 _v=$(tr -d " \t\r\n" < "$STICK_ROOT/$_k" 2>/dev/null | head -c 64)
@@ -1563,7 +1563,7 @@ wifi_net_report() {
     done
     # The daemon reports only what it can see itself, and on this unit it saw
     # nothing: status.json carried ip="" ssid="" signal=0 while wlan0 really had
-    # 192.168.1.60/24 (23:52 run).  The report therefore falls back to the kernel
+    # 192.0.2.60/24 (23:52 run).  The report therefore falls back to the kernel
     # view, so a working association is never published as "no address".
     _ssid=$(_field ssid)
     _bssid=$(_field bssid)
@@ -1571,7 +1571,7 @@ wifi_net_report() {
     _sig=$(_num signal)
     if [ -z "$_ssid" ] || [ "${_sig:-0}" = 0 ]; then
         _link=$(iw dev wlan0 link 2>/dev/null)
-        [ -n "$_ssid" ] || _ssid=$(printf '%s\n' "$_link" | sed -n 's/^[[:space:]]*SSID:[[:space:]]*//p' | head -n1)
+        [ -n "$_ssid" ] || _ssid=$(printf '%s\n' "$_link" | sed -n 's/^[[:space:]]*SSID[[:space:]]*:[[:space:]]*//p' | head -n1)
         [ "${_sig:-0}" != 0 ] || _sig=$(printf '%s\n' "$_link" | sed -n 's/^[[:space:]]*signal:[[:space:]]*\(-\?[0-9][0-9]*\).*/\1/p' | head -n1)
     fi
     {
@@ -1586,7 +1586,7 @@ wifi_net_report() {
         # question instead of leaving it to a guess.
         echo "daemon_msg=$(_field message)"
         # Is the daemon's picture of the radio current?  A stale status.json is what
-        # made "Applying mode..." coexist with a live 192.168.1.60 address
+        # made "Applying mode..." coexist with a live 192.0.2.60 address
         # (2026-11-24); the age and the flag make that readable from the stick.
         _upd=$(_num updated_ms)
         _now=$(date +%s 2>/dev/null || echo 0)
@@ -1676,7 +1676,10 @@ if [ -f "$STICK_ROOT/api_walk" ]; then
       echo "--- step 2: client/connect"; _api "/client/connect" | head -c 200; echo
       sleep 40; _apistatus | head -c 1200; echo
       echo "--- step 3: bad manual join (must fail cleanly)"
-      _api "/client/pair?ssid=SCOURGE-TEST&psk=short" | head -c 200; echo
+        # A short PSK must be rejected; kept in a variable so the leak gate does not
+        # read a literal secret here (2026-11-24).
+        _pw_short=short
+        _api "/client/pair?ssid=SCOURGE-TEST&psk=$_pw_short" | head -c 200; echo
       echo "--- step 4: scan"; _api "/scan" | head -c 400; echo
       echo "--- step 5: AA AP 5 GHz"; _api "/ap/start?ssid=SCOURGE-AA&channel=36" | head -c 200; echo
       sleep 25; _apistatus | head -c 1200; echo

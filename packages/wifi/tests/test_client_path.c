@@ -44,20 +44,20 @@ static int mock(char *out, size_t n, const char *cmd)
     if (strstr(cmd, "ifconfig wlan0")) {
         if (out && n)
             snprintf(out, n, have_ip
-                     ? "wlan0 Link encap:Ethernet\n          inet addr:192.168.1.60  Mask:255.255.255.0\n"
+                     ? "wlan0 Link encap:Ethernet\n          inet addr:192.0.2.60  Mask:255.255.255.0\n"
                      : "wlan0 Link encap:Ethernet\n");
         return 0;
     }
     if (strstr(cmd, "ip addr add")) {
-        if (strstr(cmd, "192.168.1.60/24")) have_ip = true;
+        if (strstr(cmd, "192.0.2.60/24")) have_ip = true;
         return 0;
     }
     if (strstr(cmd, "scan_results")) {
         if (out && n)
             snprintf(out, n,
                      "bssid / frequency / signal level / flags / ssid\n"
-                     "f8:64:b8:c9:99:88\t2427\t-74\t[WPA2-PSK-CCMP][ESS]\tFranci_wifi\n"
-                     "a4:2b:b0:11:22:33\t5180\t-61\t[WPA2-PSK-CCMP][ESS]\tFranci_wifi-ext_5G\n");
+                     "02:00:00:00:00:01\t2427\t-74\t[WPA2-PSK-CCMP][ESS]\texample-net\n"
+                     "02:00:00:00:00:02\t5180\t-61\t[WPA2-PSK-CCMP][ESS]\texample-net-ext_5G\n");
         return 0;
     }
     if (strstr(cmd, "ip route replace")) { routed = true; return 0; }
@@ -79,7 +79,7 @@ int main(void)
     config_defaults();
     g_cfg.mode = MODE_CLIENT;
     g_cfg.wlan_on = true;
-    set_net_ssid(0, "Franci_wifi");
+    set_net_ssid(0, "example-net");
     set_net_psk(0, "fixture-key-123");
 
     /* 1. Client mode writes the configured networks.  This unit masks
@@ -92,20 +92,20 @@ int main(void)
     char conf[4096] = "";
     read_file(WPA_CONF, conf, sizeof(conf));
     assert(strstr(conf, "ctrl_interface="));
-    assert(strstr(conf, "network={") && strstr(conf, "Franci_wifi"));
+    assert(strstr(conf, "network={") && strstr(conf, "example-net"));
     /* AP mode keeps the same profile: there ConnMan must keep out. */
     g_cfg.mode = MODE_CARPLAY;
     ensure_wpa_conf();
     read_file(WPA_CONF, conf, sizeof(conf));
-    assert(strstr(conf, "network={") && strstr(conf, "Franci_wifi"));
+    assert(strstr(conf, "network={") && strstr(conf, "example-net"));
 
     /* 2. Whitespace-tolerant SSID compare plus radio-level truth: the link was
-     * up ("iw ... SSID: Franci_wifi") while the daemon claimed none was visible. */
-    assert(ssid_same("Franci_wifi", "Franci_wifi "));
-    assert(ssid_same(" Franci_wifi", "Franci_wifi"));
-    assert(!ssid_same("Franci_wifi", "Franci_wifi-ext_5G"));
+     * up ("iw ... SSID: example-net") while the daemon claimed none was visible. */
+    assert(ssid_same("example-net", "example-net "));
+    assert(ssid_same(" example-net", "example-net"));
+    assert(!ssid_same("example-net", "example-net-ext_5G"));
     g_cfg.mode = MODE_CLIENT;
-    iw_link_reply = "Connected to f8:64:b8:c9:99:88 (on wlan0)\n\tSSID: Franci_wifi\n\tsignal: -74 dBm\n";
+    iw_link_reply = "Connected to 02:00:00:00:00:01 (on wlan0)\n\tSSID: example-net\n\tsignal: -74 dBm\n";
     assert(iw_link_any_configured());
     assert(client_associated());
 
@@ -126,11 +126,11 @@ int main(void)
     /* 4. Static fallback for a unit with no udhcpc/dhcpcd/dhclient at all. */
     have_ip = false;
     routed = false;
-    write_file_atomic(APP_DIR "/static_ip", "192.168.1.60/24\n", 0600);
-    write_file_atomic(APP_DIR "/static_gw", "192.168.1.1\n", 0600);
+    write_file_atomic(APP_DIR "/static_ip", "192.0.2.60/24\n", 0600);
+    write_file_atomic(APP_DIR "/static_gw", "192.0.2.1\n", 0600);
     assert(dhcp_acquire());
-    assert(ran("ip addr add 192.168.1.60/24"));
-    assert(ran("ip route replace default via 192.168.1.1") && routed);
+    assert(ran("ip addr add 192.0.2.60/24"));
+    assert(ran("ip route replace default via 192.0.2.1") && routed);
 
 
     /* 5. The scan list carries band/channel so the UI can label a network

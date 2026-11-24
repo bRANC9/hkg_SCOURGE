@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
 # Properties and signals the previewed page assigns/connects on vendor components
 # that the preview only stubs.  Each line is emitted verbatim inside every stub:
 # the page has to load, the values do not matter for layout.
