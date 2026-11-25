@@ -2289,6 +2289,14 @@ static bool write_ap_conf(void)
     conf_quote(psk, sizeof(psk), g_cfg.cp_psk);
     conf_quote(name, sizeof(name), g_cfg.cp_name[0] ? g_cfg.cp_name : g_cfg.cp_ssid);
     int freq = channel_to_freq();
+    /* An EMPTY value is a parse error for the vendor parser, and it takes the whole
+     * config with it: "Line 10: failed to parse 'carplay_id='." then "Failed to read
+     * or parse configuration" then "Failed to add interface wlan0" - so the static AP
+     * could never start, on any bundle, while the id was unset (2026-11-21..25 logs).
+     * Omit the key instead of writing an empty one; the vendor default applies. */
+    char id_line[256] = "";
+    if (g_cfg.cp_id[0]) snprintf(id_line, sizeof(id_line), "carplay_id=%s\n", g_cfg.cp_id);
+    else log_msg("static AP: carplay_id is empty; the key is left out of the config");
     char buf[8192];
     snprintf(buf, sizeof(buf),
              "# wifi_daemon static AP (vendor wpa_supplicant AP mode)\n"
@@ -2300,7 +2308,7 @@ static bool write_ap_conf(void)
              "max_num_sta=%d\n"
              "app_info=1\n"
              "carplay_name=\"%s\"\n"
-             "carplay_id=%s\n"
+             "%s"
              "manufacturer=\"%s\"\n"
              "model_name=\"%s\"\n"
              "model_number=\"260128\"\n"
@@ -2317,7 +2325,7 @@ static bool write_ap_conf(void)
              "    auth_alg=OPEN\n"
              "    ignore_broadcast_ssid=%d\n"
              "}\n",
-             g_cfg.cp_max_sta, name, g_cfg.cp_id, g_cfg.cp_manufacturer,
+             g_cfg.cp_max_sta, name, id_line, g_cfg.cp_manufacturer,
              g_cfg.cp_model, name, ssid, freq, psk, g_cfg.cp_hidden ? 1 : 0);
     mkdir(APP_DIR, 0755);
     if (write_file_atomic(WPA_CONF, buf, 0600) != 0) {
