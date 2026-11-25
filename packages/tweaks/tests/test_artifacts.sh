@@ -238,6 +238,12 @@ for base in qml_eco3.0 new_qml qml_genesis; do
     fi
     grep -q 'TWEAKS_DISCLAIMER_260128' "$SB/$base/Screen_AppStandbyClock_Confirm.qml" || {
         echo "missing disclaimer marker in $base/Confirm.qml" >&2; exit 1; }
+# The disclaimer path has to be measurable: boot_profile.sh reads these wall-clock
+# markers from the journal, because journal timestamp formats differ per unit.
+for _marker in 'disclaimer: armed delay=' 'disclaimer: confirm sent at=' 'disclaimer: cancelled by touch at='; do
+        grep -q "\[tweaks\] $_marker" "$SB/$base/main.qml" || {
+            echo "missing measurement log '$_marker' in $base/main.qml" >&2; exit 1; }
+done
     for page in Screen_AppStandbyClock_Confirm Screen_AppStandbyClock_Confirm_Profile; do
         grep -q 'TWEAKS_UNGATED_CONFIRM' "$SB/$base/$page.qml" || {
             echo "Confirm button still gated on enableBtn in $base/$page.qml" >&2; exit 1; }

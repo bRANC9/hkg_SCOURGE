@@ -1083,7 +1083,9 @@ wait_wifi
 # slow boot can be compared with a fast one later.  Cheap (no scans, /proc only),
 # and it also records our own daemons' start offsets.
 if [ -f "$COMBO/boot_profile.sh" ]; then
-    sh "$COMBO/boot_profile.sh" /rw_data/boot_profile >> "$LOG" 2>&1 || true
+    # --full: the whole boot (dmesg, journal, unit timings) next to the offsets, so
+    # the disclaimer path can be read end to end instead of guessed.
+    sh "$COMBO/boot_profile.sh" --full /rw_data/boot_profile >> "$LOG" 2>&1 || true
     if [ -f /rw_data/boot_profile/boot.csv ]; then
         cp -f /rw_data/boot_profile/boot.csv "$USB_DIR/boot_profile.csv" 2>/dev/null || true
         log "boot profile: $(wc -l < /rw_data/boot_profile/boot.csv 2>/dev/null || echo 1) boot(s) on record"
@@ -1093,6 +1095,12 @@ if [ -f "$COMBO/boot_profile.sh" ]; then
         # question without a second run (2026-11-24).
         _last_boot=$(ls -1t /rw_data/boot_profile/*.txt 2>/dev/null | head -n 1)
         [ -n "$_last_boot" ] && cp -f "$_last_boot" "$USB_DIR/boot_profile_latest.txt" 2>/dev/null || true
+        # The full boot, one bundle per boot id: the report alone lost the kernel
+        # and unit timeline that explains a slow disclaimer.
+        for _f in dmesg.txt journal.txt units.txt unit_times.txt; do
+            _src=$(ls -1t /rw_data/boot_profile/full_*/"$_f" 2>/dev/null | head -n 1)
+            [ -n "$_src" ] && cp -f "$_src" "$USB_DIR/boot_$_f" 2>/dev/null || true
+        done
     fi
 fi
 

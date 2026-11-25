@@ -703,6 +703,7 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
 
     function cancelAutoConfirm() {
         autoConfirmTimer.stop()
+        console.log("[tweaks] disclaimer: cancelled by touch at=" + new Date().getTime())
         root.autoConfirmCancelled = true
         var r = root.autoAppRoot()
         if (r) {
@@ -722,8 +723,10 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
             var enabled = false
             if (x.status === 200 || x.status === 0)
                 enabled = String(x.responseText).replace(/\s+/g, "") === "1"
-            if (!enabled)
+            if (!enabled) {
+                console.log("[tweaks] disclaimer: auto-accept off at=" + new Date().getTime())
                 return
+            }
             var y = new XMLHttpRequest()
             y.onreadystatechange = function() {
                 if (y.readyState !== XMLHttpRequest.DONE)
@@ -737,6 +740,10 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
                 root.autoConfirmTimeout = timeout
                 root.autoConfirmRetries = 0
                 autoConfirmTimer.interval = timeout
+                // Wall clock, so boot_profile.sh can place the accept on the boot
+                // timeline (journal formats differ per unit; this number cannot).
+                console.log("[tweaks] disclaimer: armed delay=" + timeout +
+                            " at=" + new Date().getTime())
                 autoConfirmTimer.start()
             }
             y.open("GET", "file:///rw_data/tweaks/disclaimer_timeout_ms", true)
@@ -774,6 +781,7 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
     }
 
     function sendConfirm() {
+        console.log("[tweaks] disclaimer: confirm sent at=" + new Date().getTime())
         var r = root.autoAppRoot()
         if (r)
             r.disclaimerAutoDone = true

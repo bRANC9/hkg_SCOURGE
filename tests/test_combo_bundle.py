@@ -20,6 +20,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -234,6 +235,53 @@ class Collectors(unittest.TestCase):
             self.assertIn("boot=", line)
             self.assertIn("uptime=", line)
             self.assertEqual(len(list(out.glob("*.txt"))), 1, "expected one report file")
+            report = next(out.glob("*.txt")).read_text()
+            # The driver waits for the disclaimer: its timeline must be in the
+            # report, not inferred later from a different log file.
+            self.assertIn("--- disclaimer path", report)
+            self.assertIn("disclaimer_auto", report)
+
+    def test_boot_profile_places_the_disclaimer_on_the_boot_timeline(self):
+        # The disclaimer patch logs wall-clock milliseconds; the profile has to turn
+        # them into boot-relative offsets, otherwise "why is the disclaimer slow"
+        # stays a guess.  A fake journalctl stands in for the unit's journal.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            bindir = out / "bin"
+            bindir.mkdir()
+            now_ms = int(time.time() * 1000)
+            fake = bindir / "journalctl"
+            fake.write_text(
+                "#!/bin/sh\n"
+                "echo 'Nov 25 09:00:00 unit qt.qml: [tweaks] disclaimer: armed delay=2000 at=%d'\n"
+                "echo 'Nov 25 09:00:02 unit qt.qml: [tweaks] disclaimer: confirm sent at=%d'\n"
+                % (now_ms, now_ms + 2400))
+            fake.chmod(0o755)
+            profile = out / "prof"
+            profile.mkdir()
+            done = subprocess.run(["/bin/sh", str(BOOT), str(profile)],
+                                  env=dict(os.environ, PATH=str(bindir) + ":" + os.environ["PATH"]),
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+            self.assertEqual(done.returncode, 0, done.stderr.decode())
+            report = next(profile.glob("*.txt")).read_text()
+            self.assertIn("--- disclaimer path", report)
+            self.assertIn("disclaimer: confirm sent", report)
+            line = (profile / "boot.csv").read_text().strip()
+            self.assertIn("disclaimer_accept=", line)
+            accept = [p for p in line.split() if p.startswith("disclaimer_accept=")][0]
+            self.assertGreaterEqual(int(accept.split("=", 1)[1]), 0)
+
+    def test_boot_profile_full_writes_the_whole_boot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            done = subprocess.run(["/bin/sh", str(BOOT), "--full", tmp],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180)
+            self.assertEqual(done.returncode, 0, done.stderr.decode())
+            full = list(Path(tmp).glob("full_*"))
+            self.assertEqual(len(full), 1, "expected one full_<boot_id> directory")
+            # At least the unit inventory must survive even where dmesg/journal are
+            # restricted (a CI host without CAP_SYSLOG writes an empty dmesg.txt).
+            self.assertTrue((full[0] / "dmesg.txt").is_file() or (full[0] / "journal.txt").is_file(),
+                            "no kernel/journal artifact")
 
     def test_perf_snapshot_writes_report_and_csv(self):
         with tempfile.TemporaryDirectory() as tmp:

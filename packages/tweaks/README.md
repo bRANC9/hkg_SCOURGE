@@ -38,6 +38,16 @@ silently blocks every cluster CAN write while the front display still works.
   selectable 0–10 second delay in 0.25 s steps. Any touch before the timeout
   cancels it for
   that boot. It confirms the last-used driver.
+
+  The patch reads `/rw_data/tweaks/disclaimer_auto` and
+  `disclaimer_timeout_ms` **once**, when the Confirm screen starts, so a missing
+  file means manual accept for that boot — `packages/common/boot_profile.sh`
+  now records whether those files were written before or after the boot, which
+  is the first thing to check when the screen still waits for a tap. The delay
+  itself is the tunable: `POST /set?disclaimer_timeout_ms=0` fires the confirm
+  immediately and the patch retries every 250 ms until the engine's Confirm
+  button accepts it (the stock button used to stay disabled until
+  `inter_show_window_fg()` finished).
 - **Automatic DST** — flips `APP_SETTING_CLOCK_DAYLIGHTSAVETIME` from a
   selectable IANA timezone. The build downloads the latest IANA tzdata and
   bundles a compiled `zoneinfo` tree.
