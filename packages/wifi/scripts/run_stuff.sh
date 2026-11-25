@@ -1717,6 +1717,12 @@ _apistatus() {
     [ -n "$_HTTPRQ" ] || { echo "{\"error\":\"no httpreq\"}"; return 1; }
     "$_HTTPRQ" GET 127.0.0.1 8090 /status 2>/dev/null | head -c 1200
 }
+# A stale trace from an earlier round must not look like this round's: the master
+# copies $RW_DIR/api_walk.txt unconditionally, and on 2026-11-25 it put a Nov-23 file
+# (every call "no httpreq") on the stick as if it were new.
+if [ ! -f "$STICK_ROOT/api_walk" ]; then
+    rm -f "$RW_DIR/api_walk.txt" "$RW_DIR/api_walk.done" 2>/dev/null || true
+fi
 if [ -f "$STICK_ROOT/api_walk" ]; then
     _walk="$RW_DIR/api_walk.txt"
     # Timed, because this walk is the single largest block in a combo run: the

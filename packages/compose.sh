@@ -1167,7 +1167,7 @@ fi
 # background so it overlaps tweaks/ambient/fake-engine instead of extending the flash
 # by ~100 s.  Wait for it here - bounded - then copy the trace, so the answer is on
 # the stick and the done beeps mean "everything finished", not "stages finished".
-if [ -f "$RW_DIR/api_walk.done" ] || [ -f "$STICK_DIR/api_walk" ]; then
+if [ -f "$STICK_DIR/api_walk" ]; then
     _aw=0
     while [ ! -f "$RW_DIR/api_walk.done" ] && [ "$_aw" -lt 180 ]; do
         sleep 2 2>/dev/null || sleep 1
@@ -1175,7 +1175,11 @@ if [ -f "$RW_DIR/api_walk.done" ] || [ -f "$STICK_DIR/api_walk" ]; then
     done
     if [ -f "$RW_DIR/api_walk.done" ]; then
         _aw_s=$(cat "$RW_DIR/api_walk.done" 2>/dev/null || echo "?")
-        [ -f "$RW_DIR/api_walk.txt" ] && cp -f "$RW_DIR/api_walk.txt" "$USB_DIR/api_walk.txt" 2>/dev/null || true
+        # Only this round's trace: the marker is written by the walk itself, so its
+        # presence (and freshness) is the proof that the file belongs to this run.
+        _aw_age=$(( $(date +%s 2>/dev/null || echo 0) - $(date -r "$RW_DIR/api_walk.done" +%s 2>/dev/null || echo 0) ))
+        [ "$_aw_age" -lt 900 ] && [ -f "$RW_DIR/api_walk.txt" ] && \
+            cp -f "$RW_DIR/api_walk.txt" "$USB_DIR/api_walk.txt" 2>/dev/null || true
         log "api walk finished: ${_aw_s}s of deliberate waits (overlapped with the other stages)"
     else
         [ -f "$RW_DIR/api_walk.txt" ] && cp -f "$RW_DIR/api_walk.txt" "$USB_DIR/api_walk.txt" 2>/dev/null || true
