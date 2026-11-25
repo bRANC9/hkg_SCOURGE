@@ -12,6 +12,11 @@
  * its own server.  Copying rather than re-deriving keeps the two units of code
  * identical until they are merged into one include.
  *
+ * This file needs no feature macro: it sleeps with nanosleep(), not usleep(),
+ * so a standalone translation unit (: _POSIX_C_SOURCE 200809L or nothing at
+ * all) compiles it as-is.  It also self-checks the only snprintf that could
+ * truncate, so -Wno-format-truncation is not required either.
+ *
  * The includer must define, before this file:
  *
  *   #define AP_DHCP_IP            "10.42.0.1"
@@ -42,6 +47,15 @@
 #ifndef AP_DHCPD_INC
 #define AP_DHCPD_INC
 
+/* Ask for the POSIX surface the server uses (clock_gettime, nanosleep, strtok_r,
+ * O_CLOEXEC, fchmod, kill) BEFORE the first system header of this translation
+ * unit: a caller building with a strict -std=c11 gets them too.  If the caller's
+ * own headers were included first this is a harmless no-op, and a caller that
+ * needs a different profile defines it itself. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -51,11 +65,13 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <stddef.h>
-#include <stdarg.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <signal.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,6 +98,14 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 /* self-contained helpers (no daemon dependency)                       */
 /* ------------------------------------------------------------------ */
+
+/* nanosleep rather than usleep: no feature macro, no deprecation warning. */
+static AP_DHCPD_UNUSED void apd_sleep_ms(int ms)
+{
+    if (ms <= 0) return;
+    struct timespec ts = { .tv_sec = ms / 1000, .tv_nsec = (long)(ms % 1000) * 1000000L };
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+}
 
 static AP_DHCPD_UNUSED int64_t apd_now_ms(void)
 {
@@ -151,8 +175,12 @@ static AP_DHCPD_UNUSED int apd_pid_by_comm(const char *name)
     struct dirent *de;
     while ((de = readdir(d))) {
         if (!isdigit((unsigned char)de->d_name[0])) continue;
-        char path[64], comm[128];
-        snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
+        /* d_name is at most 255 bytes, so 320 cannot truncate - and the return
+         * value is checked anyway, because a caller may build without
+         * -Wno-format-truncation. */
+        char path[320], comm[128];
+        int pn = snprintf(path, sizeof(path), "/proc/%s/comm", de->d_name);
+        if (pn <= 0 || (size_t)pn >= sizeof(path)) continue;
         if (apd_read_file(path, comm, sizeof(comm)) <= 0) continue;
         char *nl = strchr(comm, '\n');
         if (nl) *nl = 0;
@@ -630,7 +658,7 @@ static AP_DHCPD_UNUSED bool apd_dhcpd_start(const ap_dhcp_ops_t *ops)
     for (int i = 0; i < 20; i++) {
         if (apd_dhcpd_running()) return true;
         if (!apd_proc_alive(pid)) break;
-        usleep(100000);
+        apd_sleep_ms(100);
     }
     return false;
 }
@@ -640,7 +668,7 @@ static AP_DHCPD_UNUSED void apd_dhcpd_stop(void)
     int pid = apd_dhcpd_pid();
     if (pid > 1) {
         kill(pid, SIGTERM);
-        for (int i = 0; i < 10 && apd_proc_alive(pid); i++) usleep(100000);
+        for (int i = 0; i < 10 && apd_proc_alive(pid); i++) apd_sleep_ms(100);
         if (apd_proc_alive(pid)) kill(pid, SIGKILL);
         waitpid(pid, NULL, WNOHANG);
     }
