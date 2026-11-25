@@ -34,17 +34,23 @@ BOOT=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)
 BOOT_WALL=$(( $(date +%s) - UP ))
 wall_off_ms() { awk -v b="$BOOT_WALL" -v w="$1" 'BEGIN { printf "%d", w / 1000 - b }'; }
 
-# start offset (seconds after boot) of the first process with this name
+# Start offset (seconds after boot) of the EARLIEST process with this name.
+# A package install restarts AppHomeScreen (and AppStandbyClock), and the old
+# process is gone by the time this runs: taking the first match reported the
+# restart (474 s) as if the UI had come up eight minutes after boot.  The
+# minimum over the live processes is the closest honest answer; the original
+# boot-time offsets stay readable in dmesg/journal.
 proc_off() {
+    _min=""
     for _d in /proc/[0-9]*; do
         [ -r "$_d/comm" ] || continue
         [ "$(cat "$_d/comm" 2>/dev/null)" = "$1" ] || continue
         _st=$(awk '{print $22}' "$_d/stat" 2>/dev/null)
         [ -n "$_st" ] || continue
-        echo $((_st / HZ))
-        return 0
+        _s=$((_st / HZ))
+        if [ -z "$_min" ] || [ "$_s" -lt "$_min" ]; then _min=$_s; fi
     done
-    echo ""
+    echo "$_min"
 }
 
 # kernel milestone second from dmesg for a pattern
@@ -57,7 +63,9 @@ REPORT="$OUT/$BOOT.txt"
     echo "=== boot profile $BOOT"
     echo "uptime_s=$UP  measured_at=$(date -u 2>/dev/null)"
     echo
-    echo "--- process start offsets (seconds after boot)"
+    echo "--- process start offsets (seconds after boot; earliest live process of that name)"
+    echo "    (a package install restarts AppHomeScreen/AppStandbyClock, so a restarted"
+    echo "     process reports its restart offset - the boot-time values are in dmesg/journal)"
     for name in weston AppHomeScreen AppLauncher connmand vbtd BluetoothHMI wifi_daemon battery_daemon tweaks_daemon ambient_daemon fake_engine_daemon dbus-daemon systemd-udevd; do
         echo "$(proc_off "$name") $name"
     done | sort -n | awk 'NF == 2 { printf "  %6ss  %s\n", $1, $2 }'
