@@ -183,6 +183,13 @@ BUNDLE_LAYOUT=combo
 [ "$STANDALONE" = 0 ] || BUNDLE_LAYOUT=standalone
 # Only a bundle that installs or removes a radio owner may stop WiFi.  A
 # battery,tweaks-only bundle must leave a working WiFi app alone.
+#
+# A SINGLE-package run must not stop the service it is about to restart either:
+# on 2026-11-25 a "MODE=wifi" run stopped wifi-daemon in the preflight, then the
+# wifi stage never ran (its digest gate refused), and the head unit was left with
+# the radio down and no daemon - "restart does not bring it back", hours lost.
+# With this only full/restore runs stop it up front; a single stage handles its
+# own service, so a failed stage leaves the box exactly as it was.
 STOPS_WIFI=0
 case " $SELECTED " in
     *" wifi "*|*" wifi1b "*|*" migrate "*) STOPS_WIFI=1 ;;
@@ -300,7 +307,7 @@ PAYLOAD_ID="$PAYLOAD_ID"
 # The bundle shape and the helper digest are baked in: a missing/unreadable
 # standalone marker or cleanup helper fails closed before any stage runs.
 BUNDLE_LAYOUT="$BUNDLE_LAYOUT"
-STOPS_WIFI="$STOPS_WIFI"
+STOPS_WIFI_BAKED="$STOPS_WIFI"
 RUNTIME_CLEANUP_MD5="$RUNTIME_CLEANUP_MD5"
 INSTALL_IO_MD5="$INSTALL_IO_MD5"
 STANDALONE_MARKER_MD5="$STANDALONE_MD5"
@@ -315,6 +322,15 @@ $STAGE_DIGESTS
 #   restore   restore every selected package in reverse order
 #   battery|wifi|tweaks   just that package
 MODE="\${SCOURGE_MODE:-all}"
+# A single-package run must not stop the service it is about to restart: on
+# 2026-11-25 a MODE=wifi run stopped wifi-daemon in the preflight, the wifi stage
+# then never ran (its digest gate refused) and the head unit was left with the radio
+# down and no daemon - "restart does not bring it back".  Only a full/restore run
+# stops it up front; a single stage owns its service and a failure changes nothing.
+case "\$MODE" in
+    all|restore) STOPS_WIFI="\${STOPS_WIFI_BAKED:-0}" ;;
+    *)           STOPS_WIFI=0 ;;
+esac
 
 set -u
 
