@@ -4871,10 +4871,20 @@ static void watchdog(void)
             return;
         }
     } else if (g_apply_pid == 0 && g_cfg.mode == MODE_CLIENT) {
-        if ((!g_observed.ip[0] || !g_observed.associated) &&
-            now - g_last_mode_ms > retry_ms + 5000) {
-            log_msg("watchdog: client not associated; re-applying (backoff=%ds)",
-                    g_apply_failed ? 60 : 15);
+        /* A live address outranks an unconfirmed association flag.  The 2026-11-25
+         * bundle (wifi_logs_20261125101301) shows what the old rule cost: SSH came
+         * up on 192.0.2.60, the probe could not confirm the association, and every
+         * 15-20 s the watchdog re-applied and restarted the supplicant - 62 applies,
+         * 46 "SSH started" and 41 supplicantmanager fights in 3.4 hours, with the
+         * link torn down right after it worked.  With an address, retry only on the
+         * slow path and say so. */
+        bool linked = g_observed.ip[0] != 0;
+        int64_t deadline = linked ? retry_ms * 8 + 5000 : retry_ms + 5000;
+        if ((!linked || !g_observed.associated) && now - g_last_mode_ms > deadline) {
+            log_msg("watchdog: client %s; re-applying (backoff=%ds, ip=%s)",
+                    linked ? "association unconfirmed but wlan0 holds an address"
+                           : "not associated",
+                    (int)(deadline / 1000), linked ? g_observed.ip : "none");
             apply_mode(false);
             return;
         }
@@ -4882,9 +4892,12 @@ static void watchdog(void)
     if (g_cfg.ssh_enabled) {
         /* In carplay mode with a refused tether the box runs as a station:
          * demanding ap_on here restarted SSH on every watchdog tick. */
+        /* An address is the readiness that matters for listening; the
+         * association flag is the vendor stack's opinion, and it disagrees. */
         bool role_ready = (g_cfg.mode == MODE_CARPLAY &&
                            (g_observed.ap_on || tether_rejected_active())) ||
-                          (g_cfg.mode == MODE_CLIENT && g_observed.associated);
+                          (g_cfg.mode == MODE_CLIENT &&
+                           (g_observed.associated || g_observed.ip[0]));
         if (g_observed.ip[0] && role_ready) {
             if (!g_observed.ssh_ours) {
                 log_msg("watchdog: SSH down; restarting");
@@ -5628,6 +5641,14 @@ static bool dump_logs_to_usb(bool verbose)
     copy_event_log(dir, APP_DIR "/install.log");
     copy_status_redacted(dir);
     copy_if_exists(dir, HOME_STATE);
+    /* Did the initial_root failsafe even start the stick?  Without these the
+     * bundle cannot answer "why was there no beep": the master's own
+     * run_stuff_started.log lives on the stick, and the loader's log lives on
+     * the unit (2026-11-25: a plug-in round wrote no result and no beep, and
+     * nothing in the dump said whether the loader ran). */
+    copy_if_exists(dir, "/rw_data/initial_root.log");
+    copy_if_exists(dir, "/rw_data/initial_root_boot.txt");
+    copy_if_exists(dir, "/rw_data/second_stage_preflight.txt");
     copy_config_redacted(dir);
 
     char state[800];
@@ -5637,6 +5658,12 @@ static bool dump_logs_to_usb(bool verbose)
         fprintf(f, "wifi log dump %s build_id=%s mono_ms=%lld\n", stamp, WIFI_BUILD_ID, (long long)now_ms());
         snap_cmd(f, "uname -a");
         snap_cmd(f, "cat /proc/mounts");
+        /* Is a stick mounted, and is the failsafe's own ledger present?  The
+         * loader scans the media usb tree for run_stuff.sh first, so a mount that
+         * exists without a run is the difference between "not mounted" and
+         * "gated". */
+        snap_cmd(f, "ls -la /media/usb /media/usb/* /run/media /mnt 2>/dev/null | sed -n '1,60p'");
+        snap_cmd(f, "ls -la /rw_data/initial_root.log /rw_data/RUN_STUFF_OK.txt /rw_data/*.scourge-ledger 2>/dev/null");
         snap_cmd(f, "date");
         snap_cmd(f, "ps w | grep -E 'wpa_supplicant|connmand|supplicantmanager|wifi_daemon|dropbear|vbtd' | grep -v grep");
         snap_cmd(f, "connmanctl technologies");
