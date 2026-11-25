@@ -232,6 +232,13 @@ if [ -f "$MDNSD_BAK" ] && [ -f "$MDNSD_BIN" ]; then
         fi
     fi
 fi
+if grep -q '^# SCOURGE_REGDOM=1$' /etc/modprobe.d/90-scourge-regdom.conf 2>/dev/null; then
+    if io_remove /etc/modprobe.d/90-scourge-regdom.conf; then
+        log "removed the regulatory domain drop-in (5 GHz AP hint)"
+    else
+        log "WARNING: cannot remove /etc/modprobe.d/90-scourge-regdom.conf"
+    fi
+fi
 if grep -q '^# SCOURGE_MDNSD_RESTART=1$' /etc/systemd/system/carplay_mdnsd.service.d/50-scourge-restart.conf 2>/dev/null; then
     if io_remove /etc/systemd/system/carplay_mdnsd.service.d/50-scourge-restart.conf; then
         rmdir /etc/systemd/system/carplay_mdnsd.service.d 2>/dev/null || true

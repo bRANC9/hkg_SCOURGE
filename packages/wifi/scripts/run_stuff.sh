@@ -882,6 +882,34 @@ EOF
     fi
 fi
 
+# ---- regulatory domain: the 5 GHz AP depends on it ----------------------
+# cfg80211 has no regulatory.db on this unit (/lib/firmware/regulatory.* absent)
+# and the driver's own country never reaches cfg80211: after
+# "wl -i wlan0 country GB" the driver reports GB while "iw reg get" still says
+# country 00, so every 5 GHz channel stays PASSIVE-SCAN at 0.0 dBm.  Measured on
+# the car 2026-11-25: the static AP on ch36 applied its address, started the
+# supplicant and then never beaconed ("regdom after set = '00'", AP interface up
+# with an empty SSID).  Without a signed regdb the only knob is the cfg80211
+# module parameter, which is read at load time - so this takes effect on the next
+# boot.  AA's wireless bootstrap needs the 5 GHz AP; SSH does not (2.4 GHz is
+# allowed as active here).
+REG_DROPIN="/etc/modprobe.d/90-scourge-regdom.conf"
+REG_DOMAIN="${SCOURGE_REGDOM:-GB}"
+if [ -d /etc/modprobe.d ] && command -v modprobe >/dev/null 2>&1; then
+    if io_mkdir /etc/modprobe.d 2>/dev/null; then
+        printf '# SCOURGE_REGDOM=1\noptions cfg80211 ieee80211_regdom=%s\n' "$REG_DOMAIN" \
+            > "$RW_DIR/regdom.conf"
+        if io_copy "$RW_DIR/regdom.conf" "$REG_DROPIN"; then
+            chmod 644 "$REG_DROPIN" 2>/dev/null || true
+            log "regulatory domain drop-in installed: $REG_DOMAIN (applies on the next boot)"
+        else
+            log "WARNING: cannot install $REG_DROPIN - the 5 GHz AP stays blocked"
+        fi
+    else
+        log "WARNING: cannot create /etc/modprobe.d - the 5 GHz AP stays blocked"
+    fi
+fi
+
 # ---- optional mdnsd "continue as root" patch ----------------------------
 # Experimental, disarmed by default: multicast EPERM was observed but its
 # cause is not established. NOPing setuid retains root; it does not take
