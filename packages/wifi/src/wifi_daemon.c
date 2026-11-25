@@ -2247,6 +2247,22 @@ static int apd_ops_run(const char *cmd) { return sh("%s", cmd); }
 static bool apd_ops_stop(void) { return g_stop != 0; }
 static const ap_dhcp_ops_t g_apd_ops = { apd_ops_log, apd_ops_run, apd_ops_stop };
 
+/* The AP owns 10.42.0.1/24.  When the mode switches back to client that address can
+ * survive on wlan0, and then every "is there an address?" check says yes: the
+ * 2026-11-25 test AP left it behind, the client path skipped the static lease, and
+ * the box sat on 10.42.0.1 with no route to the home network (SSH lost, the WiFi
+ * page showing 10.42.0.1 on the client tab).  A STATION address is any IPv4 on
+ * wlan0 that is not the AP's own. */
+static bool wlan_ip_station(char *out, size_t n)
+{
+    char ip[64] = "";
+    if (!wlan_ip(ip, sizeof(ip))) return false;
+    if (!strcmp(ip, AP_DHCP_IP)) return false;
+    if (out && n) snprintf(out, n, "%s", ip);
+    return true;
+}
+
+
 static bool ssid_same(const char *a, const char *b);
 static bool carplay_fw_open(void);
 static void carplay_fw_close(void);
@@ -3725,7 +3741,7 @@ static bool client_connect(void)
     {
         char ip[64] = "";
         if (client_associated()) {
-            if (wlan_ip(ip, sizeof(ip))) {
+            if (wlan_ip_station(ip, sizeof(ip))) {
                 set_msg("client connected to '%s' (%s)", net_ssid(g_client_net), ip);
                 return true;
             }
@@ -4235,7 +4251,7 @@ static bool ssh_start(void)
             log_msg("ssh: AP refused by the vendor; listening on station address %s", ip);
             ready = true;
         }
-    } else if (g_cfg.wlan_on && wlan_ip(ip, sizeof(ip))) {
+    } else if (g_cfg.wlan_on && wlan_ip_station(ip, sizeof(ip))) {
         /* Any IPv4 on wlan0 is enough to listen on, in every mode.  Keying this on
          * MODE_CLIENT left SSH "Stopped" while the unit was in AP mode even though
          * the interface had an address (2026-11-24 WiFi page screenshot: mode
@@ -4435,6 +4451,16 @@ static bool apply_mode_work(bool pair)
     if (g_cfg.mode == MODE_CLIENT) {
         bt_pair_stop();
         log_msg("apply: phase=supplicant_start (client)");
+        /* The AP's own address must not survive into client mode: "there is an
+         * IPv4" then looks like a working station link and the static lease never
+         * runs (2026-11-25: the test AP left 10.42.0.1/24 behind). */
+        {
+            char cur[64] = "";
+            if (wlan_ip(cur, sizeof(cur)) && !strcmp(cur, AP_DHCP_IP)) {
+                log_msg("apply: flushing the leftover AP address %s before client mode", cur);
+                apd_iface_flush(&g_apd_ops);
+            }
+        }
         if (!ensure_wifi_ready()) { ssh_stop(); return false; }
         /* Only tear the AP down when one is actually up.  Calling ap_stop() on
          * every retry killed the supplicant that also serves the client link, so
@@ -4999,7 +5025,7 @@ static void collect_observation(observation_t *o)
     if (g_cfg.wlan_on && g_cfg.mode == MODE_CARPLAY && o->ap_on)
         str_copy(o->ip, sizeof(o->ip), o->ap.ip);
     if (g_cfg.wlan_on && g_cfg.mode == MODE_CLIENT) {
-        wlan_ip(o->ip, sizeof(o->ip));
+        wlan_ip_station(o->ip, sizeof(o->ip));
         if (o->ip[0]) o->associated = true;
     }
     if (o->associated && o->ip[0]) {
