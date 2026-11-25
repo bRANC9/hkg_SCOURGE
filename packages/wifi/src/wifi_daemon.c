@@ -6309,6 +6309,22 @@ static void http_handle(int fd)
                 g_cfg.ap_method == AP_METHOD_TETHER ? "tether" : "static",
                 g_cfg.ap_purpose == AP_PURPOSE_AA ? "aa" : "ssh");
       ap_start_done2: ;
+    } else if (!strcmp(method, "POST") && !strcmp(path, "/restart")) {
+        /* One-button "reconnect now".  The WLAN switch reaches the same state in two
+         * steps, and a station that comes back as "managed but never associates"
+         * (wpa_state=SCANNING for ever, 2026-11-25 after an AP test) only recovers
+         * when the interface is torn down and rebuilt - which is why the mode had to
+         * be flipped by hand in the car.  This does exactly that, in one call. */
+        g_cfg.wlan_on = true;
+        if (g_cfg.mode == MODE_OFF) g_cfg.mode = MODE_CLIENT;
+        config_save();
+        ssh_stop();
+        stop_all();
+        stop_wpa_supplicant();
+        iface_down();
+        iface_up();
+        apply_mode(false);
+        snprintf(body, sizeof(body), "{\"ok\":true,\"mode\":\"%s\"}\n", mode_name());
     } else if (!strcmp(method, "POST") && !strcmp(path, "/client/connect")) {
         g_cfg.mode = MODE_CLIENT;
         g_cfg.wlan_on = true;

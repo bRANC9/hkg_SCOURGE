@@ -856,6 +856,17 @@ Item {
                         root.aaCheck()
                     }
                 }
+                WifiButton {
+                    width: 200
+                    label: "Reconnect"
+                    // One tap instead of Off -> Client: a station that comes back as
+                    // "managed but stuck in SCANNING" only recovers when the interface
+                    // is torn down and rebuilt, and doing that by hand was the only way
+                    // on the car (2026-11-25).  /restart does exactly that in one call,
+                    // and it also re-imports nothing, so the credentials stay as they are.
+                    buttonEnabled: root.serviceOk
+                    onClicked: root.post("/restart")
+                }
                 // Import USB / Save logs live in the shared action row above.
             }
 

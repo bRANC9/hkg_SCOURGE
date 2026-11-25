@@ -116,6 +116,7 @@ Bound to `127.0.0.1:8090` only.
 | GET | `/logs?source=daemon\|wpa\|ssh` | last 16 KB of the selected log |
 | POST | `/mode?value=off\|client\|carplay` | switch mode |
 | POST | `/wlan?on=0\|1` | WLAN toggle |
+| POST | `/restart` | tear the interface down and re-apply the current mode (the UI's **Reconnect**: recovers a station stuck in `wpa_state=SCANNING` without flipping modes by hand) |
 | POST | `/import` | import `wifi.txt` from USB |
 | POST | `/client/connect` | connect using imported client credentials |
 | POST | `/client/disconnect` | disconnect / off |
