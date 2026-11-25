@@ -2001,6 +2001,10 @@ static void aa_bt_api(bool *sdp, bool *rfcomm, bool *measured)
                strstr(json, "\"rfcomm_api\": true") != NULL);
 }
 
+/* The static AP's own address.  Defined up here because ap_probe() needs it to
+ * tell "the interface still holds the station address" from "the AP owns it". */
+#define AP_DHCP_IP            "10.42.0.1"
+
 static void ap_probe(ap_probe_t *p)
 {
     memset(p, 0, sizeof(*p));
@@ -2067,6 +2071,10 @@ static void ap_probe(ap_probe_t *p)
     } else p->ip[0] = 0;
     char station_ip[64] = "";
     read_file(AP_STATION_IP, station_ip, sizeof(station_ip));
+    /* A memory file that holds the AP's own address cannot distinguish the two
+     * states it exists for, and it made every static AP look "not ready" while it
+     * was beaconing.  Ignore it (the writer above no longer creates one). */
+    if (!strcmp(trim(station_ip), AP_DHCP_IP)) station_ip[0] = 0;
     p->state = AP_UNKNOWN;
     if (!p->conflict) {
         /* tether == -1 means "no ConnMan wifi technology to ask" (this unit keeps
@@ -2169,7 +2177,16 @@ static bool client_disconnect(void);
 
 static bool ap_remember_station(const ap_probe_t *p)
 {
-    return !p->station || !p->ip[0] || write_file_atomic(AP_STATION_IP, p->ip, 0600) == 0;
+    /* Never remember the AP's own address as "the station address we found before
+     * the AP took over": ap_probe() compares the live address against this file to
+     * tell "still on the station" from "the AP owns the interface", so recording
+     * 10.42.0.1 poisoned it and every later AP looked like a station link
+     * (2026-11-25: ap.station-ip held 10.42.0.1, the AP was beaconing with the
+     * right SSID and address, and ap_probe still reported AP_INTERFACE_UP, so
+     * ap_wait_ready timed out and the AP was torn down again and again). */
+    if (!p->station || !p->ip[0]) return true;
+    if (!strcmp(p->ip, AP_DHCP_IP)) return true;
+    return write_file_atomic(AP_STATION_IP, p->ip, 0600) == 0;
 }
 
 typedef enum { AP_WAIT_READY, AP_WAIT_NEVER, AP_WAIT_PENDING, AP_WAIT_LOST, AP_WAIT_UNKNOWN } ap_wait_t;
@@ -2230,7 +2247,8 @@ static bool tether_rejected_active(void)
 /* needs a DHCP server, which packages/common/ap_dhcpd.inc is: the      */
 /* behaviour-identical extraction of Wifi1b's proven w2_dhcpd_run().    */
 /* ------------------------------------------------------------------ */
-#define AP_DHCP_IP            "10.42.0.1"
+/* Defined early: ap_probe() below needs it to tell the AP's own address from a
+ * remembered station address. */
 #define AP_DHCP_CIDR          "10.42.0.1/24"
 #define AP_DHCP_NETMASK       "255.255.255.0"
 #define AP_DHCP_BROADCAST     "10.42.0.255"
