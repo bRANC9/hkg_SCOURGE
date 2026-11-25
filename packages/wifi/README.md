@@ -377,24 +377,20 @@ The sequence is Wifi1b's, step for step: validate SSID/key → regulatory domain
 AP config → interface up → supplicant → static address (10.42.0.1/24) →
 readiness → DHCP (pool .10-.200) → owned firewall rules.
 
-The regulatory domain needs **two** things, and the second one was missing until
-2026-11-25:
+The regulatory domain is the whole 5 GHz story, and on **this** unit (kernel
+**4.1.27-abl**, measured 2026-11-25) only one of the three paths can work:
 
-1. **The signed database.** cfg80211 on this unit has no `regulatory.db`, and
-   without a valid signed pair it stays on `country 00` (world) and *ignores* the
-   `ieee80211_regdom` hint as well — which is why the `modprobe.d` drop-in
-   (`/etc/modprobe.d/90-scourge-regdom.conf`) changed nothing on its own. The
-   payload now ships `firmware/regulatory.db` + `regulatory.db.p7s`
-   (upstream wireless-regdb, pinned in `config/third_party.lock`, fetched by
-   `scripts/fetch_regdb.py`) and the stage installs the pair into
-   `/lib/firmware`, keeping a `.scourge-bak` of anything it replaces. The files
-   are verified by their `RGDB` magic, because a hand-made file cannot work: the
-   signature is checked against the key compiled into the kernel.
-2. **The country.** `HU` (owner's country; ETSI, the same 5 GHz ranges as the
-   vendor's own `ccode=GB`, MICOM country EU). The daemon sets `iw reg set HU`,
-   also tries the vendor tool (`wl -i wlan0 country HU`) because the FullMAC
-   firmware keeps its own country, and logs both answers plus the resulting
-   `iw reg get` — `00` there means 5 GHz beaconing is still impossible.
+| path | status on the car |
+| --- | --- |
+| `regulatory.db` + `regulatory.db.p7s` in `/lib/firmware` | **inert** — cfg80211 only learned to read the signed database in 4.15. We still ship it (payload `firmware/`, upstream wireless-regdb pinned in `config/third_party.lock`, `scripts/fetch_regdb.py`, installed with a `.scourge-bak` and an `RGDB` magic check) because it costs nothing and any newer kernel uses it. |
+| `ieee80211_regdom` hint (`/etc/modprobe.d/90-scourge-regdom.conf`, `HU`) | **read, but ineffective** — the module parameter is `HU` after boot (verified), yet 4.1 passes the regdomain request to **CRDA**, a userspace daemon that does not exist on this image, so `iw reg get` stays `country 00` (world) and world forbids 5 GHz beacons. |
+| vendor firmware country (`wl -i wlan0 country HU`) | **works** — `wl -i wlan0 country` went `DE (DE/0) GERMANY` → `HU (HU/0) HUNGARY`. The FullMAC firmware keeps its own country table and never publishes it to cfg80211, so this is the lever that decides whether the driver will beacon on a 5 GHz channel. |
+
+`HU` is the owner's country (ETSI; same 5 GHz ranges as the vendor's own
+`ccode=GB`, MICOM country EU). The daemon sets `iw reg set HU`, calls
+`wl -i wlan0 country HU`, and logs both answers plus the resulting `iw reg get`
+— `00` there is expected on 4.1 and is **not** proof that the AP cannot beacon;
+the AP's own readiness probe is.
 
 The status and the Status card show `ap_method`, `ap_purpose`,
 `ap_dhcp_pool`, `ap_dhcp_leases` and the **actual** band/channel, plus the AA
