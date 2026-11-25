@@ -50,7 +50,17 @@ if [ -x "$HERE/../../aa/vbtd_api.target" ]; then
 else
     echo "note: packages/aa/vbtd_api.target not built (make -C packages/aa target-vbtd-api)" >&2
 fi
-mkdir -p "$OUT/payload/lib"
+mkdir -p "$OUT/payload/lib" "$OUT/payload/firmware"
+# Signed regulatory database: without it cfg80211 stays on "country 00" (world),
+# which forbids beaconing on every 5 GHz channel, and the 5 GHz AP - the only band
+# wireless Android Auto accepts - cannot start.  Fetched, never hand-made: the
+# signature is verified against the key compiled into the kernel.
+if python3 scripts/fetch_regdb.py; then
+    cp -f build/regdb/regulatory.db build/regdb/regulatory.db.p7s "$OUT/payload/firmware/" \
+        && cp -f build/regdb/version.txt "$OUT/payload/firmware/regdb-version.txt"
+else
+    echo "WARNING: regulatory.db not available; the 5 GHz AP stays blocked (2.4 GHz is unaffected)" >&2
+fi
 [ -f "$HERE/artifacts/facts/hwinfo.txt" ] && cp -f "$HERE/artifacts/facts/hwinfo.txt" "$OUT/payload/facts/hwinfo.txt" || true
 cp "$ROOT/../common/install_io.sh" "$OUT/payload/lib/"
 

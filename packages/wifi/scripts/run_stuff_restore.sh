@@ -239,6 +239,18 @@ if grep -q '^# SCOURGE_REGDOM=1$' /etc/modprobe.d/90-scourge-regdom.conf 2>/dev/
         log "WARNING: cannot remove /etc/modprobe.d/90-scourge-regdom.conf"
     fi
 fi
+# The regulatory database is stock-free: either restore what was there or drop
+# the pair we installed, never leave a half state behind.
+for _f in regulatory.db regulatory.db.p7s; do
+    if [ -f "/lib/firmware/$_f.scourge-bak" ]; then
+        io_copy "/lib/firmware/$_f.scourge-bak" "/lib/firmware/$_f" && \
+            io_remove "/lib/firmware/$_f.scourge-bak" && log "restored the stock /lib/firmware/$_f"
+    elif [ -f "/lib/firmware/$_f" ]; then
+        io_remove "/lib/firmware/$_f" && log "removed the installed /lib/firmware/$_f"
+    fi
+done
+io_remove "$RW_DIR/regdb-version.txt" 2>/dev/null || true
+
 if grep -q '^# SCOURGE_MDNSD_RESTART=1$' /etc/systemd/system/carplay_mdnsd.service.d/50-scourge-restart.conf 2>/dev/null; then
     if io_remove /etc/systemd/system/carplay_mdnsd.service.d/50-scourge-restart.conf; then
         rmdir /etc/systemd/system/carplay_mdnsd.service.d 2>/dev/null || true

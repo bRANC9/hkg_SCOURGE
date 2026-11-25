@@ -50,3 +50,20 @@ used_for  = packages/wifi static-musl SSH server (build_dropbear.sh)
 url       = https://data.iana.org/time-zones/
 license   = public domain
 used_for  = packages/tweaks automatic-DST zoneinfo (fetched at package build)
+
+
+[wireless-regdb]
+url       = https://deb.debian.org/debian/pool/main/w/wireless-regdb/wireless-regdb_2026.09.03-1_all.deb
+license   = ISC-style permissive (wireless-regdb, Luis R. Rodriguez / Seth Forshee);
+            fetched only, nothing is redistributed from this repo
+version   = 2026.09.03-1 (Debian packaging of upstream wireless-regdb)
+used_for  = the signed regulatory.db + regulatory.db.p7s the WiFi payload installs
+            into /lib/firmware.  cfg80211 on the unit reports "country 00" (world)
+            and world forbids 5 GHz beacons, so the 5 GHz AP (wireless Android Auto)
+            cannot start.  Without a VALID SIGNED pair cfg80211 also ignores the
+            ieee80211_regdom hint, which is why a hand-made file is useless: the
+            signature is checked against the key compiled into the kernel.  The
+            -upstream files are shipped (not Debian's own key variant).
+files.regulatory.db.sha256     = 7e236caecd939c8ec98be4870bf30422f28ffef2565a38aaaa2d9ddabd0c2641
+files.regulatory.db.p7s.sha256 = 50332f0db09b8bcc719235ec4985c27377f2cc2f42abb7b5dcf951866c5a888a
+sha256.2026.09.03-1 = 3a7fba8c6aff128ca715235504e026f6e30d873c032ee2f7c924e7fe6b94f624

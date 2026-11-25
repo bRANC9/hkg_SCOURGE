@@ -894,7 +894,35 @@ fi
 # boot.  AA's wireless bootstrap needs the 5 GHz AP; SSH does not (2.4 GHz is
 # allowed as active here).
 REG_DROPIN="/etc/modprobe.d/90-scourge-regdom.conf"
-REG_DOMAIN="${SCOURGE_REGDOM:-GB}"
+# HU is the owner's country (ETSI, same 5 GHz ranges as the vendor's ccode=GB).
+REG_DOMAIN="${SCOURGE_REGDOM:-HU}"
+# ---- signed regulatory database -----------------------------------------
+# The hint below does NOTHING without a valid signed regulatory.db: cfg80211
+# keeps "country 00" (world), and world forbids beaconing on every 5 GHz channel,
+# so the 5 GHz AP - the only band wireless Android Auto accepts - cannot start.
+# That is why the drop-in alone changed nothing (measured 2026-11-25).  The pair
+# comes from the payload (upstream wireless-regdb, signed with the key the kernel
+# carries); a hand-made file would be ignored.
+FW_DIR="/lib/firmware"
+if [ -f "$PAYLOAD/firmware/regulatory.db" ] && [ -f "$PAYLOAD/firmware/regulatory.db.p7s" ]; then
+    for _f in regulatory.db regulatory.db.p7s; do
+        if [ -f "$FW_DIR/$_f" ] && [ ! -f "$FW_DIR/$_f.scourge-bak" ]; then
+            if io_copy "$FW_DIR/$_f" "$RW_DIR/$_f.stock"; then
+                io_copy "$RW_DIR/$_f.stock" "$FW_DIR/$_f.scourge-bak" || true
+            fi
+        fi
+        io_copy "$PAYLOAD/firmware/$_f" "$FW_DIR/$_f" || log "WARNING: cannot install $FW_DIR/$_f"
+    done
+    # Magic is the cheap proof that a database landed, not an error page.
+    if [ "$(head -c 4 "$FW_DIR/regulatory.db" 2>/dev/null)" = "RGDB" ]; then
+        log "regulatory.db installed (signed pair): 5 GHz beaconing is possible"
+    else
+        log "WARNING: $FW_DIR/regulatory.db has no RGDB magic - 5 GHz stays blocked"
+    fi
+    io_copy "$PAYLOAD/firmware/regdb-version.txt" "$RW_DIR/regdb-version.txt" || true
+else
+    log "WARNING: payload carries no regulatory.db - cfg80211 stays on country 00 (no 5 GHz AP)"
+fi
 if [ -d /etc/modprobe.d ] && command -v modprobe >/dev/null 2>&1; then
     if io_mkdir /etc/modprobe.d 2>/dev/null; then
         printf '# SCOURGE_REGDOM=1\noptions cfg80211 ieee80211_regdom=%s\n' "$REG_DOMAIN" \
@@ -909,6 +937,13 @@ if [ -d /etc/modprobe.d ] && command -v modprobe >/dev/null 2>&1; then
         log "WARNING: cannot create /etc/modprobe.d - the 5 GHz AP stays blocked"
     fi
 fi
+# Apply the hint now (cfg80211 also reads the module parameter at load time) and
+# report what the radio really says: 00 means passive scan, i.e. no 5 GHz AP.
+iw reg set "$REG_DOMAIN" 2>/dev/null && log "iw reg set $REG_DOMAIN applied" \
+    || log "WARNING: iw reg set $REG_DOMAIN failed"
+_regdom_now=$(iw reg get 2>/dev/null | sed -n 's/^country \([^:]*\).*/\1/p' | head -n 1)
+[ -n "$_regdom_now" ] || _regdom_now=unknown
+log "regdomain now: $_regdom_now (00 = world = 5 GHz passive scan)"
 
 # ---- optional mdnsd "continue as root" patch ----------------------------
 # Experimental, disarmed by default: multicast EPERM was observed but its

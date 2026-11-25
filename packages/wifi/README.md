@@ -373,10 +373,28 @@ the default is the one that can actually work:
 | `ap_method` | `static` (default) / `tether` | `static` runs our own vendor-supplicant AP (`mode=2`) plus our own DHCP server (`packages/common/ap_dhcpd.inc`, the behaviour-identical extraction of Wifi1b's proven `--dhcpd`); `tether` asks ConnMan and keeps the vendor-refusal cooldown as a diagnostic |
 | `ap_purpose` | `ssh` (default) / `aa` | `aa` refuses any band fallback: the phone only joins a 5 GHz AP, so an AA bootstrap stays on channel 36 and fails loudly instead of silently moving to 2.4 GHz channel 6 |
 
-The sequence is Wifi1b's, step for step: validate SSID/key → `iw reg set GB`
-(the vendor config has no `country=`, and "country 00" forbids 5 GHz beacons) →
+The sequence is Wifi1b's, step for step: validate SSID/key → regulatory domain →
 AP config → interface up → supplicant → static address (10.42.0.1/24) →
 readiness → DHCP (pool .10-.200) → owned firewall rules.
+
+The regulatory domain needs **two** things, and the second one was missing until
+2026-11-25:
+
+1. **The signed database.** cfg80211 on this unit has no `regulatory.db`, and
+   without a valid signed pair it stays on `country 00` (world) and *ignores* the
+   `ieee80211_regdom` hint as well — which is why the `modprobe.d` drop-in
+   (`/etc/modprobe.d/90-scourge-regdom.conf`) changed nothing on its own. The
+   payload now ships `firmware/regulatory.db` + `regulatory.db.p7s`
+   (upstream wireless-regdb, pinned in `config/third_party.lock`, fetched by
+   `scripts/fetch_regdb.py`) and the stage installs the pair into
+   `/lib/firmware`, keeping a `.scourge-bak` of anything it replaces. The files
+   are verified by their `RGDB` magic, because a hand-made file cannot work: the
+   signature is checked against the key compiled into the kernel.
+2. **The country.** `HU` (owner's country; ETSI, the same 5 GHz ranges as the
+   vendor's own `ccode=GB`, MICOM country EU). The daemon sets `iw reg set HU`,
+   also tries the vendor tool (`wl -i wlan0 country HU`) because the FullMAC
+   firmware keeps its own country, and logs both answers plus the resulting
+   `iw reg get` — `00` there means 5 GHz beaconing is still impossible.
 
 The status and the Status card show `ap_method`, `ap_purpose`,
 `ap_dhcp_pool`, `ap_dhcp_leases` and the **actual** band/channel, plus the AA

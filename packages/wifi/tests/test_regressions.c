@@ -52,7 +52,7 @@ static int mock_command(char *out, size_t n, const char *cmd)
         disconnects++;
         station_status = NULL;
     }
-    if (static_ap_fixture && strstr(cmd, "iw reg set GB")) ap_active = true;
+    if (static_ap_fixture && strstr(cmd, "iw reg set HU")) ap_active = true;
     if (strstr(cmd, "iw dev wlan0 info") && ap_active) {
         active_probes++;
         if (lose_after && active_probes >= lose_after) ap_active = false;

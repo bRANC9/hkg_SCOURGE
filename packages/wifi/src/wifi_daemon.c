@@ -2003,6 +2003,10 @@ static void aa_bt_api(bool *sdp, bool *rfcomm, bool *measured)
 
 /* The static AP's own address.  Defined up here because ap_probe() needs it to
  * tell "the interface still holds the station address" from "the AP owns it". */
+/* Owner's country for the regulatory hint: ETSI, so the 5 GHz ranges match the
+ * vendor's own ccode=GB and the unit's MICOM country (EU). */
+#define WIFI_COUNTRY          "HU"
+
 #define AP_DHCP_IP            "10.42.0.1"
 
 static void ap_probe(ap_probe_t *p)
@@ -2395,9 +2399,25 @@ static bool ap_start_static(void)
         return false;
     }
     /* 5 GHz needs a regulatory domain: the vendor supplicant config has no
-     * country= field, and "country 00" (world) forbids beaconing there. */
-    if (sh("iw reg set GB 2>/dev/null") == 0) log_msg("static AP: regulatory domain GB requested");
-    else log_msg("static AP: iw reg set GB failed; 5 GHz may be rejected");
+     * country= field, and "country 00" (world) forbids beaconing there.  HU is the
+     * owner's country (ETSI, same 5 GHz ranges as the vendor's own ccode=GB), and
+     * the hint only has an effect now that the payload installs the signed
+     * regulatory.db: without a valid signed pair cfg80211 ignores it and stays on
+     * world.  The vendor tool is tried too - the FullMAC firmware keeps its own
+     * country and cfg80211's hint does not reach it. */
+    if (sh("iw reg set " WIFI_COUNTRY " 2>/dev/null") == 0)
+        log_msg("static AP: regulatory domain " WIFI_COUNTRY " requested");
+    else log_msg("static AP: iw reg set " WIFI_COUNTRY " failed; 5 GHz may be rejected");
+    {
+        char wl[256] = "";
+        int rc = sh_out(wl, sizeof(wl), "wl -i wlan0 country " WIFI_COUNTRY " 2>&1");
+        log_msg("static AP: vendor country set rc=%d %s", rc, rc == 0 ? "" : "(wl missing or refused)");
+        if (rc == 0) {
+            char now[256] = "";
+            if (sh_out(now, sizeof(now), "wl -i wlan0 country 2>&1") == 0)
+                log_msg("static AP: vendor country now '%s'", trim(now));
+        }
+    }
     /* Verify it, do not assume it: a FullMAC driver may keep its firmware/NVRAM
      * country and ignore the request.  With "country 00" every 5 GHz range is
      * PASSIVE-SCAN (measured: 5745/5765 MHz at 0.0 dBm), so an AP there cannot
@@ -2415,7 +2435,7 @@ static bool ap_start_static(void)
                 memcpy(country, line, n);
                 country[n] = 0;
             }
-            log_msg("static AP: regdom after set = '%s' (GB expected; 00 = world, no 5 GHz beacons)", country);
+            log_msg("static AP: regdom after set = '%s' (" WIFI_COUNTRY " expected; 00 = world, no 5 GHz beacons)", country);
         }
     }
     apd_dhcpd_stop();
