@@ -2390,12 +2390,40 @@ static bool ap_dhcpd_ensure(void)
  * So a 5 GHz AP needs the vendor chanspec set before the supplicant starts, and it
  * must be a channel the firmware knows. */
 #define AP_VENDOR_FALLBACK_CHANNEL 149
+/* Fill out with the interface type from "iw dev wlan0 info" and say whether it is
+ * AP.  Used to log every step of the prime: the 2026-11-25 run showed the chanspec
+ * being accepted ("Chanspec set to 0xd095") and the interface still managed right
+ * afterwards, so the next bundle has to show WHICH step loses the AP role. */
+static bool iface_type_is_ap(char *out, size_t n)
+{
+    if (out && n) out[0] = 0;
+    char t[256] = "";
+    if (sh_out(t, sizeof(t), "iw dev wlan0 info 2>/dev/null") != 0) return false;
+    const char *p = strstr(t, "type ");
+    if (!p) return false;
+    p += 5;
+    size_t i = 0;
+    while (*p && *p != '\n' && *p != ' ' && *p != '\t' && n && i + 1 < n) out[i++] = *p++;
+    if (out && n) out[i] = 0;
+    return out && !strcmp(out, "AP");
+}
+
+static void prime_step_log(const char *step)
+{
+    char t[64] = "";
+    iface_type_is_ap(t, sizeof(t));
+    log_msg("static AP: prime %s -> type %s", step, t[0] ? t : "(unknown)");
+}
+
 static int vendor_channel_prime(int channel)
 {
     if (channel < 32) return channel;   /* 2.4 GHz needs none of this */
     char out[256] = "";
     sh("wl -i wlan0 down 2>/dev/null");
-    sh("wl -i wlan0 ap 1 2>/dev/null");
+    prime_step_log("after down");
+    int rc_ap = sh_out(out, sizeof(out), "wl -i wlan0 ap 1 2>&1");
+    log_msg("static AP: prime wl ap 1 rc=%d '%s'", rc_ap, trim(out));
+    prime_step_log("after ap 1");
     char cmd[160];
     snprintf(cmd, sizeof(cmd), "wl -i wlan0 chanspec %d/20 2>&1", channel);
     int rc = sh_out(out, sizeof(out), cmd);
@@ -2403,12 +2431,24 @@ static int vendor_channel_prime(int channel)
         log_msg("static AP: vendor refused channel %d (%s); using %d",
                 channel, trim(out), AP_VENDOR_FALLBACK_CHANNEL);
         channel = AP_VENDOR_FALLBACK_CHANNEL;
-        char cmd[128];
         snprintf(cmd, sizeof(cmd), "wl -i wlan0 chanspec %d/20 2>&1", channel);
         sh_out(out, sizeof(out), cmd);
     }
     log_msg("static AP: vendor chanspec %d -> %s", channel, trim(out));
+    prime_step_log("after chanspec");
     sh("wl -i wlan0 up 2>/dev/null");
+    prime_step_log("after up");
+    /* The role has to survive the up: if it did not, take it back while the
+     * interface is already up, and say which of the two worked. */
+    char t[64] = "";
+    if (!iface_type_is_ap(t, sizeof(t))) {
+        sh("wl -i wlan0 ap 1 2>/dev/null");
+        prime_step_log("after a second wl ap 1");
+        if (!iface_type_is_ap(t, sizeof(t))) {
+            sh("iw dev wlan0 set type __ap 2>/dev/null");
+            prime_step_log("after iw set type __ap");
+        }
+    }
     return channel;
 }
 
