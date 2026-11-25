@@ -1191,6 +1191,7 @@ Item {
 
           // ---- Android Auto readiness (same radio, second consumer) ------
           property string aaVerdict: ""
+          property string aaReason: ""
           property string aaApSsid: ""
           property string aaApIp: ""
           property bool aaApReady: false
@@ -1220,6 +1221,8 @@ Item {
                 aaVendorApi = d.bt.sdp_api === true && d.bt.rfcomm_api === true
             }
                       aaVerdict = d.verdict || ""
+                  // Why the verdict says that: the daemon names the missing half.
+                  aaReason = d.reason || ""
                   } catch (e) {}
               })
           }
@@ -2088,7 +2091,17 @@ Item {
                 }
                 QText {
                     x: 24
-                    y: 78
+                    y: 70
+                    width: 1120
+                    text: root.aaReason
+                    font.pixelSize: 20
+                    color: root.aaVerdict === "aa-wireless-possible" ? "#4CAF50" : "#B0B0B0"
+                    elide: Text.ElideRight
+                    visible: root.aaReason !== ""
+                  }
+                  QText {
+                    x: 24
+                    y: 100
                     width: 1120
                     text: "The AP half is what the phone joins; the Bluetooth bootstrap "
                           + "needs an RFCOMM channel with our UUID. If the vendor stack "
