@@ -864,7 +864,12 @@ Item {
                     // is torn down and rebuilt, and doing that by hand was the only way
                     // on the car (2026-11-25).  /restart does exactly that in one call,
                     // and it also re-imports nothing, so the credentials stay as they are.
-                    buttonEnabled: root.serviceOk
+                    // Deliberately NOT gated on serviceOk: that flag needs status.json
+                    // to be younger than 8 s, and a daemon stuck in an apply (or one
+                    // that just lost the link) is exactly when the button is needed -
+                    // it was grey on the car in that state (2026-11-25).  The POST
+                    // reports the real outcome on the message line.
+                    buttonEnabled: true
                     onClicked: root.post("/restart")
                 }
                 // Import USB / Save logs live in the shared action row above.
