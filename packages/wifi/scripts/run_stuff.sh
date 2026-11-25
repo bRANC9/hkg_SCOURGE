@@ -897,12 +897,14 @@ REG_DROPIN="/etc/modprobe.d/90-scourge-regdom.conf"
 # HU is the owner's country (ETSI, same 5 GHz ranges as the vendor's ccode=GB).
 REG_DOMAIN="${SCOURGE_REGDOM:-HU}"
 # ---- signed regulatory database -----------------------------------------
-# The hint below does NOTHING without a valid signed regulatory.db: cfg80211
-# keeps "country 00" (world), and world forbids beaconing on every 5 GHz channel,
-# so the 5 GHz AP - the only band wireless Android Auto accepts - cannot start.
-# That is why the drop-in alone changed nothing (measured 2026-11-25).  The pair
-# comes from the payload (upstream wireless-regdb, signed with the key the kernel
-# carries); a hand-made file would be ignored.
+# Kernel 4.1.27 on this unit: cfg80211 only learned to read the signed
+# regulatory.db in 4.15, so the pair below is INERT here - 4.1 asks CRDA (a
+# userspace daemon this image does not have) and the module parameter alone never
+# moves it off "country 00" (world), which forbids 5 GHz beacons.  Measured
+# 2026-11-25: ieee80211_regdom read as HU, "iw reg get" still country 00, while
+# "wl -i wlan0 country HU" did stick in the vendor firmware (DE -> HU/HUNGARY).
+# The pair is shipped anyway: it costs nothing and any newer kernel uses it.
+# The stage logs all three answers so the bundle never has to guess.
 FW_DIR="/lib/firmware"
 if [ -f "$PAYLOAD/firmware/regulatory.db" ] && [ -f "$PAYLOAD/firmware/regulatory.db.p7s" ]; then
     for _f in regulatory.db regulatory.db.p7s; do
@@ -915,7 +917,7 @@ if [ -f "$PAYLOAD/firmware/regulatory.db" ] && [ -f "$PAYLOAD/firmware/regulator
     done
     # Magic is the cheap proof that a database landed, not an error page.
     if [ "$(head -c 4 "$FW_DIR/regulatory.db" 2>/dev/null)" = "RGDB" ]; then
-        log "regulatory.db installed (signed pair): 5 GHz beaconing is possible"
+        log "regulatory.db installed (signed pair; cfg80211 only reads it from 4.15 on)"
     else
         log "WARNING: $FW_DIR/regulatory.db has no RGDB magic - 5 GHz stays blocked"
     fi

@@ -2400,11 +2400,16 @@ static bool ap_start_static(void)
     }
     /* 5 GHz needs a regulatory domain: the vendor supplicant config has no
      * country= field, and "country 00" (world) forbids beaconing there.  HU is the
-     * owner's country (ETSI, same 5 GHz ranges as the vendor's own ccode=GB), and
-     * the hint only has an effect now that the payload installs the signed
-     * regulatory.db: without a valid signed pair cfg80211 ignores it and stays on
-     * world.  The vendor tool is tried too - the FullMAC firmware keeps its own
-     * country and cfg80211's hint does not reach it. */
+     * owner's country (ETSI, same 5 GHz ranges as the vendor's own ccode=GB).
+     *
+     * On this unit (kernel 4.1.27) the cfg80211 hint cannot work at all: 4.1 hands
+     * the regdomain request to CRDA, a userspace daemon this image does not have,
+     * so "iw reg get" stays country 00 however the module parameter is set (the
+     * signed regulatory.db is only read from 4.15 on, and it is inert here).  The
+     * lever that actually decides the band is the vendor firmware country below:
+     * measured 2026-11-25, "wl -i wlan0 country" DE -> HU (HU/0 HUNGARY).  Both are
+     * attempted and both answers are logged, so the next bundle says which one the
+     * radio obeyed. */
     if (sh("iw reg set " WIFI_COUNTRY " 2>/dev/null") == 0)
         log_msg("static AP: regulatory domain " WIFI_COUNTRY " requested");
     else log_msg("static AP: iw reg set " WIFI_COUNTRY " failed; 5 GHz may be rejected");
