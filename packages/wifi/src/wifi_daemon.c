@@ -2482,15 +2482,6 @@ static bool ap_start_static(void)
             log_msg("static AP: regdom after set = '%s' (" WIFI_COUNTRY " expected; 00 = world, no 5 GHz beacons)", country);
         }
     }
-    /* A 5 GHz AP needs the vendor chanspec before the supplicant starts; the
-     * firmware's channel table decides which channels exist at all (no ch36..48). */
-    if (channel_to_freq() >= 5000) {
-        int primed = vendor_channel_prime(g_cfg.cp_channel);
-        if (primed != g_cfg.cp_channel) {
-            g_cfg.cp_channel = primed;
-            config_save();
-        }
-    }
     apd_dhcpd_stop();
     apd_iface_flush(&g_apd_ops);
 
@@ -2501,12 +2492,30 @@ static bool ap_start_static(void)
             config_save();
             log_msg("static AP: retrying on 2.4 GHz channel 6 (SSH purpose)");
         }
+        /* The vendor chanspec must be in place IMMEDIATELY before the supplicant
+         * starts: set earlier in the sequence it was lost again (measured
+         * 2026-11-25, ch149: "vendor chanspec 149 -> Chanspec set to 0xd095" in the
+         * log, and the probe still found role=0 - the interface had gone back to
+         * managed).  5 GHz also gets nl80211 only: the wext fallback cannot hold an
+         * AP role, and the working manual run used -Dnl80211. */
+        bool is5 = channel_to_freq() >= 5000;
+        if (is5) {
+            int primed = vendor_channel_prime(g_cfg.cp_channel);
+            if (primed != g_cfg.cp_channel) {
+                g_cfg.cp_channel = primed;
+                config_save();
+                if (!write_ap_conf()) return false;
+            }
+            char t[128] = "";
+            if (sh_out(t, sizeof(t), "iw dev wlan0 info 2>/dev/null | grep -m1 type") == 0)
+                log_msg("static AP: iface after prime: %s", trim(t));
+        }
         if (!write_ap_conf()) return false;
         g_ap_conf_active = true;
 #ifdef WIFI_TEST
-        bool started = test_supplicant_ok ? true : supplicant_try("nl80211,wext");
+        bool started = test_supplicant_ok ? true : supplicant_try(is5 ? "nl80211" : "nl80211,wext");
 #else
-        bool started = supplicant_try("nl80211,wext");
+        bool started = supplicant_try(is5 ? "nl80211" : "nl80211,wext");
 #endif
         if (!started) {
             g_ap_conf_active = false;
