@@ -58,6 +58,14 @@ dmesg_s() {
     dmesg 2>/dev/null | grep -m1 -E "$1" | sed -n 's/^\[ *\([0-9.]*\)\].*/\1/p' | cut -d. -f1
 }
 
+# Is there anything in this boot's journal?  Probed once, cheaply (one line): an
+# empty journal is a finding the report has to state, not a silently missing file.
+JOURNAL_STATE=none
+if command -v journalctl >/dev/null 2>&1 &&
+   [ -n "$(journalctl -b -n 1 --no-pager 2>/dev/null)" ]; then
+    JOURNAL_STATE=present
+fi
+
 REPORT="$OUT/$BOOT.txt"
 {
     echo "=== boot profile $BOOT"
@@ -158,6 +166,7 @@ if command -v journalctl >/dev/null 2>&1; then
            tail -n 1 | sed -n 's/.*at=\([0-9][0-9]*\).*/\1/p')
     [ -n "$_acc" ] && add disclaimer_accept "$(wall_off_ms "$_acc")"
 fi
+add journal "${JOURNAL_STATE:-unknown}"
 add measured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
 if [ -f "$CSV" ]; then
     grep -v "^boot=$BOOT " "$CSV" > "$CSV.tmp" 2>/dev/null || : > "$CSV.tmp"
@@ -176,6 +185,13 @@ if [ "$FULL" = 1 ]; then
     fi
     if command -v journalctl >/dev/null 2>&1; then
         journalctl -b --no-pager -o short-monotonic 2>/dev/null | tail -n 4000 > "$FULLDIR/journal.txt" 2>/dev/null || true
+    fi
+    # An empty journal is a finding, not a missing file: this unit stores
+    # nothing (17 bytes on 2026-11-25), so the disclaimer markers can only come
+    # from dmesg and the process offsets.
+    if [ ! -s "$FULLDIR/journal.txt" ] || [ "$(wc -c < "$FULLDIR/journal.txt" 2>/dev/null || echo 0)" -lt 200 ]; then
+        printf 'journalctl produced no usable output on this unit (%s bytes)\n' \
+            "$(wc -c < "$FULLDIR/journal.txt" 2>/dev/null || echo 0)" > "$FULLDIR/journal.txt"
     fi
     if command -v systemctl >/dev/null 2>&1; then
         systemctl list-units --type=service --all --no-pager --no-legend 2>/dev/null |

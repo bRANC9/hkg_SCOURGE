@@ -223,6 +223,9 @@ typedef struct {
 typedef struct {
     int gen;
     bool driver, associated, ap_on, carplay_svc, mdns_svc, ssh_ours;
+    /* ConnMan has a ready service for our address.  Informational only: the link
+     * works without it on this unit. */
+    bool connman_service;
     ap_probe_t ap;
     bool vendor_ssh_22, debug_console;
     int signal, clients, secure_console;
@@ -2330,8 +2333,28 @@ static bool ap_start_static(void)
     }
     /* 5 GHz needs a regulatory domain: the vendor supplicant config has no
      * country= field, and "country 00" (world) forbids beaconing there. */
-    if (sh("iw reg set GB 2>/dev/null") == 0) log_msg("static AP: regulatory domain GB");
+    if (sh("iw reg set GB 2>/dev/null") == 0) log_msg("static AP: regulatory domain GB requested");
     else log_msg("static AP: iw reg set GB failed; 5 GHz may be rejected");
+    /* Verify it, do not assume it: a FullMAC driver may keep its firmware/NVRAM
+     * country and ignore the request.  With "country 00" every 5 GHz range is
+     * PASSIVE-SCAN (measured: 5745/5765 MHz at 0.0 dBm), so an AP there cannot
+     * beacon and the readiness wait can only time out.  Logging the answer here
+     * is what tells the next bundle which of the two happened. */
+    {
+        char reg[512] = "";
+        if (sh_out(reg, sizeof(reg), "iw reg get 2>/dev/null") == 0) {
+            char country[64] = "unknown";
+            char *line = strstr(reg, "country ");
+            if (line) {
+                line += 8;
+                size_t n = strcspn(line, ":\n");
+                if (n >= sizeof(country)) n = sizeof(country) - 1;
+                memcpy(country, line, n);
+                country[n] = 0;
+            }
+            log_msg("static AP: regdom after set = '%s' (GB expected; 00 = world, no 5 GHz beacons)", country);
+        }
+    }
     apd_dhcpd_stop();
     apd_iface_flush(&g_apd_ops);
 
@@ -3333,6 +3356,8 @@ static bool bt_pair_start(void)
     return ok;
 }
 
+static bool g_pair_stop_attempted;   /* one pairing decision per apply */
+
 static void bt_pair_stop(void)
 {
     /* Idempotent: one apply asks for the stop from its mode branch and again from
@@ -3340,7 +3365,8 @@ static void bt_pair_stop(void)
      * same "Pairing stop not confirmed" (2026-11-25 bundle: two identical lines per
      * apply, for nothing).  A failed stop leaves the flag clear, so the next apply
      * still retries it. */
-    if (g_pair_stop_confirmed) return;
+    if (g_pair_stop_confirmed || g_pair_stop_attempted) return;
+    g_pair_stop_attempted = true;
     bt_set_pairing(false);
     set_msg("%s", g_pair_msg);
 }
@@ -4642,6 +4668,10 @@ static void start_pending_work(void)
          * until the apply finishes. */
         close_child_fds(-1);
         g_apply_pid = 0;
+        /* One pairing decision per apply: the mode branch and an explicit stop
+         * request used to log the same "Pairing stop not confirmed" twice, every
+         * apply, for months of bundles. */
+        g_pair_stop_attempted = false;
         bool ok = false;
 #ifdef WIFI_TEST
         if (test_work) ok = test_work(g_work_kind, g_current_pair);
@@ -4657,6 +4687,7 @@ static void start_pending_work(void)
             ssh_stop();
             ok = !g_cfg.ssh_enabled || !g_cfg.wlan_on || g_cfg.mode == MODE_OFF || ssh_start();
         } else if (g_work_kind == WORK_PAIR_STOP) {
+            g_pair_stop_attempted = false;   /* the user asked: try even if it failed earlier */
             bt_pair_stop();
             ok = g_pair_stop_confirmed;
         } else if (g_work_kind == WORK_DUMP) ok = dump_logs_to_usb(true);
@@ -4937,19 +4968,25 @@ static void collect_observation(observation_t *o)
     o->ap_on = o->ap.state == AP_READY;
     str_copy(o->ap_ssid, sizeof(o->ap_ssid), o->ap.ssid);
     o->clients = o->ap_on ? ap_clients() : 0;
+    /* Radio truth first.  An IPv4 on wlan0 is proof of a working link; the
+     * association flag and ConnMan's service list are opinions that disagree on
+     * this unit (the supplicant owns the link, ConnMan has no wifi technology).
+     * The old order demanded a ready ConnMan service and therefore wiped a live
+     * 192.0.2.60 on every probe, so the watchdog saw "ip=none, not associated" and
+     * re-applied every 20 s while SSH was up on that address (2026-11-25 bundle
+     * wifi_logs_20261125104254: 14 re-applies, every one logged with ip=none). */
     o->associated = g_cfg.mode == MODE_CLIENT && client_associated();
     if (g_cfg.wlan_on && g_cfg.mode == MODE_CARPLAY && o->ap_on)
         str_copy(o->ip, sizeof(o->ip), o->ap.ip);
-    if (g_cfg.wlan_on && g_cfg.mode == MODE_CLIENT && o->associated)
+    if (g_cfg.wlan_on && g_cfg.mode == MODE_CLIENT) {
         wlan_ip(o->ip, sizeof(o->ip));
+        if (o->ip[0]) o->associated = true;
+    }
     if (o->associated && o->ip[0]) {
         char services[16384], service[256];
-        if (sh_out(services, sizeof(services), "connmanctl services 2>/dev/null") != 0 ||
-            !find_connected_service(services, service, sizeof(service)) ||
-            !client_service_ready(service, o->ip)) {
-            o->associated = false;
-            o->ip[0] = 0;
-        }
+        o->connman_service = sh_out(services, sizeof(services), "connmanctl services 2>/dev/null") == 0 &&
+                             find_connected_service(services, service, sizeof(service)) &&
+                             client_service_ready(service, o->ip);
     }
     if (o->associated) wlan_link(o->ssid, sizeof(o->ssid), &o->signal);
     o->carplay_svc = sh("systemctl is-active --quiet carplay_iAP2.service 2>/dev/null") == 0;
@@ -5065,6 +5102,7 @@ static void build_status(char *out, size_t n)
              "\"ip\":\"%s\","
              "\"ssid\":\"%s\","
              "\"signal\":%d,"
+             "\"connman_service\":%s,"
              "\"aa_ap\":%s,"
              "\"ap_active\":%s,"
              "\"ap_interface\":%s,"
@@ -5114,7 +5152,8 @@ static void build_status(char *out, size_t n)
              g_cfg.wlan_on ? "true" : "false",
              o->driver ? "true" : "false",
              radio_owner[0] ? radio_owner : "",
-             ip_e, ssid_e, o->signal, g_cfg.aa_ap ? "true" : "false",
+             ip_e, ssid_e, o->signal, o->connman_service ? "true" : "false",
+             g_cfg.aa_ap ? "true" : "false",
              o->ap_on ? "true" : "false", o->ap.role == 1 ? "true" : "false",
              o->ap.state, fresh ? o->ap.tether : -1, ap_e, o->clients,
              g_cfg.ap_method == AP_METHOD_TETHER ? "tether" : "static",
@@ -5444,7 +5483,12 @@ static void copy_event_log(const char *dst_dir, const char *src)
                       * the worker stalled or why the AP never came up (2026-11-25). */
                      strstr(line, " apply: phase=") ||
                      strstr(line, "AP tether refused by the vendor") ||
-                     strstr(line, " ssh:") || strstr(line, " ssh deferred:");
+                     strstr(line, " ssh:") || strstr(line, " ssh deferred:") ||
+                     /* The static AP's own diagnostics: which attempt failed, why,
+                      * the regdomain it got and what the DHCP server did.  Without
+                      * these the 2026-11-25 bundle showed "AP stage=static-start-
+                      * attempt" and nothing that explained it. */
+                     strstr(line, "static AP:") || strstr(line, "dhcpd:");
         if (!event) continue;
         redact_secret(line, g_cfg.cp_psk); redact_secret(line, g_cfg.psk);
         fputs(line, out);
