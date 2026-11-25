@@ -458,6 +458,19 @@ int main(int argc, char **argv)
     pump();
     test_work = NULL;
 
+    /* Pairing stop is idempotent: the second call in the same apply must not run
+     * the VBT round again (two identical "Pairing stop not confirmed" lines per
+     * apply in the 2026-11-25 bundle). */
+    {
+        commands = 0;
+        g_pair_stop_confirmed = true;
+        str_copy(g_pair_msg, sizeof(g_pair_msg), "Pairing stopped");
+        bt_pair_stop();
+        assert(commands == 0);
+        assert(!strcmp(g_pair_msg, "Pairing stopped"));
+        g_pair_stop_confirmed = false;
+    }
+
     assert(is_pruneable_name("wifi_logs_20261109010203"));
     assert(!is_pruneable_name("wifi_logs_notes"));
     assert(!is_pruneable_name("wifi_logs_20261109010203_extra"));

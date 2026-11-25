@@ -2801,7 +2801,10 @@ static bool bt_set_pairing(bool on)
     }
     set_msg("%s", g_pair_msg);
     bt_state_save();
-    if (!on) g_pair_stop_confirmed = disc_set && pair_set && !g_bt_discoverable && !g_bt_pairable;
+    /* Turning pairing on invalidates a previous "stopped" verdict: without this a
+     * later bt_pair_stop() would think the window was already closed and skip. */
+    if (on) g_pair_stop_confirmed = false;
+    else g_pair_stop_confirmed = disc_set && pair_set && !g_bt_discoverable && !g_bt_pairable;
     return on ? (g_bt_discoverable || g_bt_pairable || (disc_set && pair_set)) : g_pair_stop_confirmed;
 }
 
@@ -3075,6 +3078,12 @@ static bool bt_pair_start(void)
 
 static void bt_pair_stop(void)
 {
+    /* Idempotent: one apply asks for the stop from its mode branch and again from
+     * an explicit stop request, and every call re-ran the VBT work and logged the
+     * same "Pairing stop not confirmed" (2026-11-25 bundle: two identical lines per
+     * apply, for nothing).  A failed stop leaves the flag clear, so the next apply
+     * still retries it. */
+    if (g_pair_stop_confirmed) return;
     bt_set_pairing(false);
     set_msg("%s", g_pair_msg);
 }
