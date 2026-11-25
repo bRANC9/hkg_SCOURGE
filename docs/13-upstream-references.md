@@ -6,6 +6,48 @@ at setup time into `third_party/` (gitignored) by
 This index tells agents (and humans) what is worth reading in the fetched
 material and where to find it, plus the wider ecosystem.
 
+## The head unit's own OSS drop (LG, 2023)
+
+Model `IWK2G3FQLWG` ("IAH1483SKDG") is listed on
+`opensource.lge.com` → B2B → Vehicle Component, two entries:
+
+| Entry | Source | Notice (component versions) |
+|---|---|---|
+| IAH1483SKDG 2.0 (osSeq 511245) | `IAH1483SKDG_2.0.zip` | `OSSNotice-2329_…_230713.html` |
+| IAH1483SKDG 3.0 (osSeq 511246) | `IAH1483SKDG_3.0.zip` (1.4 GB) | `OSSNotice-2652_…_230705.html` |
+
+The notice is the fastest way to know **which upstream versions the unit runs**:
+Linux 4.1.27, glibc 2.25, Qt 5.4.1, connman 1.29, systemd 225, BusyBox 1.23.2,
+bluez 5.43, hostap-utils 0.4.7, Wireless Tools 30, iw 4.1, libnl 3.2.25,
+dropbear 2015.68, dlt-daemon 2.16.0, CommonAPI 3.1.12, persistence 7.0.
+
+The zip carries **only copyleft sources** (GPL/LGPL/MPL) plus a toolchain —
+there is **no BSD/Apache/ISC material**, so the vendor `wpa_supplicant`
+(`android-external-wpa_supplicant_8`, BSD-3), `iw`, `dropbear` and the Qt apps
+(`AppHomeScreen`, `AppStandbyClock`) are **not** in it. Useful members:
+
+| Need | Member |
+|---|---|
+| Kernel + `bcmdhd` driver, AP/scan capability | `GPL-2.0/Linux Kernel/kernel-apl-df18113.tar.gz` (129 MB) |
+| Why `connmanctl tether` refuses (EACCES / EINVAL / EOPNOTSUPP, the LG `WIFI_AP_NOT_SUPPORTED` flag) | `GPL-2.0/connman/connman.tar.bz2` → `src/technology.c`, `plugins/wifi.c`, `client/commands.c` |
+| Which applets the unit really has | `GPL-2.0/busybox/busybox.tar.gz` → `.config` (`CONFIG_UDHCPD=y`, `CONFIG_UDHCPC=y`) |
+| Unit ordering / boot targets | `GPL-2.0/systemd/systemd.tar.bz2` |
+
+`tools/lge_oss_remote_zip.py` reads a member of that zip over HTTP range
+requests, because the link runs at ~135 KB/s and the listing (central directory,
+at the end of the file) is a few requests:
+
+```sh
+# presigned URL: POST /download/releaseFileDownloadUrl
+#   osSeq=511246&fileType=Op&fileIdx=1&modelName=IWK2G3FQLWG   (Op = source, Li = notice)
+python3 tools/lge_oss_remote_zip.py --url "<signed url>" list
+python3 tools/lge_oss_remote_zip.py --url "<signed url>" extract --out DIR \
+        --match connman/ --match busybox/ --limit-mb 60
+```
+
+A HEAD request returns 403 on a presigned GET URL — use a range GET (`-r 0-0`)
+to learn the size. The signed URL lives 30 minutes.
+
 ## The fetched TOCTOU repo (`third_party/ioniq5-usb-toctou/`)
 
 Its documentation is the deep background for docs/01–05. Read it from the

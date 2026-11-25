@@ -2503,6 +2503,23 @@ static bool ap_start(void)
         bool denied = strstr(out, "Permission denied") != NULL;
         bool rejected = rc != 0 || denied || strstr(out, "Error ") != NULL;
         log_msg("AP tether request frequency=%d rc=%d rejected=%d permission_denied=%d", freq, rc, rejected, denied);
+        /* Name the reason.  connmanctl prints "set_tethering_options Error: ..."
+         * and still exits 0, so the boolean above is all we knew from the car:
+         * the vendor connman (1.29, OSS drop IAH1483SKDG) refuses tethering with
+         * -EACCES (technology disabled), -EINVAL (no SSID/passphrase),
+         * -EOPNOTSUPP (no tethering bridge / driver refused) or because its LG
+         * extension already marked the AP WIFI_AP_NOT_SUPPORTED this boot. */
+        if (rejected) {
+            char why[200] = "";
+            char *line_out = out, *save_out = NULL;
+            for (char *l = strtok_r(line_out, "\n", &save_out); l; l = strtok_r(NULL, "\n", &save_out)) {
+                if (!strstr(l, "Error") && !strstr(l, "error")) continue;
+                str_copy(why, sizeof(why), trim(l));
+                break;
+            }
+            if (why[0]) redact_secret(why, g_cfg.cp_psk);
+            log_msg("AP tether refusal: %s", why[0] ? why : "(no error line in the output)");
+        }
         if (rejected && !denied) {
             g_tether_rejected = true;
             g_tether_rejected_ms = now_ms();
