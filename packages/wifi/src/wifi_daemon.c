@@ -3986,7 +3986,11 @@ static bool client_connect(void)
      * window and the stage reported FAIL (3 beeps).  Wait for the radio first, in the
      * same budget, when we are the supplicant's owner. */
     if (g_supp_no_dbus) {
-        for (int i = 0; i < 40 && !g_stop; i++) {
+        /* 60 s, not 20: on this unit the association landed ~35-40 s after the
+         * supplicant start (2026-11-25: started 17:10:51, agent still saw no link at
+         * 17:11:07, and the link was up by 17:11:4x).  A 20 s window gave up just
+         * before the link appeared and handed an unusable agent 85 s. */
+        for (int i = 0; i < 120 && !g_stop; i++) {
             if (client_associated() || iw_link_any_configured()) {
                 char ip[64] = "";
                 if (dhcp_acquire() || (wlan_ip(ip, sizeof(ip)) && ip[0])) {
@@ -3998,7 +4002,7 @@ static bool client_connect(void)
             }
             usleep(500000);
         }
-        log_msg("client: own supplicant did not associate within 20 s; trying the ConnMan agent");
+        log_msg("client: own supplicant did not associate within 60 s; trying the ConnMan agent");
     }
     bool agent_ok = client_connman_agent(service);
     /* A cached connection can finish between the precheck and connect reply
