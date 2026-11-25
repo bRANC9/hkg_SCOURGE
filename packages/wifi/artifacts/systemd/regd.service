@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors
+# SPDX-License-Identifier: AGPL-3.0-only
+[Unit]
+Description=Regulatory domain for the 5 GHz AP (CRDA stand-in)
+# cfg80211 on 4.1.27 asks CRDA for every regulatory hint and this image has no
+# CRDA, so the radio stays on country 00 (world) and no 5 GHz channel may
+# beacon.  /rw_data/wifi/regd answers that hint from the signed regulatory.db
+# and verifies the result instead of assuming it.
+#
+# Ordered after the daemon because its ExecStartPre is what modprobes bcmdhd,
+# i.e. loads cfg80211; hinting before that only queues a world request.
+After=wifi-daemon.service
+ConditionPathExists=/rw_data/wifi/regd
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Oneshot work on a background weight: it must not compete with the UI for the
+# boot, and a rejected SET_REG must not fail the boot transaction either - the
+# verdict lands in /rw_data/wifi/regd.json and regd.log, and SSH (2.4 GHz) does
+# not need a 5 GHz regdomain.  Exit codes: 2 no database, 3 country unknown,
+# 4 netlink, 5 SET_REG rejected, 6 cfg80211 kept another country.
+SuccessExitStatus=0 2 3 4 5 6
+ExecStart=/bin/sh -c 'exec /rw_data/wifi/regd --once --country "${SCOURGE_REGDOM:-HU}" --timeout 5000 --status-file /rw_data/wifi/regd.json >> /rw_data/wifi/regd.log 2>&1'
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=10
+IOWeight=10
+
+[Install]
+WantedBy=multi-user.target

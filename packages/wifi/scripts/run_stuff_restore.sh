@@ -173,6 +173,10 @@ for source in "$PAYLOAD/assets/wifi/"*; do
 done
 rmdir "$ASSET_DIR" 2>/dev/null || true
 rm -f "$SERVICE" 2>/dev/null || true
+# The CRDA stand-in: stop it before its binary disappears, then drop the unit.
+systemctl disable regd.service 2>/dev/null || true
+systemctl stop regd.service 2>/dev/null || true
+rm -f /etc/systemd/system/regd.service 2>/dev/null || true
 
 # Restore only our flag, from the immutable baseline for this exact path.
 # Never pick a timestamp backup belonging to another file or replace newer
@@ -291,7 +295,8 @@ if [ -L /home/car ]; then
 fi
 
 # Keep backups; remove runtime pieces and secrets.
-rm -f "$RW_DIR/wifi_daemon" "$RW_DIR/status.json" "$RW_DIR/daemon.log" \
+rm -f "$RW_DIR/wifi_daemon" "$RW_DIR/regd" "$RW_DIR/regd.json" "$RW_DIR/regd.log" \
+      "$RW_DIR/regulatory.db" "$RW_DIR/status.json" "$RW_DIR/daemon.log" \
       "$RW_DIR/config.conf" "$RW_DIR/wifi.txt" "$RW_DIR/home.json" \
        "$RW_DIR/apply.result" "$RW_DIR/bt.state" "$RW_DIR/ssh.bound" \
        "$RW_DIR/ap.station-ip" \

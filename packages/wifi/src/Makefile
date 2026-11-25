@@ -14,13 +14,19 @@ CFLAGS := -O2 -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -march=
 LDFLAGS ?= -static
 BUILD_ID = $(shell python3 ../scripts/build_id.py)
 
-all: wifi_daemon
+all: wifi_daemon regd
 
 wifi_daemon: wifi_daemon.c FORCE
 	$(MUSL_CC) $(CFLAGS) -DWIFI_BUILD_ID='"$(BUILD_ID)"' $(LDFLAGS) -o $@ $<
 
+# regd answers the cfg80211 CRDA hint that kernel 4.1 sends and nothing on this
+# image answers (see the header of regd.c).  Same compiler and ISA pinning as
+# the daemon: it runs on the same Atom-class CPU.
+regd: regd.c FORCE
+	$(MUSL_CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
 clean:
-	rm -f wifi_daemon
+	rm -f wifi_daemon regd
 
 FORCE:
 .PHONY: all clean FORCE

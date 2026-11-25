@@ -23,6 +23,7 @@ test: payload
 	python3 tests/test_mdnsd.py
 	python3 tests/test_tiles.py
 	python3 tests/test_ap_dhcpd_tu.py
+	python3 tests/test_regd.py
 	sh tests/test_daemon.sh
 	sh tests/test_ports.sh
 	sh tests/test_wifi_stack.sh

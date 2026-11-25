@@ -159,6 +159,13 @@ Details in `docs/FINDINGS.md` §5.2f.
   obtains an IP.
 - On-car confirmation that Start CarPlay AP enables discoverability and
   the AP comes up at 10.42.0.1.
+- **`regd` on the car** (2026-11-25): built, wired into the payload, the
+  installer stage and `regd.service`, and verified offline only — the rules
+  against the published wireless-regdb HU entry, the `NL80211_CMD_SET_REG`
+  frame attribute by attribute, and `regd --read` against a live kernel
+  (`tests/test_regd.py`).  What is still unproven is the 4.1 side: whether
+  `regd --once` moves `iw reg get` off `country 00` there, or whether the
+  vendor driver keeps a self-managed regdomain (`regd` exits 6 and says so).
 
 ## USB tree
 

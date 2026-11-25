@@ -371,7 +371,7 @@ the default is the one that can actually work:
 | key | values | meaning |
 | --- | --- | --- |
 | `ap_method` | `static` (default) / `tether` | `static` runs our own vendor-supplicant AP (`mode=2`) plus our own DHCP server (`packages/common/ap_dhcpd.inc`, the behaviour-identical extraction of Wifi1b's proven `--dhcpd`); `tether` asks ConnMan and keeps the vendor-refusal cooldown as a diagnostic |
-| `ap_purpose` | `ssh` (default) / `aa` | `aa` refuses any band fallback: the phone only joins a 5 GHz AP, so an AA bootstrap stays on channel 36 and fails loudly instead of silently moving to 2.4 GHz channel 6 |
+| `ap_purpose` | `ssh` (default) / `aa` | `aa` refuses any band fallback: the phone only joins a 5 GHz AP, so an AA bootstrap stays on 5 GHz and fails loudly instead of silently moving to 2.4 GHz channel 6. The 5 GHz channel also has to be one the firmware has: `carplay_channel` defaults to **149** for 5 GHz (ch36–48 are not in this unit's firmware table) and `vendor_channel_prime()` still falls back to 149 if a unit refuses the requested one |
 
 The sequence is Wifi1b's, step for step: validate SSID/key → regulatory domain →
 AP config → interface up → supplicant → static address (10.42.0.1/24) →
@@ -385,12 +385,35 @@ The regulatory domain is the whole 5 GHz story, and on **this** unit (kernel
 | `regulatory.db` + `regulatory.db.p7s` in `/lib/firmware` | **inert** — cfg80211 only learned to read the signed database in 4.15. We still ship it (payload `firmware/`, upstream wireless-regdb pinned in `config/third_party.lock`, `scripts/fetch_regdb.py`, installed with a `.scourge-bak` and an `RGDB` magic check) because it costs nothing and any newer kernel uses it. |
 | `ieee80211_regdom` hint (`/etc/modprobe.d/90-scourge-regdom.conf`, `HU`) | **read, but ineffective** — the module parameter is `HU` after boot (verified), yet 4.1 passes the regdomain request to **CRDA**, a userspace daemon that does not exist on this image, so `iw reg get` stays `country 00` (world) and world forbids 5 GHz beacons. |
 | vendor firmware country (`wl -i wlan0 country HU`) | **works** — `wl -i wlan0 country` went `DE (DE/0) GERMANY` → `HU (HU/0) HUNGARY`. The FullMAC firmware keeps its own country table and never publishes it to cfg80211, so this is the lever that decides whether the driver will beacon on a 5 GHz channel. |
+| `regd` — the CRDA stand-in (payload `bin/regd`, unit `regd.service`) | **works** — 4.1 answers a regulatory hint by asking userspace (CRDA) and nothing on this image answered, which is the whole reason `iw reg get` stayed `country 00`. `regd` parses the signed `regulatory.db` we already ship, sends `NL80211_CMD_SET_REG` (no libnl, no RSA) and then **reads the regdomain back**, so the verdict is measured, not assumed. Exit 6 means cfg80211 kept another country: the driver manages its own regdomain and only `wl country` is left. |
 
 `HU` is the owner's country (ETSI; same 5 GHz ranges as the vendor's own
 `ccode=GB`, MICOM country EU). The daemon sets `iw reg set HU`, calls
 `wl -i wlan0 country HU`, and logs both answers plus the resulting `iw reg get`
 — `00` there is expected on 4.1 and is **not** proof that the AP cannot beacon;
 the AP's own readiness probe is.
+
+`src/regd.c` closes the CRDA hole. It is not a port of CRDA: no libnl, no RSA
+verification (4.1 cannot verify the signature either, and the pinned upstream
+pair is what makes the data trustworthy), and the rule flags are translated from
+db2fw's compact bits to `NL80211_RRF_*` — the mapping was read off the shipped
+database (world 5490–5730 MHz = NO-IR|DFS, 5250–5330 MHz adds AUTO-BW, HU
+5945–6425 MHz = NO-OUTDOOR) and is asserted in `tests/test_regd.py`.
+
+```sh
+/rw_data/wifi/regd --dump --country HU        # the rules in the database
+/rw_data/wifi/regd --dump-message --country HU # the exact SET_REG frame
+/rw_data/wifi/regd --once --country HU        # hint, answer, verify (root)
+/rw_data/wifi/regd --listen --country HU      # stay resident (CRDA-shaped)
+```
+
+Two facts measured on the car (2026-11-25) keep this in proportion: the vendor
+firmware's channel table is `1–13 + 149,153,157,161,165` (**no ch36–48**), and
+the 5 GHz AP does come up on **ch149** once the vendor chanspec is primed. So a
+regdomain is not what makes 5 GHz possible here — it is what makes cfg80211's
+view of the radio correct (HU allows 5725–5875 MHz at 25 mW with no NO-IR,
+i.e. ch149..165 may beacon, while world keeps them passive), and it is what the
+supplicant's own `set channel` needs when it is not handed a primed chanspec.
 
 The status and the Status card show `ap_method`, `ap_purpose`,
 `ap_dhcp_pool`, `ap_dhcp_leases` and the **actual** band/channel, plus the AA

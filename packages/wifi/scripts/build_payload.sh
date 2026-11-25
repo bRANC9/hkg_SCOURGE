@@ -65,11 +65,15 @@ fi
 cp "$ROOT/../common/install_io.sh" "$OUT/payload/lib/"
 
 cp src/wifi_daemon "$OUT/payload/bin/wifi_daemon"
+# CRDA stand-in: 4.1 asks userspace for the regdomain and this image has no
+# CRDA, so nothing ever moves cfg80211 off country 00 (world).
+cp src/regd "$OUT/payload/bin/regd"
 cp artifacts/assets/wifi/*.png "$OUT/payload/assets/wifi/"
 # The battery/hello assets are NOT installed by this stage (the battery stage
 # owns them), so shipping stale blue copies here only confused the audit.  Drop
 # them (2026-11-24: unified mint/glow set).
 cp artifacts/systemd/wifi-daemon.service "$OUT/payload/systemd/"
+cp artifacts/systemd/regd.service "$OUT/payload/systemd/"
 cp artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/WifiPage.qml "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen/"
 cp artifacts/qml/AppHomeScreen/qml_eco3.0/component/WifiTile.qml "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/"
 cp artifacts/qml/AppHomeScreen/qml_eco3.0/component/WifiSwitch.qml "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/"
@@ -91,7 +95,7 @@ cp "$DROPBEAR" "$OUT/payload/bin/dropbearmulti"
 # scripts/run_stuff.sh "mdnsd continue as root" section).  Applied on the
 # car only when the MDNSD_ROOT_ARM marker is present.
 python3 scripts/patch_mdnsd.py "$SCOURGE_ROOTFS/app/bin/mdnsd" "$OUT/payload/bin/mdnsd.rooted"
-chmod 755 "$OUT/payload/bin/wifi_daemon" "$OUT/payload/bin/dropbearmulti" "$OUT/payload/bin/mdnsd.rooted"
+chmod 755 "$OUT/payload/bin/wifi_daemon" "$OUT/payload/bin/regd" "$OUT/payload/bin/dropbearmulti" "$OUT/payload/bin/mdnsd.rooted"
 
 cp wifi.txt.sample "$OUT/payload/wifi.txt.sample"
 cp wifi.txt.sample "$OUT/README-wifi.txt"

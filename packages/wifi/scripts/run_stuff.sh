@@ -15,8 +15,10 @@
 #   patched Advanced / Wide / AllMenus / Setup QML
 #   /app/share/AppHomeScreen/wifi/{wifi_icon_n,wifi_icon_d}.png
 #   /rw_data/wifi/wifi_daemon
+#   /rw_data/wifi/regd             (CRDA stand-in: the regdomain on 4.1)
 #   /rw_data/wifi/bin/dropbearmulti
 #   /etc/systemd/system/wifi-daemon.service
+#   /etc/systemd/system/regd.service
 #   user car (password electric) for SSH
 #
 # It backs up the current QML to /rw_data/wifi/backup/<timestamp>/ and to
@@ -371,7 +373,7 @@ run_bounded(){
         echo "--- bluetooth nodes"; ls /sys/class/bluetooth 2>&1; hciconfig -a 2>&1 | head -n 8
         echo "--- dmesg (net/bt)"; dmesg 2>/dev/null | grep -iE 'brcmfmac|wlan|bluetooth|hci0|firmware' | tail -n 12
         echo "--- services"
-        for _u in connman supplicantmanager.service supplicantmanager.path wifi-daemon.service; do
+        for _u in connman supplicantmanager.service supplicantmanager.path wifi-daemon.service regd.service; do
             printf '%s active=%s enabled=%s\n' "$_u" "$(systemctl is-active "$_u" 2>/dev/null)" "$(systemctl is-enabled "$_u" 2>/dev/null)"
         done
         echo "--- connman technologies"; connmanctl technologies 2>&1 | head -n 12
@@ -946,6 +948,55 @@ iw reg set "$REG_DOMAIN" 2>/dev/null && log "iw reg set $REG_DOMAIN applied" \
 _regdom_now=$(iw reg get 2>/dev/null | sed -n 's/^country \([^:]*\).*/\1/p' | head -n 1)
 [ -n "$_regdom_now" ] || _regdom_now=unknown
 log "regdomain now: $_regdom_now (00 = world = 5 GHz passive scan)"
+
+# ---- the CRDA stand-in: a regdomain that actually sticks -----------------
+# The lines above are the measurement; on 4.1 nothing moves cfg80211 off
+# country 00 unless a userspace daemon answers the CRDA hint, and this image has
+# none.  regd does that from the signed database installed above and then reads
+# the regdomain back, so this stage records a verdict instead of a hope.
+REGD_BIN="$RW_DIR/regd"
+REGD_UNIT="/etc/systemd/system/regd.service"
+regd_status="not-installed"
+if [ -f "$PAYLOAD/bin/regd" ]; then
+    io_copy "$PAYLOAD/bin/regd" "$REGD_BIN" || fail "regd copy failed"
+    chmod 755 "$REGD_BIN" 2>/dev/null || true
+    chown 0:0 "$REGD_BIN" 2>/dev/null || true
+    set_exec_label "$REGD_BIN"
+    # regd searches this copy first: the tool then works even in a mount state
+    # where /lib/firmware cannot be read.
+    if [ -f "$FW_DIR/regulatory.db" ]; then
+        cp -f "$FW_DIR/regulatory.db" "$RW_DIR/regulatory.db" 2>/dev/null || true
+    fi
+    regd_rc=0
+    regd_out=$("$REGD_BIN" --once --country "$REG_DOMAIN" --timeout 4000 \
+        --status-file "$RW_DIR/regd.json" 2>&1) || regd_rc=$?
+    printf '%s\n' "$regd_out" >> "$LOG"
+    log "regd --once rc=$regd_rc: $(printf '%s' "$regd_out" | tr '\n' ' ')"
+    case "$regd_rc" in
+        0) regd_status="applied" ;;
+        2) regd_status="no-database" ;;
+        3) regd_status="country-unknown" ;;
+        5) regd_status="set-reg-rejected" ;;
+        6) regd_status="driver-managed" ;;
+        *) regd_status="rc=$regd_rc" ;;
+    esac
+    if [ -f "$PAYLOAD/systemd/regd.service" ] && [ -d /etc/systemd/system ] &&
+       command -v systemctl >/dev/null 2>&1; then
+        if io_copy "$PAYLOAD/systemd/regd.service" "$REGD_UNIT"; then
+            chmod 644 "$REGD_UNIT" 2>/dev/null || true
+            if systemctl enable regd.service >> "$LOG" 2>&1; then
+                log "regd.service enabled (re-applies the regdomain on every boot)"
+            else
+                log "WARNING: cannot enable regd.service (the regdomain resets on reboot)"
+            fi
+        else
+            log "WARNING: cannot install $REGD_UNIT (the regdomain resets on reboot)"
+        fi
+    fi
+else
+    log "WARNING: payload carries no regd; cfg80211 stays on country 00 (no 5 GHz AP)"
+fi
+log "regdomain after regd: $(iw reg get 2>/dev/null | sed -n 's/^country \([^:]*\).*/\1/p' | head -n 1) ($regd_status)"
 
 # ---- optional mdnsd "continue as root" patch ----------------------------
 # Experimental, disarmed by default: multicast EPERM was observed but its
@@ -1874,7 +1925,7 @@ fi
 result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$setup_variant/$custom_variant" \
     "tile_skipped=${variant_missing:+1}${variant_missing:-0}" "nets_trimmed=${wifi_nets_trimmed:-0}" \
        "backup=$BACKUP_HU" "daemon=$daemon_status" "daemon_verify=$daemon_verify" \
-       "oem_mask=$oem_mask" \
+       "oem_mask=$oem_mask" "regd=$regd_status" \
        "wifi_import=$wifi_import" "restart=$restart" "build_id=$BUILD_ID" \
        \
        "mdnsd_patch=$mdnsd_patch" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"

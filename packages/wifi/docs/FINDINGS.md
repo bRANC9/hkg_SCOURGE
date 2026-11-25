@@ -507,3 +507,48 @@ From the TOCTOU / owner-access project:
 5. Does the iPhone connect after AP + IE + iAP2/mDNS + VBT flag?
 6. Best way to hold `wlan0` against OEM respawn (current: stop path + remove
    `/tmp/no_unece` + watchdog).
+
+## 9. The regulatory domain on 4.1 — CRDA is the missing piece, not the band
+
+Measured on the car, 2026-11-25 (kernel `4.1.27-abl`, cfg80211 a module):
+
+| lever | answer on the car |
+| --- | --- |
+| `dmesg` after any hint | `cfg80211: Calling CRDA to update world regulatory domain` — the kernel waits for **userspace** |
+| CRDA itself | absent: no `crda` binary, no `/usr/lib/crda/`, no udev rule |
+| `/lib/firmware/regulatory.db` | ignored — `cfg80211` only reads the signed firmware database from **4.15** |
+| `ieee80211_regdom=HU` (module param) | read (`/sys/module/cfg80211/parameters/ieee80211_regdom` = `HU`) and ineffective without CRDA |
+| `iw reg get` | `country 00` (world) after every attempt |
+
+So `iw reg set HU` cannot work on this image as shipped: cfg80211 turns the
+request into a `COUNTRY=` kobject uevent and nothing answers it. What the world
+domain costs: every 5 GHz channel is `NO-IR`/passive, so a supplicant that asks
+cfg80211 for the channel itself (`nl80211: Failed to set channel`) fails, and the
+beacon rules are wrong even when the AP comes up.
+
+`src/regd.c` is the answer to that uevent: parse the shipped signed
+`regulatory.db` (db2fw version 20), convert the rules to `NL80211_CMD_SET_REG`
+and read the regdomain back. Notes worth keeping:
+
+- The file's rule flags are **db2fw's compact bits**, not `NL80211_RRF_*`:
+  `1<<0` NO-OFDM, `1<<1` NO-OUTDOOR, `1<<2` DFS, `1<<3` NO-IR, `1<<4` AUTO-BW.
+  Cross-checked against the shipped database and a live kernel: world
+  5490–5730 MHz carries NO-IR|DFS (`0x0c`), 5250–5330 MHz adds AUTO-BW (`0x1c`),
+  HU 5945–6425 MHz is NO-OUTDOOR (`0x02`).  All five bits exist in 4.1's rule
+  flags, so nothing has to be dropped for this kernel.
+- Every pointer in the file is `be16(file_offset >> 2)`. Frequency and bandwidth
+  are kHz, power is cBm, and `max_ant_gain` is always 0 (db2fw asserts it) —
+  cfg80211 still requires the attribute to be present.
+- What HU allows (the reason the numbers in the code look odd): 2400–2483.5 @40
+  **20 dBm**; 5150–5250 @80 **200 mW** NO-OUTDOOR|AUTO-BW; 5250–5350 @80 **100 mW**
+  NO-OUTDOOR|DFS|AUTO-BW; 5470–5725 @160 **500 mW** DFS; **5725–5875 @80 25 mW**
+  (ch149,153,157,161,165); 5945–6425 @320 200 mW NO-OUTDOOR.  The 25 mW SRD band
+  is the one that matters for a 5 GHz AP here.
+- The regdomain does **not** create channels.  The vendor firmware's table is
+  `1–13 + 149,153,157,161,165`: there is no ch36–48 on this unit, and the AP does
+  come up on ch149 when the vendor chanspec is primed (`wl ap 1` +
+  `wl chanspec 149/20`).  Keep the two fixes apart: the regdomain makes
+  cfg80211's view correct, the chanspec prime makes the firmware beacon.
+- `regd --once` exit codes are the diagnostic: 0 applied, 2 no usable database,
+  3 country not in the database, 4 netlink, 5 SET_REG rejected, 6 cfg80211 kept
+  another country (a driver-managed regdomain — then only `wl country` is left).
