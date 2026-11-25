@@ -4454,7 +4454,14 @@ static void apply_reap(void)
                 waitpid(pid, &st, WNOHANG);
                 start_pending_work();
             }
-        } else if (!g_apply_cancelled && now_ms() - g_apply_start_ms > 75000) {
+        } else if (!g_apply_cancelled &&
+                   now_ms() - g_apply_start_ms > (g_work_kind == WORK_MODE ? 150000 : 75000)) {
+            /* A mode change legitimately spends up to 60 s waiting for the
+             * station association (client_connect) on top of the stack bring-up,
+             * so a 75 s budget killed it mid-wait: the 2026-11-25 bundle shows
+             * "apply timed out" twice, right before the association result.  A
+             * truly hung worker is still caught by the cancel+abandon path above;
+             * dumps and scans keep the short deadline. */
             g_apply_failed = true;
             if (g_work_kind == WORK_MODE) g_network_failed = true;
             set_msg("apply timed out");
