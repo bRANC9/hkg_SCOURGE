@@ -3937,6 +3937,29 @@ static bool client_connect(void)
             return true;
         }
     }
+    /* When our own supplicant owns the interface (it started without -u, because
+     * the D-Bus name was taken), ConnMan cannot drive it, so the agent below can
+     * only time out - and it did that BEFORE the radio was consulted: 2026-11-25
+     * daemon.log shows "ConnMan agent: registered=1 requested_key=1 connected=0
+     * failed=1" followed 42 s later by "expected station association/address not
+     * ready (agent failed or timed out)", while the link came up seconds after the
+     * window and the stage reported FAIL (3 beeps).  Wait for the radio first, in the
+     * same budget, when we are the supplicant's owner. */
+    if (g_supp_no_dbus) {
+        for (int i = 0; i < 40 && !g_stop; i++) {
+            if (client_associated() || iw_link_any_configured()) {
+                char ip[64] = "";
+                if (dhcp_acquire() || (wlan_ip(ip, sizeof(ip)) && ip[0])) {
+                    if (!ip[0]) wlan_ip(ip, sizeof(ip));
+                    set_msg("client connected to '%s' (%s) via the radio (own supplicant)",
+                            net_ssid(g_client_net), ip);
+                    return true;
+                }
+            }
+            usleep(500000);
+        }
+        log_msg("client: own supplicant did not associate within 20 s; trying the ConnMan agent");
+    }
     bool agent_ok = client_connman_agent(service);
     /* A cached connection can finish between the precheck and connect reply
      * (including an AlreadyConnected error). Actual identity/DHCP readback is
