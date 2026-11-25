@@ -11,6 +11,9 @@
 set -u
 USB_DIR="${USB_DIR:-/media/usb}"
 QML_BASE="/app/share/AppHomeScreen/qml_eco3.0"
+# SCOURGE_BEEP=0 silences every tone: the console-bell fallback is loud on a host
+# that routes it to the speakers, and a host run has nothing to listen for.
+BEEP_ENABLED="${SCOURGE_BEEP:-1}"
 DUMP="$USB_DIR/dump"
 LOG="$DUMP/dump.txt"
 
@@ -48,6 +51,7 @@ play_once() {   # play_once <raw pcm> -> 0 on success, keeps the attempts
 
 beep() {   # beep <wav> <count> [gap]
     wav="$1"; count="${2:-1}"; gap="${3:-0.3}"
+    [ "$BEEP_ENABLED" = 0 ] && { BEEP_METHOD="disabled"; return 0; }
     i=0
     while [ "$i" -lt "$count" ]; do
         if ! play_once "$wav"; then

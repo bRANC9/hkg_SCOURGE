@@ -144,6 +144,42 @@ use private paths under `/tmp/opencode`; they do not run vehicle binaries or
 modify the host account database. Exported logs are filtered event summaries,
 not raw historical credential-bearing transcripts; original logs remain private.
 
+### Base matrix (`base/<variant>`) and the Hello-app dump
+
+`scripts/build_artifacts.py` reads its QML inputs from `base/<variant>` and
+**skips** a variant whose base is missing, so the installer prints "page
+installed, tile skipped" instead of failing. Only the bases somebody dumped
+exist locally — on this host: `stock` and `battery_tile`.
+
+`base/hello` and `base/battery_hello` cannot be synthesised. A fabricated base
+produces a variant that references a tile component the unit's OEM app set may
+not define (and puts the WiFi tile on `firstEmptySlot(0)` instead of `(1)`), and
+the installer would carry that variant to the car. `build_artifacts._have()`
+therefore treats a base carrying a `SYNTHESIZED` marker as missing
+(`skip base hello: synthesised fixture, not a dump`); only a real dump is used.
+
+Dumping it from a unit that really ships the Hello app set:
+
+```sh
+scripts/25_sync_hello_dump_stick.sh            # payload + fresh stamp onto the RIGIMG stick
+#   plug it in: the failsafe runs payload/dump_hello.sample.sh as root,
+#   three long beeps = complete base, two short ones = no Hello tile on that unit
+python3 packages/wifi/scripts/install_hello_base.py \
+        --dump /run/media/me/STICK/hello_dump/<stamp> --check     # verify only
+python3 packages/wifi/scripts/install_hello_base.py \
+        --dump /run/media/me/STICK/hello_dump/<stamp>             # -> base/hello
+python3 packages/wifi/scripts/build_artifacts.py && make test
+```
+
+The dump copies exactly the five files this builder reads (plus `component/HelloTile.qml`
+for reference) and records the evidence the importer checks: the manifest, the
+per-root report (`verdict`, `helloTile1`, markers) and the page-based battery
+candidates. The importer fails closed — a damaged manifest or a dump whose
+Advanced page proves no Hello tile is refused (`--check` never writes), and
+`--as battery_hello|battery_tile_hello` requires the matching evidence
+(`id: batteryPage`, `BatteryTile`). `SCOURGE_BEEP=0` silences the payload's
+tones (the console-bell fallback is loud on a laptop).
+
 ---
 
 ## Install

@@ -98,6 +98,14 @@ unit has no address and no sshd until a package puts one there, the failsafe
 stick is the way to get it, not the network. Copy the sample to the stick root
 as `run_stuff.sh`.
 
+`payload/dump_hello.sample.sh` is the narrow version of the same idea: it copies
+only the files the WiFi builder reads for a Hello-app base (`base/hello`), plus
+the evidence an importer can check (manifest, per-root `verdict`, `helloTile1`,
+page-based battery candidates). `scripts/25_sync_hello_dump_stick.sh` puts it on
+a stick with a fresh sync stamp and verifies it after a remount;
+`packages/wifi/scripts/install_hello_base.py` installs it fail-closed. Both are
+described in `packages/wifi/README.md` § "Base matrix and the Hello-app dump".
+
 ## Getting the bundle onto the stick (and proving it)
 
 A plain `cp` plus `md5sum -c` looks clean even when bytes never reached the

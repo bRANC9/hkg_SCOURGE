@@ -14,6 +14,11 @@ What is covered (the layer that repeatedly broke on the way to the car):
 - QmlInjector: the injector on a base file carrying marker comments - anchor,
   append, revert, dry-run, and fail-closed on a missing anchor.
 - Collectors: boot_profile.sh and perf_snapshot.sh producing their txt/csv.
+- HelloDump: payload/dump_hello.sample.sh -> dump -> install_hello_base.py. The
+  payload copies exactly the base files the WiFi builder reads (with a manifest
+  the importer verifies), a unit without the Hello tile reports verdict=absent
+  instead of a fake base, a damaged dump is refused, and build_artifacts._have()
+  accepts a dumped base while it skips a SYNTHESIZED one.
 
 Run it after every packages/compose.sh build and BEFORE
 scripts/24_sync_combo_stick.sh: the tests read out/firstround, so a fresh build
