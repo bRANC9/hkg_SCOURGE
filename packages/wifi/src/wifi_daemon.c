@@ -2418,12 +2418,19 @@ static void prime_step_log(const char *step)
 static int vendor_channel_prime(int channel)
 {
     if (channel < 32) return channel;   /* 2.4 GHz needs none of this */
+    /* Sequence measured on the car 2026-11-25 (ap5_manual.txt): this exact order
+     * makes the interface beacon on 5745 MHz with the daemon's own AP config
+     * ("nl80211: Set freq 5745 ... Set beacon (beacon_set=0) ... CTRL-EVENT-CONNECTED").
+     * The differences from what the daemon did before are what mattered:
+     *   - "wl ap 1" does NOTHING here (rc=0, the type stays managed), so it is gone;
+     *   - the channel is set while the interface is DOWN;
+     *   - the AP role is taken with "iw ... set type __ap" (the only call that works)
+     *     while still down, and only then is the interface brought up.  Setting the
+     *     type after the up left the driver in a state where the supplicant's own
+     *     AP switch failed and the attempt ended with role=0. */
     char out[256] = "";
     sh("wl -i wlan0 down 2>/dev/null");
     prime_step_log("after down");
-    int rc_ap = sh_out(out, sizeof(out), "wl -i wlan0 ap 1 2>&1");
-    log_msg("static AP: prime wl ap 1 rc=%d '%s'", rc_ap, trim(out));
-    prime_step_log("after ap 1");
     char cmd[160];
     snprintf(cmd, sizeof(cmd), "wl -i wlan0 chanspec %d/20 2>&1", channel);
     int rc = sh_out(out, sizeof(out), cmd);
@@ -2436,18 +2443,15 @@ static int vendor_channel_prime(int channel)
     }
     log_msg("static AP: vendor chanspec %d -> %s", channel, trim(out));
     prime_step_log("after chanspec");
-    sh("wl -i wlan0 up 2>/dev/null");
+    sh("iw dev wlan0 set type __ap 2>/dev/null");
+    prime_step_log("after iw set type __ap (down)");
+    sh("ip link set wlan0 up 2>/dev/null");
     prime_step_log("after up");
-    /* The role has to survive the up: if it did not, take it back while the
-     * interface is already up, and say which of the two worked. */
     char t[64] = "";
     if (!iface_type_is_ap(t, sizeof(t))) {
-        sh("wl -i wlan0 ap 1 2>/dev/null");
-        prime_step_log("after a second wl ap 1");
-        if (!iface_type_is_ap(t, sizeof(t))) {
-            sh("iw dev wlan0 set type __ap 2>/dev/null");
-            prime_step_log("after iw set type __ap");
-        }
+        /* Last resort: take the role again on the live interface. */
+        sh("iw dev wlan0 set type __ap 2>/dev/null");
+        prime_step_log("after iw set type __ap (up)");
     }
     return channel;
 }
