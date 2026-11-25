@@ -386,6 +386,31 @@ class DaemonTests(unittest.TestCase):
             self.assertFalse(body.get("ok"))
             self.assertTrue(body.get("error"))
 
+    def test_capture_endpoint_reports_state_and_serves_the_file(self):
+        # The page's "Capture frames" button POSTs /capture and then polls /status
+        # and /capture.txt.  The old handler filtered on an interface that does not
+        # exist on this unit (com.lge.car.micom.can), so the file stayed empty and
+        # the button looked broken; the endpoint must at least report honestly.
+        self.assertTrue(self.daemon.get("/status")["capture"] in ("idle", "running", "done"))
+        status = self.daemon.get("/status")
+        self.assertIn("capture_events", status)
+        self.assertIn("capture_light_hits", status)
+        body = self.daemon.post("/capture")
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["capture"], "running")
+        self.assertEqual(body["toggle_in_s"], 8)
+        # The script is written next to the state, and the read-back endpoint
+        # answers even before the capture window finished.
+        served = self.daemon.get("/capture.txt")
+        self.assertTrue(served["ok"])
+        self.assertEqual(served["file"], "hw_capture.txt")
+        import pathlib
+        script = pathlib.Path(self.dir) / "hw_capture.sh"
+        self.assertTrue(script.is_file(), "capture script was not written")
+        text = script.read_text()
+        self.assertIn("com[.]lge[.]car[.]micom", text)
+        self.assertNotIn("micom.can", text)   # the interface that never existed
+
     def test_unknown_route(self):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self.daemon.get("/nope")

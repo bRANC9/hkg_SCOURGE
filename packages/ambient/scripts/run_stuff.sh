@@ -463,6 +463,12 @@ hw_probe() {
             echo "no dbus-monitor"
         fi
     } > "$_ho" 2>&1
+    # The UI-triggered capture (AmbientPage "Capture frames" -> POST /capture) writes
+    # /rw_data/ambient/hw_capture.txt.  Collect it with the run: a probe the driver
+    # started from the page must not stay on the unit.
+    if [ -f "$RW_DIR/hw_capture.txt" ] && [ -n "$_hdir" ] && [ -w "$_hdir" ]; then
+        cp -f "$RW_DIR/hw_capture.txt" "$_hdir/ambient_capture_ui.txt" 2>/dev/null &&             log "ui capture collected: $_hdir/ambient_capture_ui.txt"
+    fi
     sync 2>/dev/null || true
     log "hw probe: $_ho"
 }

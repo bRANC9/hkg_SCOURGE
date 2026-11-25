@@ -80,6 +80,18 @@ Item {
     }
     // ---- daemon state --------------------------------------------------
     property bool serviceOk: false
+    // Result of the on-demand factory-ambient capture, straight from the daemon:
+    // "did the round find anything" must be visible, otherwise a broken filter
+    // looks exactly like "the light is not on D-Bus".
+    property string captureState: "idle"
+    property int captureEvents: 0
+    property int captureLight: 0
+    function captureText() {
+        if (captureState === "running") return "capture: running - toggle a light now"
+        if (captureState === "done")
+            return "capture: " + captureEvents + " events, " + captureLight + " light-ish"
+        return "capture: idle"
+    }
     property bool power: true
     property string effect: "breathe"
     property real hue: 0.62
@@ -138,6 +150,9 @@ Item {
         target = d.target || ""
         lastError = d.last_error || ""
         presetNames = d.presets || []
+        if (d.capture !== undefined) captureState = "" + d.capture
+        if (d.capture_events !== undefined) captureEvents = d.capture_events
+        if (d.capture_light_hits !== undefined) captureLight = d.capture_light_hits
         var a = d.audio
         if (a) {
             audioEnabled = a.enabled === true
@@ -385,6 +400,18 @@ Item {
                   color: HomeThemeHelper.normalTextColor
               }
 
+              QText {
+                  anchors.left: parent.left
+                  anchors.leftMargin: 6
+                  anchors.top: parent.bottom
+                  anchors.topMargin: 4
+                  text: root.captureText()
+                  font.pixelSize: ConstantModel.FONT_SIZE_17
+                  color: root.captureLight > 0 ? ConstantModel.GENERAL_COLOR_PROGRESS_BLUE
+                                               : (root.captureState === "done" ? "#FFB300"
+                                                                              : HomeThemeHelper.disableTextColor)
+              }
+
               MouseArea {
                   id: captureMouse
                   anchors.fill: parent
@@ -394,6 +421,7 @@ Item {
                       if (captureButton.pressActive && root.serviceOk) {
                           root.post("/capture")
                           root.captureTimer.restart()
+                          capturePollTimer.restart()
                       }
                       captureButton.pressActive = false
                   }
@@ -407,6 +435,19 @@ Item {
               repeat: false
               onTriggered: {
                   QML_Handler.qmlSendEvtKey(HMIEVENTS.EVT_HOME_SOUND_BEEP_PLAY)
+              }
+          }
+
+          // Follow the capture until the daemon reports it finished (baseline 8 s
+          // + window 15 s + margin), then the label carries the counts.
+          Timer {
+              id: capturePollTimer
+              interval: 4000
+              repeat: true
+              running: false
+              onTriggered: {
+                  root.refresh()
+                  if (root.captureState === "done") stop()
               }
           }
 

@@ -1317,6 +1317,88 @@ static void zone_json(char *out, size_t n, const rgb_t *frame)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* On-demand factory-ambient capture                                  */
+/*                                                                    */
+/* The vendor light is not published on the micom D-Bus SIGNALS this  */
+/* unit emits (2026-11-25: only ihu speed/ETC telemetry and radio      */
+/* station updates in a 15 s toggle window), and a light COMMAND would */
+/* be a method call.  So the capture watches signals and method calls, */
+/* on the system and the session bus, and keeps everything that        */
+/* mentions com.lge.car.micom.                                        */
+/*                                                                    */
+/* The filter used to be interface='com.lge.car.micom.can' - an        */
+/* interface that does not exist on this unit, so the file it wrote    */
+/* was empty and the button looked broken.  Filter by service name     */
+/* instead and count what arrived, so the page can say whether the     */
+/* round found anything.                                              */
+/* ------------------------------------------------------------------ */
+static int64_t g_capture_started_ms;
+
+static const char HW_CAPTURE_SH[] =
+    "# args: <dbus-monitor> <out> [baseline-s] [window-s]\n"
+    "M=\"$1\"; O=\"$2\"; B=8; W=15\n"
+    "[ -n \"$3\" ] && B=\"$3\"\n"
+    "[ -n \"$4\" ] && W=\"$4\"\n"
+    "{\n"
+    "  echo \"=== ambient capture (on-demand) $(date -u 2>/dev/null)\"\n"
+    "  echo \"--- phase 1: idle baseline (\"$B\"s)\"\n"
+    "  \"$M\" --system \"type='signal'\" > /tmp/amb_p1.txt 2>&1 & p1=$!\n"
+    "  sleep \"$B\"\n"
+    "  kill $p1 2>/dev/null; wait $p1 2>/dev/null\n"
+    "  echo \"  phase1: $(grep -c 'member=' /tmp/amb_p1.txt 2>/dev/null) signals, $(grep -c 'com[.]lge[.]car[.]micom' /tmp/amb_p1.txt 2>/dev/null) micom\"\n"
+    "  grep -E -A3 'interface=com[.]lge[.]car[.]micom' /tmp/amb_p1.txt 2>/dev/null | head -n 80\n"
+    "  echo \"--- phase 2: TOGGLE A LIGHT NOW (\"$W\"s)\"\n"
+    "  \"$M\" --system \"type='signal'\" > /tmp/amb_p2.txt 2>&1 & p2=$!\n"
+    "  \"$M\" --system \"type='method_call'\" > /tmp/amb_p2c.txt 2>&1 & p3=$!\n"
+    "  \"$M\" --session \"type='method_call'\" > /tmp/amb_p2s.txt 2>&1 & p4=$!\n"
+    "  sleep \"$W\"\n"
+    "  kill $p2 $p3 $p4 2>/dev/null; wait 2>/dev/null\n"
+    "  echo \"  phase2: $(grep -c 'member=' /tmp/amb_p2.txt 2>/dev/null) signals, $(grep -c 'member=' /tmp/amb_p2c.txt 2>/dev/null) system calls, $(grep -c 'member=' /tmp/amb_p2s.txt 2>/dev/null) session calls\"\n"
+    "  grep -E -A3 'interface=com[.]lge[.]car[.]micom' /tmp/amb_p2.txt 2>/dev/null | head -n 120\n"
+    "  echo \"  --- system method calls mentioning light/ambient/micom\"\n"
+    "  grep -iE 'light|ambient|illum|theme|mood|micom' /tmp/amb_p2c.txt 2>/dev/null | head -n 60\n"
+    "  echo \"  --- session method calls mentioning light/ambient/theme\"\n"
+    "  grep -iE 'light|ambient|illum|theme|mood' /tmp/amb_p2s.txt 2>/dev/null | head -n 40\n"
+    "  echo \"  --- distinct system members seen\"\n"
+    "  grep -oE 'member=[A-Za-z0-9_]+' /tmp/amb_p2c.txt 2>/dev/null | sort | uniq -c | sort -rn | head -n 20\n"
+    "  echo \"  --- light-ish hits per phase-2 stream\"\n"
+    "  grep -ciE 'light|ambient|illum|theme|mood' /tmp/amb_p2.txt /tmp/amb_p2c.txt /tmp/amb_p2s.txt 2>/dev/null\n"
+    "  rm -f /tmp/amb_p1.txt /tmp/amb_p2.txt /tmp/amb_p2c.txt /tmp/amb_p2s.txt\n"
+    "} > \"$O\" 2>&1\n";
+
+/* Count what the last capture file holds, so /status can report it (and the page
+ * can show whether the round found anything at all). */
+static void capture_summary(int *events, int *light_hits)
+{
+    *events = 0;
+    *light_hits = 0;
+    char path[320];
+    snprintf(path, sizeof(path), "%s/hw_capture.txt", g_state_dir);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[512];
+    int n = 0;
+    while (fgets(line, sizeof(line), f) && n++ < 20000) {
+        if (strstr(line, "member=") || strstr(line, "method_call") || strstr(line, "signal ")) (*events)++;
+        if (strcasestr(line, "light") || strcasestr(line, "ambient") ||
+            strcasestr(line, "illum") || strcasestr(line, "theme") || strcasestr(line, "mood"))
+            (*light_hits)++;
+    }
+    fclose(f);
+}
+
+static void capture_state(char *out, size_t n)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s/hw_capture.txt", g_state_dir);
+    struct stat st;
+    if (!g_capture_started_ms) { snprintf(out, n, "idle"); return; }
+    if (stat(path, &st) != 0) { snprintf(out, n, "running"); return; }
+    if ((int64_t)st.st_mtime * 1000 >= g_capture_started_ms) { snprintf(out, n, "done"); return; }
+    snprintf(out, n, "running");
+}
+
 static void build_status(char *out, size_t n)
 {
     double h, s, v;
@@ -1338,6 +1420,11 @@ static void build_status(char *out, size_t n)
     char introspect[256];
     json_escape(introspect, sizeof(introspect), g_home_source);
 
+    char cap_state[16];
+    int cap_events = 0, cap_light = 0;
+    capture_state(cap_state, sizeof(cap_state));
+    capture_summary(&cap_events, &cap_light);
+
     snprintf(out, n,
              "{\"ok\":true,\"version\":\"%s\",\"power\":%s,\"effect\":\"%s\","
              "\"effect_id\":%d,\"color\":[%u,%u,%u],"
@@ -1352,6 +1439,7 @@ static void build_status(char *out, size_t n)
              "\"beat_age_ms\":%lld,\"error\":\"%s\"},"
              "\"zone_colors\":[%s],\"presets\":[%s],"
              "\"home_seq\":%d,\"home_source\":\"%s\",\"home_monitor\":%s,"
+             "\"capture\":\"%s\",\"capture_events\":%d,\"capture_light_hits\":%d,"
              "\"config\":\"%s\"}\n",
              AMBIENT_DAEMON_VERSION, g_state.power ? "true" : "false",
              effect_name(), g_state.effect,
@@ -1371,7 +1459,7 @@ static void build_status(char *out, size_t n)
              g_audio.last_beat_ms ? (long long)(g_audio.clock_ms - g_audio.last_beat_ms) : -1,
              g_audio.error, zones_json, preset_names,
              g_home_seq, introspect, g_mon_enabled ? "true" : "false",
-             g_config_path);
+             cap_state, cap_events, cap_light, g_config_path);
 }
 
 static void write_status_file(void)
@@ -1836,26 +1924,43 @@ static void http_handle(int fd)
             snprintf(body, sizeof(body), "{\"ok\":true,\"reactive\":%s,\"gain\":%d}\n",
                      g_state.reactive ? "true" : "false", g_state.audio_gain);
         }
+    } else if (is_get && !strcmp(path, "/capture.txt")) {
+        /* Read the last capture back: the page shows a summary and a stick round
+         * copies the text, so a UI-triggered probe is not lost in /rw_data. */
+        char cap_path[320];
+        snprintf(cap_path, sizeof(cap_path), "%s/hw_capture.txt", g_state_dir);
+        static char capbuf[16385];
+        static char capesc[24577];
+        if (read_file(cap_path, capbuf, sizeof(capbuf)) < 0) capbuf[0] = 0;
+        json_escape(capesc, sizeof(capesc), capbuf);
+        snprintf(body, sizeof(body), "{\"ok\":true,\"file\":\"hw_capture.txt\",\"text\":\"%s\"}\n", capesc);
     } else if (is_post && !strcmp(path, "/capture")) {
         /* Two-phase factory-ambient discovery, on demand from the page: an
            * 8 s idle baseline, then a 15 s window during which the driver
            * toggles a light.  The page beeps at the window start, so the timing
          * is audible instead of a guess.  Detached: the reply returns at once
          * and the result lands in /rw_data/ambient/hw_capture.txt. */
-        char cmd[1536];
-        snprintf(cmd, sizeof(cmd),
-                 "{ echo '=== ambient capture (on-demand)'; "
-                 "echo '--- phase 1: idle baseline (8 s)'; "
-                 "(%s --system \"type='signal',interface='com.lge.car.micom.can'\" 2>&1 & p=$!; sleep 8; kill $p 2>/dev/null) | head -n 80; "
-                 "echo '--- phase 2: TOGGLE A LIGHT NOW (15 s)'; "
-                 "(%s --system \"type='signal',interface='com.lge.car.micom.can'\" 2>&1 & p=$!; sleep 15; kill $p 2>/dev/null) | head -n 120; "
-                 "} > /rw_data/ambient/hw_capture.txt 2>&1 &",
-                 g_dbus_monitor, g_dbus_monitor);
-        if (system(cmd) != 0) {
+        char script[400], cap_out[400], cmd[1200];
+        snprintf(script, sizeof(script), "%s/hw_capture.sh", g_state_dir);
+        snprintf(cap_out, sizeof(cap_out), "%s/hw_capture.txt", g_state_dir);
+        write_atomic(script, HW_CAPTURE_SH);
+        if (access(script, R_OK) != 0) {
             code = 500;
-            snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"capture launch failed\"}\n");
+            snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"cannot write the capture script\"}\n");
         } else {
-            snprintf(body, sizeof(body), "{\"ok\":true,\"capture\":\"running\",\"toggle_in_s\":8}\n");
+            chmod(script, 0700);
+            unlink(cap_out);
+            g_capture_started_ms = (int64_t)time(NULL) * 1000;
+            snprintf(cmd, sizeof(cmd), "sh %s %s %s 8 15 >/dev/null 2>&1 &",
+                     script, g_dbus_monitor, cap_out);
+            if (system(cmd) != 0) {
+                code = 500;
+                snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"capture launch failed\"}\n");
+            } else {
+                snprintf(body, sizeof(body),
+                         "{\"ok\":true,\"capture\":\"running\",\"baseline_s\":8,"
+                         "\"toggle_in_s\":8,\"window_s\":15}\n");
+            }
         }
     } else {
         code = 404;

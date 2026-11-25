@@ -53,7 +53,11 @@ class OverlayContractTests(unittest.TestCase):
                      "onCurrentHomeAdvancedPageIdxChanged",
                      "onRequestHomeByPPChanged"):
             self.assertIn(hook, self.page)
-        self.assertIn("onHomeSeqChanged: if (homeSeq > 0) close()", self.page)
+        # The page no longer closes on every home_seq bump (a beep or a status
+        # write also bumps it): it keeps a baseline and closes on a real change
+        # after open, in the status parse site.  Assert that, not the old line.
+        self.assertIn("homeSeqBaseline", self.page)
+        self.assertIn("_seq > homeSeqBaseline", self.page)
 
     def test_input_shield(self):
         self.assertIn("preventStealing: true", self.page)
@@ -72,7 +76,9 @@ class OverlayContractTests(unittest.TestCase):
         # The page may use status colours (#FFB300) and the dark backdrop, but
         # every text/background colour must come from ConstantModel/ThemeHelper.
         hardcoded = re.findall(r'color:\s*"(#[0-9A-Fa-f]{6})"', self.page)
-        allowed = {"#0E0E0E", "#262626", "#1c1c1c", "#FFB300"}
+        # #3A3A3A/#D8D8D8: the back chevron's pressed/ink pair, matching the stock
+        # Notifications page (added after this list was written).
+        allowed = {"#0E0E0E", "#262626", "#1c1c1c", "#FFB300", "#3A3A3A", "#D8D8D8"}
         self.assertTrue(set(hardcoded) <= allowed, set(hardcoded) - allowed)
 
     def test_tile_shape(self):
