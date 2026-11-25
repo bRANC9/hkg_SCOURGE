@@ -4548,7 +4548,18 @@ static bool apply_mode_work(bool pair)
         char *value = trim(scan);
         log_msg("AP failure: get ap_scan rc=%d value=%s (vendor support unverified)", rc,
                 !strcmp(value, "0") || !strcmp(value, "1") || !strcmp(value, "2") ? value : "unknown/unsupported");
-        set_msg("CarPlay AP failed to start (SSID=%s): %s", g_cfg.cp_ssid, why);
+        /* Put the station back.  Everything above already took the client role
+         * away (client_disconnect + supplicant stop + iface down/up), so a failed
+         * AP start left wlan0 with NO role at all: no address, no SSH, and from
+         * the network side nothing left to recover with - the 2026-11-25 /ap/start
+         * test on the car did exactly that and the box had to be recovered by
+         * hand (ARP INCOMPLETE until a power cycle).  The tether-refused path
+         * above already falls back; this one now does too. */
+        bool cok = client_connect();
+        if (cok && g_cfg.ssh_enabled) ssh_start();
+        else if (!cok) ssh_stop();
+        set_msg("CarPlay AP failed to start (SSID=%s): %s%s", g_cfg.cp_ssid, why,
+                cok ? " - running as a station" : " - station fallback also failed");
         return false;
     }
     log_msg("apply: phase=ap_services aa_ap=%d", g_cfg.aa_ap);
@@ -4578,7 +4589,12 @@ static bool apply_mode_work(bool pair)
     if (p.state != AP_READY) {
         ssh_stop();
         ap_evidence("lost-during-service-setup", &p);
-        set_msg("CarPlay AP lost readiness during service setup");
+        /* Same stranded-state rule as a failed ap_start(): the AP is gone, so the
+         * box must not be left with no radio role at all. */
+        bool cok = client_connect();
+        if (cok && g_cfg.ssh_enabled) ssh_start();
+        set_msg("CarPlay AP lost readiness during service setup%s",
+                cok ? " - running as a station" : "");
         return false;
     }
     if (g_cfg.aa_ap) {
