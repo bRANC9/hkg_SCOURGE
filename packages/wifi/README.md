@@ -177,8 +177,13 @@ per-root report (`verdict`, `helloTile1`, markers) and the page-based battery
 candidates. The importer fails closed — a damaged manifest or a dump whose
 Advanced page proves no Hello tile is refused (`--check` never writes), and
 `--as battery_hello|battery_tile_hello` requires the matching evidence
-(`id: batteryPage`, `BatteryTile`). `SCOURGE_BEEP=0` silences the payload's
-tones (the console-bell fallback is loud on a laptop).
+(`id: batteryPage`, `BatteryTile`). The payload also runs **over SSH**: with
+`SSH_CONNECTION` set it finds the stick by its own files (`/media/*` with
+`run_stuff.sh` or `beep-start.dat`) when `USB_DIR` is not the mount point, and it
+keeps the tones off by default, because nobody is standing at the stick and they
+play through the head unit's speakers. `SCOURGE_BEEP=1` forces them back on,
+`SCOURGE_BEEP=0` silences them everywhere (the console-bell fallback is loud on a
+laptop).
 
 ---
 

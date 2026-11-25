@@ -129,6 +129,47 @@ class HelloDumpPayloadTests(unittest.TestCase):
             self.assertIn("roots=0", (dump_dir(usb) / "report.txt").read_text())
 
 
+class HelloDumpEnvironmentTests(unittest.TestCase):
+    def _unit(self, root: Path) -> Path:
+        write_tree(root / "unit/share/AppHomeScreen/qml_eco3.0", ADV_WITH_TILE)
+        return root / "unit"
+
+    def test_tone_is_off_when_the_dump_runs_over_ssh(self):
+        # Nobody is standing at the stick over SSH, and the tones come out of the
+        # head unit's speakers while the car may be moving.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            unit = self._unit(root)
+            usb = root / "stick"
+            usb.mkdir()
+            env = dict(os.environ, APP_ROOT=str(unit), USB_DIR=str(usb),
+                       SSH_CONNECTION="192.0.2.1 50000 192.0.2.60 22")
+            env.pop("SCOURGE_BEEP", None)
+            done = subprocess.run(["/bin/sh", str(PAYLOAD)], env=env,
+                                  capture_output=True, text=True, timeout=120)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            report = (dump_dir(usb) / "report.txt").read_text()
+            self.assertIn("beep_enabled=0", report)
+            self.assertIn("beep_method=disabled", report)
+            self.assertIn("started_by=ssh", report)
+
+    def test_stick_is_found_by_its_own_files_when_the_mount_point_is_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            unit = self._unit(root)
+            media = root / "media"
+            stick = media / "sda1"
+            stick.mkdir(parents=True)
+            (stick / "run_stuff.sh").write_text("#!/bin/sh\n")
+            env = dict(os.environ, APP_ROOT=str(unit), MEDIA_ROOT=str(media),
+                       USB_DIR=str(root / "not-mounted"), SCOURGE_BEEP="0")
+            done = subprocess.run(["/bin/sh", str(PAYLOAD)], env=env,
+                                  capture_output=True, text=True, timeout=120)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertTrue((stick / "hello_dump").is_dir())
+            self.assertIn("usb=" + str(stick), (dump_dir(stick) / "report.txt").read_text())
+
+
 class HelloBaseImporterTests(unittest.TestCase):
     def _dump(self, root: Path, advanced: str = ADV_WITH_TILE) -> Path:
         write_tree(root / "unit/share/AppHomeScreen/qml_eco3.0", advanced)

@@ -24,9 +24,33 @@
 # bell to the speakers the fallback is far louder than on the unit.
 set -u
 
-USB_DIR="${USB_DIR:-/media/usb}"
 APP_ROOT="${APP_ROOT:-/app}"
-BEEP_ENABLED="${SCOURGE_BEEP:-1}"
+MEDIA_ROOT="${MEDIA_ROOT:-/media}"
+USB_DIR="${USB_DIR:-/media/usb}"
+
+# Over SSH the tones are pointless - nobody is standing at the stick - and they
+# come out of the head unit's speakers while the car may be moving.  So the
+# default is "beep only when the failsafe ran me"; SCOURGE_BEEP=1/0 overrides.
+if [ -n "${SCOURGE_BEEP:-}" ]; then
+    BEEP_ENABLED="$SCOURGE_BEEP"
+elif [ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}" ]; then
+    BEEP_ENABLED=0
+else
+    BEEP_ENABLED=1
+fi
+
+# The loader mounts the stick where it likes (/media/usb, /media/sda1, ...).  An
+# interactive run has to find it: look for the stick by its own files instead of
+# guessing the mount point.
+if [ ! -d "$USB_DIR" ] && [ -d "$MEDIA_ROOT" ]; then
+    for cand in "$MEDIA_ROOT"/usb "$MEDIA_ROOT"/*; do
+        [ -d "$cand" ] || continue
+        if [ -f "$cand/run_stuff.sh" ] || [ -f "$cand/beep-start.dat" ]; then
+            USB_DIR="$cand"
+            break
+        fi
+    done
+fi
 OUT="$USB_DIR/hello_dump"
 mkdir -p "$OUT" 2>/dev/null || true
 mount -o remount,rw "$USB_DIR" 2>/dev/null || true
@@ -97,6 +121,12 @@ beep "$USB_DIR/beep-start.dat" 1
     echo "time=$(date -u 2>/dev/null)"
     echo "usb=$USB_DIR"
     echo "app_root=$APP_ROOT"
+    echo "beep_enabled=$BEEP_ENABLED"
+    if [ -n "${SSH_CONNECTION:-}" ]; then
+        echo "started_by=ssh"
+    else
+        echo "started_by=failsafe"
+    fi
     echo "uid=$(id -u 2>/dev/null)"
     echo "uname=$(uname -a 2>/dev/null)"
 } >> "$REPORT" 2>&1

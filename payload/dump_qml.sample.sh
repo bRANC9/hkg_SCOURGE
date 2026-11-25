@@ -12,8 +12,16 @@ set -u
 USB_DIR="${USB_DIR:-/media/usb}"
 QML_BASE="/app/share/AppHomeScreen/qml_eco3.0"
 # SCOURGE_BEEP=0 silences every tone: the console-bell fallback is loud on a host
-# that routes it to the speakers, and a host run has nothing to listen for.
-BEEP_ENABLED="${SCOURGE_BEEP:-1}"
+# that routes it to the speakers, and a host run has nothing to listen for. Over
+# SSH the tones are off by default - nobody is at the stick, and they play through
+# the head unit's speakers.
+if [ -n "${SCOURGE_BEEP:-}" ]; then
+    BEEP_ENABLED="$SCOURGE_BEEP"
+elif [ -n "${SSH_CONNECTION:-}${SSH_CLIENT:-}" ]; then
+    BEEP_ENABLED=0
+else
+    BEEP_ENABLED=1
+fi
 DUMP="$USB_DIR/dump"
 LOG="$DUMP/dump.txt"
 
