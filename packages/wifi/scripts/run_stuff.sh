@@ -1122,7 +1122,14 @@ if command -v connmanctl >/dev/null 2>&1; then
     _en=$(connmanctl enable wifi 2>&1)
     case "$_en" in
         ""|Enabled*|*ready*) log "connmanctl enable wifi: ok ($_en)" ;;
-        *)
+        *"doesn't exist"*|*"Unknown method"*)
+            # This unit's ConnMan has no SetProperty on the wifi technology, so the
+            # call cannot succeed no matter how often it is retried.  The restart
+            # plus 3 s sleep bought nothing (every run since 2026-11-24 logged the
+            # same error twice); say it once and move on.
+            log "connmanctl enable wifi: unsupported on this ConnMan ('$_en'); no retry"
+            ;;
+          *)
             # ConnMan refuses to power the technology when its own supplicant never
             # came up (typical right after the installer masked the OEM manager).
             # One restart makes ConnMan spawn its supplicant again.
@@ -1712,6 +1719,11 @@ _apistatus() {
 }
 if [ -f "$STICK_ROOT/api_walk" ]; then
     _walk="$RW_DIR/api_walk.txt"
+    # Timed, because this walk is the single largest block in a combo run: the
+    # 2026-11-25 flash spent 180 s inside the wifi stage, ~100 s of it in these
+    # deliberate sleeps.  The total lands in the stage result (api_walk_s=) so the
+    # next run's budget is not a guess.
+    _walk_t0=$(date +%s 2>/dev/null || echo 0)
     { echo "=== api walk $(date -u 2>/dev/null)"
       echo "--- step 1: mode=client"; _api "/mode?value=client" | head -c 200; echo
       sleep 20; _apistatus | head -c 1200; echo
@@ -1734,7 +1746,9 @@ if [ -f "$STICK_ROOT/api_walk" ]; then
       echo "--- wlan0"; ip -4 -o addr show wlan0 2>/dev/null | head -n 2
       echo "--- aa/check"; _apistatus >/dev/null 2>&1; _api "/aa/check" | head -c 400; echo
     } > "$_walk" 2>&1
-    log "api walk written: $_walk"
+    _walk_t1=$(date +%s 2>/dev/null || echo 0)
+    API_WALK_S=$((_walk_t1 - _walk_t0))
+    log "api walk written: $_walk (${API_WALK_S}s of deliberate waits)"
 fi
 
 # ---- vendor BT API measurement (AA package prober) ------------------------
@@ -1826,6 +1840,7 @@ result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$
        "backup=$BACKUP_HU" "daemon=$daemon_status" "daemon_verify=$daemon_verify" \
        "oem_mask=$oem_mask" \
        "wifi_import=$wifi_import" "restart=$restart" "build_id=$BUILD_ID" \
+       "api_walk_s=${API_WALK_S:-0}" \
        "mdnsd_patch=$mdnsd_patch" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"
 log "=== wifi payload done ==="
 exit 0
