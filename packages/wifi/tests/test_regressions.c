@@ -273,9 +273,20 @@ static void test_ap_states(void)
     success_request = 1;
     assert(ap_start() && disconnects == 1); /* other active SSID, but not idle/cellular */
     char old_ip[64]; assert(read_file(AP_STATION_IP, old_ip, sizeof(old_ip)) > 0 && !strcmp(old_ip, "192.0.2.10"));
-    assert(write_file_atomic(AP_STATION_IP, "10.42.0.1", 0600) == 0);
+    /* The memory file must never carry the AP's own address: that made a beaconing
+     * AP look like a leftover station link and the AP was torn down every cycle
+     * (2026-11-25 on the car, ap.station-ip held 10.42.0.1). */
+    /* A real leftover station address: the interface still holds what the station
+     * had, so the AP has not taken over. */
+    ip_reply = "inet addr:192.0.2.10\n";
+    assert(write_file_atomic(AP_STATION_IP, "192.0.2.10", 0600) == 0);
     ap_probe(&p); assert(p.state == AP_INTERFACE_UP); /* reject leftover station address */
     assert(!ssh_start() && !g_ssh_active_port && strstr(g_last_msg, "role/address not ready"));
+    /* The AP's own address in the memory file must not mask a live AP (2026-11-25:
+     * a poisoned file held the beaconing AP at AP_INTERFACE_UP for ever). */
+    ip_reply = NULL;
+    assert(write_file_atomic(AP_STATION_IP, "10.42.0.1", 0600) == 0);
+    ap_probe(&p); assert(p.state == AP_READY);
 
     reset_ap_fixture(); transient_ip = true;
     station_status = "mode=station\nwpa_state=COMPLETED\nssid=Other\n";

@@ -2071,9 +2071,10 @@ static void ap_probe(ap_probe_t *p)
     } else p->ip[0] = 0;
     char station_ip[64] = "";
     read_file(AP_STATION_IP, station_ip, sizeof(station_ip));
-    /* A memory file that holds the AP's own address cannot distinguish the two
-     * states it exists for, and it made every static AP look "not ready" while it
-     * was beaconing.  Ignore it (the writer above no longer creates one). */
+    /* The AP's own address can never be a station address, so a memory file that
+     * holds it is poisoned: comparing against it kept a beaconing AP at
+     * AP_INTERFACE_UP for ever and the AP was torn down and rebuilt every cycle
+     * (2026-11-25 on the car: ap.station-ip = 10.42.0.1, AP up, ssid correct). */
     if (!strcmp(trim(station_ip), AP_DHCP_IP)) station_ip[0] = 0;
     p->state = AP_UNKNOWN;
     if (!p->conflict) {
