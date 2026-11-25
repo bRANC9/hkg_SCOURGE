@@ -6262,6 +6262,18 @@ static void http_handle(int fd)
         g_cfg.wlan_on = false;
         apply_mode(false);
         snprintf(body, sizeof(body), "{\"ok\":true}\n");
+    } else if (!strcmp(method, "POST") && !strcmp(path, "/ap/stop")) {
+        /* Symmetric with /ap/start, which forces MODE_CARPLAY.  Without it a
+         * stopped AP left the unit in carplay with no AP at all: /ap/stop simply
+         * did not exist (404), so every AP test stranded the box until the mode
+         * was flipped by hand in the UI (measured 2026-11-25, twice).  Stopping
+         * the AP means "go back to being a station". */
+        g_cfg.aa_ap = false;
+        g_cfg.mode = MODE_CLIENT;
+        g_cfg.wlan_on = true;
+        config_save();
+        apply_mode(false);
+        snprintf(body, sizeof(body), "{\"ok\":true,\"mode\":\"%s\"}\n", mode_name());
     } else if (!strcmp(method, "POST") && !strcmp(path, "/carplay/start")) {
         g_cfg.mode = MODE_CARPLAY;
         g_cfg.aa_ap = false;
