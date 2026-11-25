@@ -1162,30 +1162,7 @@ if [ -f "$COMBO/boot_profile.sh" ]; then
     fi
 fi
 
-# ---- background api walk ------------------------------------------------------
-# The wifi stage starts its opt-in API walk (api_walk file on the stick root) in the
-# background so it overlaps tweaks/ambient/fake-engine instead of extending the flash
-# by ~100 s.  Wait for it here - bounded - then copy the trace, so the answer is on
-# the stick and the done beeps mean "everything finished", not "stages finished".
-if [ -f "$STICK_DIR/api_walk" ]; then
-    _aw=0
-    while [ ! -f "$RW_DIR/api_walk.done" ] && [ "$_aw" -lt 180 ]; do
-        sleep 2 2>/dev/null || sleep 1
-        _aw=$((_aw + 2))
-    done
-    if [ -f "$RW_DIR/api_walk.done" ]; then
-        _aw_s=$(cat "$RW_DIR/api_walk.done" 2>/dev/null || echo "?")
-        # Only this round's trace: the marker is written by the walk itself, so its
-        # presence (and freshness) is the proof that the file belongs to this run.
-        _aw_age=$(( $(date +%s 2>/dev/null || echo 0) - $(date -r "$RW_DIR/api_walk.done" +%s 2>/dev/null || echo 0) ))
-        [ "$_aw_age" -lt 900 ] && [ -f "$RW_DIR/api_walk.txt" ] && \
-            cp -f "$RW_DIR/api_walk.txt" "$USB_DIR/api_walk.txt" 2>/dev/null || true
-        log "api walk finished: ${_aw_s}s of deliberate waits (overlapped with the other stages)"
-    else
-        [ -f "$RW_DIR/api_walk.txt" ] && cp -f "$RW_DIR/api_walk.txt" "$USB_DIR/api_walk.txt" 2>/dev/null || true
-        log "api walk did not finish within ${_aw}s; partial trace copied"
-    fi
-fi
+# ---- perf snapshot ----------------------------------------------------------
 
 # ---- perf snapshot ----------------------------------------------------------
 # "What is eating the CPU right now", taken when the install is done: the unit
@@ -1228,7 +1205,7 @@ attribution terms in the project LICENSE). Firmware: Ioniq 5 Gen5W_L 260128.
 Stick flags (drop the file at the root to change one run):
   no_ui_restart  skip the AppHomeScreen restart - honoured only when the QML
                  payload is unchanged, so a new page still goes live
-  api_walk       run the 7-step daemon API walk (adds ~1m40s of sleeps)
+  (the daemon API walk was removed on 2026-11-25: ~100 s of sleeps, drive the API from the UI instead)
   bt_tap_run     attach the LD_PRELOAD HCI tap to vbtd: the HCI stream goes to
                  /rw_data/bt/tap.bin, BUT Bluetooth is stopped for the run
                  (no hands-free, no phone audio, no BT CarPlay), and the tap

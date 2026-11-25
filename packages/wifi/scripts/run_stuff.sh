@@ -1735,12 +1735,7 @@ else
 fi
 
 
-# ---- one-round API walk (opt-in) ----------------------------------------
-# Every UI action is an HTTP call, so the whole interaction matrix can be walked
-# in a single insert instead of one action per round.  Put `api_walk` on the
-# stick root; the trace lands next to the probe as api_walk.txt.
-# The unit has neither wget nor nc, so the walk uses the tiny httpreq we ship
-# next to the combo helpers.  Port 8090 is the wifi daemon (see the unit file).
+# ---- API walk: removed 2026-11-25 -----------------------------------------
 _HTTPRQ=$(httpreq_bin || true)
 _api() {
     [ -n "$_HTTPRQ" ] || { echo "{\"error\":\"no httpreq\"}"; return 1; }
@@ -1750,52 +1745,10 @@ _apistatus() {
     [ -n "$_HTTPRQ" ] || { echo "{\"error\":\"no httpreq\"}"; return 1; }
     "$_HTTPRQ" GET 127.0.0.1 8090 /status 2>/dev/null | head -c 1200
 }
-# A stale trace from an earlier round must not look like this round's: the master
-# copies $RW_DIR/api_walk.txt unconditionally, and on 2026-11-25 it put a Nov-23 file
-# (every call "no httpreq") on the stick as if it were new.
-if [ ! -f "$STICK_ROOT/api_walk" ]; then
-    rm -f "$RW_DIR/api_walk.txt" "$RW_DIR/api_walk.done" 2>/dev/null || true
-fi
-if [ -f "$STICK_ROOT/api_walk" ]; then
-    _walk="$RW_DIR/api_walk.txt"
-    # Timed, because this walk is the single largest block in a combo run: the
-    # 2026-11-25 flash spent 180 s inside the wifi stage, ~100 s of it in these
-    # deliberate sleeps.  The total lands in the stage result (api_walk_s=) so the
-    # next run's budget is not a guess.
-    _walk_t0=$(date +%s 2>/dev/null || echo 0)
-    # Started in the background on purpose: the walk is ~100 s of deliberate sleeps
-    # against the daemon's HTTP API and it does not touch the files the other stages
-    # install, so it can overlap tweaks/ambient/fake-engine instead of extending the
-    # flash.  The marker file tells the master when the answer is on the stick.
-    rm -f "$RW_DIR/api_walk.done" 2>/dev/null || true
-    (
-    { echo "=== api walk $(date -u 2>/dev/null)"
-      echo "--- step 1: mode=client"; _api "/mode?value=client" | head -c 200; echo
-      sleep 20; _apistatus | head -c 1200; echo
-      echo "--- step 2: client/connect"; _api "/client/connect" | head -c 200; echo
-      sleep 40; _apistatus | head -c 1200; echo
-      echo "--- step 3: bad manual join (must fail cleanly)"
-        # A short PSK must be rejected; kept in a variable so the leak gate does not
-        # read a literal secret here (2026-11-24).
-        _pw_short=short
-        _api "/client/pair?ssid=SCOURGE-TEST&psk=$_pw_short" | head -c 200; echo
-      echo "--- step 4: scan"; _api "/scan" | head -c 400; echo
-      echo "--- step 5: AA AP 5 GHz"; _api "/ap/start?ssid=SCOURGE-AA&channel=36" | head -c 200; echo
-      sleep 25; _apistatus | head -c 1200; echo
-      echo "--- step 6: stop AP"; _api "/carplay/stop" | head -c 200; echo
-      sleep 8; _apistatus | head -c 800; echo
-      echo "--- step 7: back to client + ssh"; _api "/mode?value=client" | head -c 200; echo
-      _api "/ssh?enabled=1&port=2222" | head -c 200; echo
-      sleep 5
-      echo "--- listeners"; (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -E ":(2222|8090|8091)" | head -n 5
-      echo "--- wlan0"; ip -4 -o addr show wlan0 2>/dev/null | head -n 2
-      echo "--- aa/check"; _apistatus >/dev/null 2>&1; _api "/aa/check" | head -c 400; echo
-    } > "$_walk" 2>&1
-    _walk_t1=$(date +%s 2>/dev/null || echo 0)
-    printf '%s\n' "$((_walk_t1 - _walk_t0))" > "$RW_DIR/api_walk.done" 2>/dev/null || true
-    ) &
-    log "api walk started in the background; the remaining stages run meanwhile"
-fi
+# The one-round API walk and its api_walk.txt collection were removed here
+# (2026-11-25): ~100 s of deliberate sleeps inside the wifi stage, only a
+# convenience for the AA work.  The same calls can be made one at a time from the
+# UI or over ssh.
 
 # ---- vendor BT API measurement (AA package prober) ------------------------
 # The AA package has no installer of its own, so this stage is the only writer of
@@ -1864,7 +1817,7 @@ probe_aa
 # the stick earlier restarts the loader (md5 gate), and each restart beeps.
 _stick="${SCOURGE_STICK_DIR:-$USB_DIR}"
 if [ -w "$_stick" ]; then
-    for _f in wifi_probe.txt aa_probe.txt api_walk.txt; do
+    for _f in wifi_probe.txt aa_probe.txt; do
         [ -f "$RW_DIR/$_f" ] && cp -f "$RW_DIR/$_f" "$_stick/$_f" 2>/dev/null || true
     done
     # The Bluetooth tap is only produced when the stick carried `bt_tap_run`, and
@@ -1886,7 +1839,7 @@ result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$
        "backup=$BACKUP_HU" "daemon=$daemon_status" "daemon_verify=$daemon_verify" \
        "oem_mask=$oem_mask" \
        "wifi_import=$wifi_import" "restart=$restart" "build_id=$BUILD_ID" \
-       "api_walk_s=${API_WALK_S:-0}" \
+       \
        "mdnsd_patch=$mdnsd_patch" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"
 log "=== wifi payload done ==="
 exit 0
