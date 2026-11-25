@@ -50,6 +50,13 @@ if [ -x "$HERE/../../aa/vbtd_api.target" ]; then
 else
     echo "note: packages/aa/vbtd_api.target not built (make -C packages/aa target-vbtd-api)" >&2
 fi
+# AA protocol dumper: nav/EV decoding and the discovery parser, measured on the unit
+# over SSH instead of through a phone.
+if [ -x "$HERE/../../aa/aa_dump.target" ]; then
+    cp -f "$HERE/../../aa/aa_dump.target" "$OUT/payload/bin/aa_dump.target"
+else
+    echo "note: packages/aa/aa_dump.target not built (make -C packages/aa target-aa-dump)" >&2
+fi
 mkdir -p "$OUT/payload/lib" "$OUT/payload/firmware"
 # Signed regulatory database: without it cfg80211 stays on "country 00" (world),
 # which forbids beaconing on every 5 GHz channel, and the 5 GHz AP - the only band

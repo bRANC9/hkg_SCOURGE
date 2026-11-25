@@ -65,6 +65,12 @@ if [ -f "$PAYLOAD/bin/vbtd_api.target" ]; then
     cp -f "$PAYLOAD/bin/vbtd_api.target" "$RW_DIR/bin/vbtd_api.target" 2>/dev/null || true
     chmod 755 "$RW_DIR/bin/vbtd_api.target" 2>/dev/null || true
 fi
+# AA protocol dumper (on-car measurement without a phone): nav/EV decoders plus the
+# discovery parser.  Static binary, argv only, no network and no python on the unit.
+if [ -f "$PAYLOAD/bin/aa_dump.target" ]; then
+    cp -f "$PAYLOAD/bin/aa_dump.target" "$RW_DIR/bin/aa_dump.target" 2>/dev/null || true
+    chmod 755 "$RW_DIR/bin/aa_dump.target" 2>/dev/null || true
+fi
 wifi_import=not-present
 
 ADV="HomeScreen/QHMI_HomeScreenMain_Advanced.qml"
