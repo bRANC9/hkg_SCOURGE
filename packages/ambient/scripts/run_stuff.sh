@@ -410,13 +410,55 @@ hw_probe() {
         echo "=== ambient hw probe $(date -u 2>/dev/null)"
         echo "--- settings keys (ambient/light/theme)"
         grep -o -iE '"[A-Za-z_]*(ambient|mood|light|illum|theme)[A-Za-z_]*"[[:space:]]*:[[:space:]]*[^,}]*' /app/share/AppSetup/data/vehicle_settings.json 2>/dev/null | head -n 20
-        echo "--- micom CAN capture, phase 1: idle baseline (8 s)"
+        # A light COMMAND would be a method call, not a signal: the 2026-11-25 capture
+        # (15 s of toggling) showed only ihu speed/ETC telemetry and radio station
+        # updates, and no light-ish signal at all.  So introspect the service first -
+        # what can we even send - and then watch method calls as well as signals.
+        echo "--- micom method surface (Introspect)"
+        if command -v dbus-send >/dev/null 2>&1; then
+            _intro="$RW_DIR/.micom_introspect.txt"
+            : > "$_intro" 2>/dev/null || _intro=/tmp/micom_introspect.txt
+            for _p in / /Ihu /Radio /Light /Ambient /Interior /Theme /Setting; do
+                dbus-send --system --print-reply --dest=com.lge.car.micom "$_p" \
+                    org.freedesktop.DBus.Introspectable.Introspect 2>/dev/null \
+                    | sed "s|^|[$_p] |" >> "$_intro" 2>/dev/null || true
+            done
+            echo "  paths that answered: $(grep -c 'interface name' "$_intro" 2>/dev/null)"
+            echo "  interfaces: $(grep -oE 'interface name="[^"]+"' "$_intro" 2>/dev/null | sort -u | sed 's/interface name=//' | tr '\n' ' ')"
+            echo "  methods (name only): $(grep -oE '<method name="[^"]+"' "$_intro" 2>/dev/null | sed 's/<method name=//' | sort -u | tr '\n' ' ' | cut -c1-1200)"
+            echo "  light-ish methods:"
+            grep -oE '<method name="[^"]*"' "$_intro" 2>/dev/null \
+                | grep -iE 'light|ambient|illum|theme|mood|dim|led|color' | sed 's/^/    /' | head -n 20
+            echo "  child nodes: $(grep -oE '<node name="[^"]+"' "$_intro" 2>/dev/null | sed 's/<node name=//' | sort -u | tr '\n' ' ')"
+        else
+            echo "no dbus-send"
+        fi
+        echo "--- phase 1: idle baseline, signals + method calls (8 s)"
         if command -v dbus-monitor >/dev/null 2>&1; then
             ( dbus-monitor --system "type='signal',sender='com.lge.car.micom'" 2>&1 \
                   & _dp=$!; sleep 8; kill -TERM "$_dp" 2>/dev/null; wait "$_dp" 2>/dev/null ) | head -n 80
             echo "--- phase 2: TOGGLE A LIGHT NOW (dome/map/cluster theme), 15 s"
-            ( dbus-monitor --system "type='signal',sender='com.lge.car.micom'" 2>&1 \
-                  & _dp=$!; sleep 15; kill -TERM "$_dp" 2>/dev/null; wait "$_dp" 2>/dev/null ) | head -n 120
+            # Monitors write to files, not into a pipeline: killing a pipeline pid
+            # leaves the monitor alive and it keeps holding the medium.
+            dbus-monitor --system "type='signal',sender='com.lge.car.micom'" > /tmp/amb_sig.txt 2>&1 &
+            _mp1=$!
+            dbus-monitor --system "type='method_call'" > /tmp/amb_call.txt 2>&1 &
+            _mp2=$!
+            dbus-monitor --session "type='method_call'" > /tmp/amb_sess.txt 2>&1 &
+            _mp3=$!
+            sleep 15
+            kill -TERM "$_mp1" "$_mp2" "$_mp3" 2>/dev/null || true
+            wait 2>/dev/null || true
+            echo "  captured: signals=$(grep -c 'member=' /tmp/amb_sig.txt 2>/dev/null) system_calls=$(grep -c 'member=' /tmp/amb_call.txt 2>/dev/null) session_calls=$(grep -c 'member=' /tmp/amb_sess.txt 2>/dev/null)"
+            echo "  --- phase 2 micom signals"
+            head -n 80 /tmp/amb_sig.txt 2>/dev/null
+            echo "  --- phase 2 system method calls mentioning light/Ambient/micom/Scomo/mcan"
+            grep -iE 'light|ambient|illum|theme|mood|micom|Scomo|mcan' /tmp/amb_call.txt 2>/dev/null | head -n 60
+            echo "  --- phase 2 session method calls mentioning light/ambient/theme"
+            grep -iE 'light|ambient|illum|theme|mood' /tmp/amb_sess.txt 2>/dev/null | head -n 40
+            echo "  --- every distinct system method member seen (top 20 by count)"
+            grep -oE 'member=[A-Za-z0-9_]+' /tmp/amb_call.txt 2>/dev/null | sort | uniq -c | sort -rn | head -n 20
+            rm -f /tmp/amb_sig.txt /tmp/amb_call.txt /tmp/amb_sess.txt 2>/dev/null || true
         else
             echo "no dbus-monitor"
         fi
