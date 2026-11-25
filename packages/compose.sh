@@ -368,6 +368,35 @@ fi
 # content change. Two overlapping runs then fight over combo/ and the second one
 # fails the helper check while the first is still installing (2026-11-22: the root
 # result was the integrity stub while the stages had already run).
+# The loader mounts the stick read-write first and falls back to read-only when the
+# filesystem refuses it (a dirty exFAT after an unclean pull).  2026-11-25: that
+# fallback cost a whole round - run_stuff.sh died on "run_stuff_started.log:
+# Read-only file system", wrote no result, made no sound, and nothing on the stick
+# said why.  Probe once, remount, and if the medium stays read-only say it where it
+# can still be read afterwards.
+if ! : >> "\$USB_DIR/.scourge-rw-probe" 2>/dev/null; then
+    mount -o remount,rw "\$USB_DIR" 2>/dev/null || true
+    if : >> "\$USB_DIR/.scourge-rw-probe" 2>/dev/null; then
+        rm -f "\$USB_DIR/.scourge-rw-probe" 2>/dev/null || true
+        printf 'stick was read-only, remounted read-write %s\n' "\$(date -u 2>/dev/null)" \
+            >> "\$RW_DIR/ro_stick.log" 2>/dev/null || true
+    else
+        printf 'stick=%s ro=1 boot=%s time=%s note=read-only medium, nothing installed\n' \
+            "\$USB_DIR" "\$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" \
+            "\$(date -u 2>/dev/null)" >> "\$RW_DIR/run_stuff_ro_stick.txt" 2>/dev/null || true
+        # Two short tones: distinct from the start (1) and done (5) patterns, so the
+        # failure is audible even though the medium cannot carry the message.
+        _i=0
+        while [ "\$_i" -lt 2 ]; do
+            aplay -q -f S16_LE -r 44100 -c 1 "\$USB_DIR/beep-start.dat" >/dev/null 2>&1 || true
+            _i=\$((_i + 1))
+            [ "\$_i" -lt 2 ] && sleep 0.25 2>/dev/null || true
+        done
+        exit 1
+    fi
+fi
+rm -f "\$USB_DIR/.scourge-rw-probe" 2>/dev/null || true
+
 # Breadcrumb before anything else: the run lock, the helper checks and the first
 # stage all come later, and every one of them can exit without a sound. If this
 # file does not change when the stick is plugged, the loader never started us at
@@ -419,10 +448,39 @@ esac
 # Audible start: the micom beep is silent on this unit, so a local tone makes
 # "did the loader start us" a sound. Logged, because a run that dies later must
 # still tell which tone it made (the start and done tones differ).
+audio_wake(){
+    # A tone is proof of intent, not of sound: on this unit aplay exits 0 while the
+    # amp is idle or the mixer is muted (the micom beep is silent by design here).
+    if command -v amixer >/dev/null 2>&1; then
+        amixer -q sset "Master" 80% unmute >/dev/null 2>&1 || true
+        amixer -q sset "PCM" 80% unmute >/dev/null 2>&1 || true
+        amixer -q sset "Headphone" 80% unmute >/dev/null 2>&1 || true
+    fi
+    if command -v pactl >/dev/null 2>&1; then
+        pactl set-sink-mute @DEFAULT_SINK@ 0 >/dev/null 2>&1 || true
+        pactl set-sink-volume @DEFAULT_SINK@ 70% >/dev/null 2>&1 || true
+    fi
+}
+play_tone(){   # play_tone <file> <count>: logs which device actually played it
+    _wav="\$1"; _n="\$2"; _k=0
+    audio_wake
+    while [ "\$_k" -lt "\$_n" ]; do
+        _ok=""
+        for _dev in "" "-D plughw:0,0" "-D default" "-D hw:0,0"; do
+            if aplay -q \$_dev -f S16_LE -r 44100 -c 1 "\$_wav" >/dev/null 2>&1; then
+                if [ -n "\$_dev" ]; then _ok="\$_dev"; else _ok="default"; fi
+                break
+            fi
+        done
+        if [ -n "\$_ok" ]; then log "beep: played \$(basename "\$_wav") via \$_ok"
+        else log "beep: no device played \$(basename "\$_wav")"; fi
+        _k=\$((_k + 1))
+        [ "\$_k" -lt "\$_n" ] && sleep 0.4 2>/dev/null || true
+    done
+}
 if [ -f "\$USB_DIR/beep-start.dat" ]; then
     log "beep: start tone (pre-preflight)"
-    aplay -q -f S16_LE -r 44100 -c 1 "\$USB_DIR/beep-start.dat" >/dev/null 2>&1 || \
-        aplay -q -D plughw:0,0 -f S16_LE -r 44100 -c 1 "\$USB_DIR/beep-start.dat" >/dev/null 2>&1 || true
+    play_tone "\$USB_DIR/beep-start.dat" 2
 fi
 
 # Every exit path publishes the run log to the stick.  combo.log lives on
