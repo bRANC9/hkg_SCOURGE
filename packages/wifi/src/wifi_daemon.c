@@ -2373,6 +2373,41 @@ static bool ap_dhcpd_ensure(void)
     return apd_dhcpd_start(&g_apd_ops);
 }
 
+/* FullMAC firmware refuses to beacon on a 5 GHz channel that cfg80211's regdomain
+ * calls world (00): the supplicant's own set-channel fails with
+ * "nl80211: Failed to set channel (freq=5180): -22 (Invalid argument)".  The vendor
+ * tool has no such problem - measured on the car 2026-11-25 with a second run of the
+ * forcing test:
+ *   ch149: "wl chanspec 149/20" -> "Chanspec set to 0xd095", then the supplicant
+ *          took wlan0 to "type AP" with "ssid SCOURGE-TEST" (beaconing);
+ *   ch36 : "wl: Bad Channel" - ch36..48 are NOT in the firmware channel table
+ *          (1-13 + 149,153,157,161,165), so that channel cannot be used here at all;
+ *   ch6  : works (control).
+ * So a 5 GHz AP needs the vendor chanspec set before the supplicant starts, and it
+ * must be a channel the firmware knows. */
+#define AP_VENDOR_FALLBACK_CHANNEL 149
+static int vendor_channel_prime(int channel)
+{
+    if (channel < 32) return channel;   /* 2.4 GHz needs none of this */
+    char out[256] = "";
+    sh("wl -i wlan0 down 2>/dev/null");
+    sh("wl -i wlan0 ap 1 2>/dev/null");
+    char cmd[160];
+    snprintf(cmd, sizeof(cmd), "wl -i wlan0 chanspec %d/20 2>&1", channel);
+    int rc = sh_out(out, sizeof(out), cmd);
+    if (rc != 0 || strstr(out, "Bad Channel")) {
+        log_msg("static AP: vendor refused channel %d (%s); using %d",
+                channel, trim(out), AP_VENDOR_FALLBACK_CHANNEL);
+        channel = AP_VENDOR_FALLBACK_CHANNEL;
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "wl -i wlan0 chanspec %d/20 2>&1", channel);
+        sh_out(out, sizeof(out), cmd);
+    }
+    log_msg("static AP: vendor chanspec %d -> %s", channel, trim(out));
+    sh("wl -i wlan0 up 2>/dev/null");
+    return channel;
+}
+
 static bool ap_start_static(void)
 {
     if (!g_cfg.cp_ssid[0] || strlen(g_cfg.cp_ssid) > 32 ||
@@ -2441,6 +2476,15 @@ static bool ap_start_static(void)
                 country[n] = 0;
             }
             log_msg("static AP: regdom after set = '%s' (" WIFI_COUNTRY " expected; 00 = world, no 5 GHz beacons)", country);
+        }
+    }
+    /* A 5 GHz AP needs the vendor chanspec before the supplicant starts; the
+     * firmware's channel table decides which channels exist at all (no ch36..48). */
+    if (channel_to_freq() >= 5000) {
+        int primed = vendor_channel_prime(g_cfg.cp_channel);
+        if (primed != g_cfg.cp_channel) {
+            g_cfg.cp_channel = primed;
+            config_save();
         }
     }
     apd_dhcpd_stop();
