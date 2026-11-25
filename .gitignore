@@ -15,6 +15,7 @@ third_party/
 # --- owner stock QML bases (read by build_artifacts.py at build time; -------
 # --- OEM-derived, never committed) -------------------------------------------
 packages/*/base/
+packages/*/base.*/
 packages/*/build/
 packages/wifi/backup/
 packages/wifi/artifacts/assets/wifi/

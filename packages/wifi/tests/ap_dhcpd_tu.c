@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: 2026 The SCOURGE Project contributors */
+/* SPDX-License-Identifier: AGPL-3.0-only */
 /* standalone-TU check for packages/common/ap_dhcpd.inc: the WiFi1b includer
  * reported that errno/stdbool/usleep needed extra defines and that the /proc path
  * snprintf tripped format-truncation.  This file proves none of that is needed. */
