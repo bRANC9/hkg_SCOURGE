@@ -285,6 +285,7 @@ Everything else the probe measured, in one place:
 | 5 GHz | Band 2 present, measured at **5745 MHz (ch 149)**; the AP config asks for **ch 36 (5180)** — same band, different channel, so a real join is the only proof |
 | Country | nvram `ccode=GB`, runtime `wldev_set_country DE` / `wl country DE`; cfg80211 reports `00` (world) → 5 GHz **passive scan**; `iw reg set` has no effect; MICOM Country EU |
 | AP config | SSID `SCOURGE-AA`, band 5, channel 36, hidden 0, max_sta 2, PSK set — redacted here and never committed |
+| Can the stock tether API start that AP? | **No, on this unit.** Every `connmanctl tether` request comes back `rc=0 rejected=1` (not a permission error), once a minute for hours (`wifi_logs_20261125070202`). So the AA/CarPlay access point has to be brought up the way `wifi1b` already does it — our own `wpa_supplicant` in AP mode plus our DHCP server — not through ConnMan's tether path |
 | Projection binary | `/app/bin/AppProjection`, sha256 `8f0096bc…60e3`, matching the pin in `docs/wireless-carplay/PROGRESS.md` |
 | Platform | Linux 4.1.27-abl, x86_64, **glibc 2.25** |
 | `/rw_data` | 1.2 GB with 274 MB free (76 % used) — an installer budget |
@@ -352,7 +353,9 @@ channel, then a transport block (iAP2, mDNS, ready) and a start button. The
 Android Auto analogue looks the same but is *not* a mode of its own:
 
 - the access point is the same 5 GHz AP the CarPlay mode brings up, so a second
-  "Start AA AP" toggle would create a second radio owner for one radio;
+  "Start AA AP" toggle would create a second radio owner for one radio — and that
+  AP cannot come from ConnMan's tether call at all (§5b): `rejected=1` on every
+  attempt, so the AP owner is a static `wpa_supplicant` + DHCP, the `wifi1b` way;
 - what AA adds is a Bluetooth handshake *before* the phone joins — an SDP record
   with the AA UUID, the HFP AG profile and an RFCOMM listener. On this unit the
   Bluetooth stack is the vendor's \`vbtd\`, so those profiles cannot be
