@@ -58,6 +58,8 @@
 #define LOG_PATH       APP_DIR "/daemon.log"
 #define WIFI_TXT_COPY  APP_DIR "/wifi.txt"
 #define SSH_DIR        APP_DIR "/ssh"
+/* The AA probe writes the vendor BT symbol measurement next to the WiFi state. */
+#define AA_BT_API      APP_DIR "/../aa/bt_api.json"
 #define SSH_HOME       APP_DIR "/home"
 #define SSH_KEYS       SSH_DIR "/authorized_keys"
 #define SSH_PID        SSH_DIR "/dropbear.pid"
@@ -1981,6 +1983,24 @@ static int channel_to_freq(void)
 /* Read-only, shared by startup, teardown, observation, SSH and scanning.
  * A failed command is unknown. Neither a stored identifier nor an IPv4
  * address on its own establishes that wlan0 is broadcasting our AP. */
+/* Did the AA probe measure the vendor SDP/RFCOMM exports, and what did it find?
+ * The file is shell-style key=value ("sdp_api=true rfcomm_api=true"); accepting the
+ * JSON spelling too keeps it usable if that ever changes.  Missing file = not
+ * measured, which is different from "measured, absent". */
+static void aa_bt_api(bool *sdp, bool *rfcomm, bool *measured)
+{
+    char json[2048] = "";
+    *measured = read_file(AA_BT_API, json, sizeof(json)) > 0;
+    *sdp = *measured &&
+           (strstr(json, "sdp_api=true") != NULL ||
+            strstr(json, "\"sdp_api\":true") != NULL ||
+            strstr(json, "\"sdp_api\": true") != NULL);
+    *rfcomm = *measured &&
+              (strstr(json, "rfcomm_api=true") != NULL ||
+               strstr(json, "\"rfcomm_api\":true") != NULL ||
+               strstr(json, "\"rfcomm_api\": true") != NULL);
+}
+
 static void ap_probe(ap_probe_t *p)
 {
     memset(p, 0, sizeof(*p));
@@ -5976,24 +5996,39 @@ static void http_handle(int fd)
          * leaves /rw_data/aa/bt_api.json; reading it is correct where a byte scan
          * is not, because an imported symbol name also lives in .dynstr.  No ELF
          * parsing in the HTTP handler, no nm on the unit. */
-        static int sdp_api = -1, rfcomm_api = -1;
-        if (sdp_api < 0 || rfcomm_api < 0) {
-            char btjson[2048] = "";
-            sdp_api = 0;
-            rfcomm_api = 0;
-            if (read_file("/rw_data/aa/bt_api.json", btjson, sizeof(btjson)) > 0) {
-                sdp_api = strstr(btjson, "\"sdp_api\":true") != NULL ||
-                          strstr(btjson, "\"sdp_api\": true") != NULL;
-                rfcomm_api = strstr(btjson, "\"rfcomm_api\":true") != NULL ||
-                             strstr(btjson, "\"rfcomm_api\": true") != NULL;
-            } else {
-                log_msg("aa/check: /rw_data/aa/bt_api.json missing - vendor SDP/RFCOMM API unmeasured (the AA probe writes it at install time)");
-            }
+        /* The probe writes shell-style key=value ("sdp_api=true rfcomm_api=true"),
+         * not JSON.  The first version only matched the JSON spelling, so a
+         * perfectly good measurement came back as "no vendor API": on the car
+         * (2026-11-25) bt_api.json said sdp_api=true while /aa/check said false,
+         * and the AA tab painted "BT missing".  Accept both spellings.
+         *
+         * Read it every time: the cache (-1 sentinel) went blind after a
+         * re-measure, because the probe rewrites the file at every install while
+         * the daemon keeps running. */
+        bool sdp_api = false, rfcomm_api = false, bt_measured = false;
+        aa_bt_api(&sdp_api, &rfcomm_api, &bt_measured);
+        if (!bt_measured)
+            log_msg("aa/check: /rw_data/aa/bt_api.json missing - vendor SDP/RFCOMM API unmeasured (the AA probe writes it at install time)");
+        /* Verdict vocabulary, docs/22 §5c: BlueZ is not the gate, a working BT
+         * path is.  "possible" means both halves are there; the vendor-only case
+         * is named on its own so the page can say "shim route" instead of warning. */
+        const char *verdict;
+        const char *verdict_reason;
+        if (!ap_ready) {
+            verdict = "aa-wireless-needs-ap";
+            verdict_reason = "the 5 GHz access point is not up";
+        } else if (bluezd || (vbtd && sdp_api && rfcomm_api)) {
+            verdict = "aa-wireless-possible";
+            verdict_reason = bluezd ? "AP ready, BlueZ present"
+                                    : "AP ready, vendor vbtd exports SDP/RFCOMM (shim route)";
+        } else if (!vbtd) {
+            verdict = "aa-wireless-bt-missing";
+            verdict_reason = "AP ready, no Bluetooth stack running";
+        } else {
+            verdict = "aa-wireless-bt-vendor-api";
+            verdict_reason = bt_measured ? "AP ready, vbtd runs but the SDP/RFCOMM exports were not found"
+                                         : "AP ready, vendor SDP/RFCOMM API unmeasured";
         }
-        const char *verdict = ap_ready ? (bluezd || sdp_api ? "aa-wireless-possible"
-                                                           : "aa-wireless-bt-vendor-api")
-                                     : "aa-wireless-needs-ap";
-        if (!vbtd && !sdp_api) verdict = "aa-wireless-bt-missing";
         char ssid_e[192], ip_e[128], cp_e[192];
         json_escape(ssid_e, sizeof(ssid_e), ap_ssid[0] ? ap_ssid : g_cfg.cp_ssid);
         json_escape(ip_e, sizeof(ip_e), ap.ip);
@@ -6007,9 +6042,11 @@ static void http_handle(int fd)
                  ip_e, g_cfg.cp_band, g_cfg.cp_channel, bluezd ? "true" : "false");
         used = strlen(body);
         snprintf(body + used, sizeof(body) - used,
-                 "\"vbtd\":%s,\"sdp_api\":%s,\"rfcomm_api\":%s},\"configured_ssid\":\"%s\",\"verdict\":\"%s\"}\n",
+                 "\"vbtd\":%s,\"sdp_api\":%s,\"rfcomm_api\":%s,\"measured\":%s},"
+                 "\"configured_ssid\":\"%s\",\"verdict\":\"%s\",\"reason\":\"%s\"}\n",
                  vbtd ? "true" : "false", sdp_api ? "true" : "false",
-                 rfcomm_api ? "true" : "false", cp_e, verdict);
+                 rfcomm_api ? "true" : "false", bt_measured ? "true" : "false",
+                 cp_e, verdict, verdict_reason);
     } else if (!strcmp(method, "POST") && !strcmp(path, "/client/pair")) {
         /* Manual join from the on-screen keyboard: the same validation the
          * import path applies, so a typo cannot store a key that can never

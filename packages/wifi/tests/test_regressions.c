@@ -512,6 +512,30 @@ int main(int argc, char **argv)
     pump();
     test_work = NULL;
 
+    /* The AA probe writes shell-style key=value, not JSON; a JSON-only parser made
+     * a good measurement look like "no vendor API" on the car (bt_api.json said
+     * sdp_api=true while /aa/check said false, 2026-11-25). */
+    {
+        bool sdp = false, rfcomm = false, measured = false;
+        aa_bt_api(&sdp, &rfcomm, &measured);
+        assert(!measured && !sdp && !rfcomm);          /* no file yet */
+        char api_dir[600];
+        snprintf(api_dir, sizeof(api_dir), "%s/../aa", APP_DIR);
+        mkdir(api_dir, 0700);
+        write_file_atomic(AA_BT_API, "vbtd_api: /app/bin/vbtd-51\n  SDP_CreateRecord exported\n"
+                                     "sdp_api=true rfcomm_api=true\n", 0600);
+        aa_bt_api(&sdp, &rfcomm, &measured);
+        assert(measured && sdp && rfcomm);
+        write_file_atomic(AA_BT_API, "{\"ok\":true,\"sdp_api\": true,\"rfcomm_api\":false}\n", 0600);
+        aa_bt_api(&sdp, &rfcomm, &measured);
+        assert(measured && sdp && !rfcomm);
+        write_file_atomic(AA_BT_API, "sdp_api=false rfcomm_api=false\n", 0600);
+        aa_bt_api(&sdp, &rfcomm, &measured);
+        assert(measured && !sdp && !rfcomm);
+        unlink(AA_BT_API);
+        rmdir(api_dir);
+    }
+
     /* Pairing stop is idempotent: the second call in the same apply must not run
      * the VBT round again (two identical "Pairing stop not confirmed" lines per
      * apply in the 2026-11-25 bundle). */
