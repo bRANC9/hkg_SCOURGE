@@ -853,27 +853,32 @@ chmod 644 "$SERVICE" 2>/dev/null || true
 chown 0:0 "$SERVICE" 2>/dev/null || true
 
 # ---- carplay_mdnsd restart drop-in -------------------------------------
-# The vendor unit is RemainAfterExit=true with no Restart: if mdnsd dies the
-# unit still reports "active", so nothing ever restarts it (observed on-car:
-# BonjourBrowser "kDNSServiceErr_ServiceNotRunning").  A drop-in makes the
-# unit restart mdnsd when the process exits.  run_stuff_restore.sh removes it.
+# /app/bin/mdnsd is a *launcher*: it forks the real responder and exits 0
+# immediately (2026-11-25, checked over ssh: the launcher returns 0 at once while
+# UDP 5353 is served by its detached child).  The stock unit therefore runs with
+# RemainAfterExit=true, which is the only correct semantic for a launcher.
+#
+# The first version of this drop-in set RemainAfterExit=no + Restart=always, so
+# systemd saw a clean exit and restarted the launcher every 2 s (start-limit
+# hold-off made it look like 10 s) - and every restart forked ANOTHER responder:
+# the unit had four 5353 sockets and a permanent churn.  Restart=on-failure keeps
+# the recovery the drop-in was added for (a crash still restarts) without
+# relaunching a launcher that is supposed to exit.
 MDNSD_UNIT_DIR="/etc/systemd/system/carplay_mdnsd.service.d"
 if [ -d /etc/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
-    if [ ! -f "$MDNSD_UNIT_DIR/50-scourge-restart.conf" ]; then
-        if io_mkdir "$MDNSD_UNIT_DIR"; then
-            cat > "$RW_DIR/mdnsd-dropin.conf" <<'EOF'
+    if io_mkdir "$MDNSD_UNIT_DIR"; then
+        cat > "$RW_DIR/mdnsd-dropin.conf" <<'EOF'
 # SCOURGE_MDNSD_RESTART=1
 [Service]
-RemainAfterExit=no
-Restart=always
+Restart=on-failure
 RestartSec=2
 EOF
-            io_copy "$RW_DIR/mdnsd-dropin.conf" "$MDNSD_UNIT_DIR/50-scourge-restart.conf" || fail "mdnsd drop-in copy failed"
-            chmod 644 "$MDNSD_UNIT_DIR/50-scourge-restart.conf" 2>/dev/null || true
-            log "installed carplay_mdnsd restart drop-in"
-        else
-            log "WARNING: cannot create $MDNSD_UNIT_DIR (mdnsd will not auto-restart)"
-        fi
+        # Always (re)write: an older drop-in with Restart=always is the churn above.
+        io_copy "$RW_DIR/mdnsd-dropin.conf" "$MDNSD_UNIT_DIR/50-scourge-restart.conf" || fail "mdnsd drop-in copy failed"
+        chmod 644 "$MDNSD_UNIT_DIR/50-scourge-restart.conf" 2>/dev/null || true
+        log "installed carplay_mdnsd restart drop-in (on-failure: the launcher exits 0 by design)"
+    else
+        log "WARNING: cannot create $MDNSD_UNIT_DIR (mdnsd will not auto-restart)"
     fi
 fi
 
