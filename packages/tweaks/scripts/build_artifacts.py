@@ -712,19 +712,68 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
         }
     }
 
-    function startAutoConfirm() {
-        var r = root.autoAppRoot()
-        if (r && (r.disclaimerAutoCancelled || r.disclaimerAutoDone))
+    function applyAutoConfig(enabled, timeout) {
+        if (!enabled) {
+            console.log("[tweaks] disclaimer: auto-accept off at=" + new Date().getTime())
             return
+        }
+        root.autoConfirmTimeout = timeout
+        root.autoConfirmRetries = 0
+        autoConfirmTimer.interval = timeout
+        // Wall clock, so boot_profile.sh can place the accept on the boot
+        // timeline (journal formats differ per unit; this number cannot).
+        console.log("[tweaks] disclaimer: armed delay=" + timeout +
+                    " at=" + new Date().getTime())
+        autoConfirmTimer.start()
+    }
+
+    /* The config lives in /rw_data/tweaks, which the installer writes 0600. This
+       process is not guaranteed to be root and Qt refuses some file:// reads, so
+       the file can come back empty with status 0 - the same reason the WiFi page
+       falls back to HTTP. Ask the daemon first, then the file, and only then use
+       the documented default (on, 2 s) instead of silently staying manual. */
+    function readAutoConfigFromHttp(done) {
         var x = new XMLHttpRequest()
         x.onreadystatechange = function() {
             if (x.readyState !== XMLHttpRequest.DONE)
                 return
-            var enabled = false
-            if (x.status === 200 || x.status === 0)
-                enabled = String(x.responseText).replace(/\s+/g, "") === "1"
-            if (!enabled) {
-                console.log("[tweaks] disclaimer: auto-accept off at=" + new Date().getTime())
+            if (x.status !== 200) {
+                done(false)
+                return
+            }
+            var cfg = null
+            try {
+                cfg = JSON.parse(String(x.responseText))
+            } catch (e) {
+                cfg = null
+            }
+            if (!cfg || typeof cfg.disclaimer_auto === "undefined") {
+                done(false)
+                return
+            }
+            var t = parseInt(cfg.disclaimer_timeout_ms, 10)
+            if (isNaN(t))
+                t = 2000
+            root.applyAutoConfig(Number(cfg.disclaimer_auto) === 1,
+                                 Math.max(0, Math.min(10000, t)))
+            done(true)
+        }
+        x.open("GET", "http://127.0.0.1:8091/status", true)
+        x.send()
+    }
+
+    function readAutoConfigFromFile(done) {
+        var x = new XMLHttpRequest()
+        x.onreadystatechange = function() {
+            if (x.readyState !== XMLHttpRequest.DONE)
+                return
+            if (x.status !== 200 && x.status !== 0) {
+                done(false)
+                return
+            }
+            var text = String(x.responseText).replace(/\s+/g, "")
+            if (text !== "0" && text !== "1") {
+                done(false)
                 return
             }
             var y = new XMLHttpRequest()
@@ -737,20 +786,30 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
                     if (!isNaN(n))
                         timeout = Math.max(0, Math.min(10000, n))
                 }
-                root.autoConfirmTimeout = timeout
-                root.autoConfirmRetries = 0
-                autoConfirmTimer.interval = timeout
-                // Wall clock, so boot_profile.sh can place the accept on the boot
-                // timeline (journal formats differ per unit; this number cannot).
-                console.log("[tweaks] disclaimer: armed delay=" + timeout +
-                            " at=" + new Date().getTime())
-                autoConfirmTimer.start()
+                root.applyAutoConfig(text === "1", timeout)
+                done(true)
             }
             y.open("GET", "file:///rw_data/tweaks/disclaimer_timeout_ms", true)
             y.send()
         }
         x.open("GET", "file:///rw_data/tweaks/disclaimer_auto", true)
         x.send()
+    }
+
+    function startAutoConfirm() {
+        var r = root.autoAppRoot()
+        if (r && (r.disclaimerAutoCancelled || r.disclaimerAutoDone))
+            return
+        root.readAutoConfigFromHttp(function(fromHttp) {
+            if (fromHttp)
+                return
+            root.readAutoConfigFromFile(function(fromFile) {
+                if (fromFile)
+                    return
+                console.log("[tweaks] disclaimer: no readable config, defaulting to armed 2000")
+                root.applyAutoConfig(true, 2000)
+            })
+        })
     }
 
     function autoConfirmAllowed() {

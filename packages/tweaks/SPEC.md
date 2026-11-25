@@ -182,10 +182,13 @@ Brightness is kept at `128:128:128`.
   cap) so no tap is lost.
 - `main.qml` holds per-boot `disclaimerAutoCancelled`/`disclaimerAutoDone`
   state and a pass-through touch guard.
-- The confirm screen starts a 0–10 second timer (0.25 s steps, 0 = immediate)
-  from
-  `/rw_data/tweaks/disclaimer_auto` and
-  `/rw_data/tweaks/disclaimer_timeout_ms`.
+- The confirm screen starts a 0–10 second timer (0.25 s steps, 0 = immediate).
+  Its config is read in three steps: the daemon's
+  `http://127.0.0.1:8091/status` (`disclaimer_auto`,
+  `disclaimer_timeout_ms`), then `/rw_data/tweaks/disclaimer_auto` +
+  `disclaimer_timeout_ms`, then the default below. The file alone is not
+  trusted: it is written `0600`, this process is not guaranteed to be root, and
+  a `file://` XHR can return `status=0` with an empty body.
 - **Default delay: 2 s** (`disclaimer_timeout_ms=2000`, auto-accept on) in the
   daemon defaults, the installer's seeded config and the QML fallback. An
   existing `/rw_data/tweaks/config.conf` keeps its own value; change it in the

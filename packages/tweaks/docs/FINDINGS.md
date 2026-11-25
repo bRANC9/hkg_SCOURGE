@@ -120,6 +120,15 @@ valid cluster diagnostic and has been removed.
   once, and if `enableBtn` is still false the tap is re-delivered as soon as
   it turns true (250 ms poll, 10 s cap) - the OEM setup finishes within a
   couple of seconds, so the disclaimer is confirmable the moment it is drawn.
+- **The config read is a chain, not one file** (`applyAutoConfig` in
+  `build_artifacts.py`): the daemon's `/status` over HTTP
+  (`http://127.0.0.1:8091/status`), then
+  `file:///rw_data/tweaks/disclaimer_auto` + `disclaimer_timeout_ms`, then the
+  documented default (armed, 2000 ms). The file is written `0600` by the
+  installer, and a `file://` XHR in a process that is not root can answer
+  `status=0` with an empty body - the WiFi page falls back to HTTP for the same
+  reason. Before this chain a failed read logged `auto-accept off` and the
+  disclaimer stayed manual, which is the symptom to look for in a boot log.
 - `inter_show_window_fg()` also arms a 10 s watchdog
   (`QTimer::start(10000)` → `slotTimeoutDisableConfirmBtn()`); that slot only
   clears internal engine state, it does not touch the model flag.
