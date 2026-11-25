@@ -362,6 +362,27 @@ it when SSH stops.
 
 ---
 
+## Access point: method and purpose
+
+`connmanctl tether` is refused by the vendor on this unit (`AP tether request
+… rejected=1`, measured for hours on 2026-11-25), so the AP has two methods and
+the default is the one that can actually work:
+
+| key | values | meaning |
+| --- | --- | --- |
+| `ap_method` | `static` (default) / `tether` | `static` runs our own vendor-supplicant AP (`mode=2`) plus our own DHCP server (`packages/common/ap_dhcpd.inc`, the behaviour-identical extraction of Wifi1b's proven `--dhcpd`); `tether` asks ConnMan and keeps the vendor-refusal cooldown as a diagnostic |
+| `ap_purpose` | `ssh` (default) / `aa` | `aa` refuses any band fallback: the phone only joins a 5 GHz AP, so an AA bootstrap stays on channel 36 and fails loudly instead of silently moving to 2.4 GHz channel 6 |
+
+The sequence is Wifi1b's, step for step: validate SSID/key → `iw reg set GB`
+(the vendor config has no `country=`, and "country 00" forbids 5 GHz beacons) →
+AP config → interface up → supplicant → static address (10.42.0.1/24) →
+readiness → DHCP (pool .10-.200) → owned firewall rules.
+
+The status and the Status card show `ap_method`, `ap_purpose`,
+`ap_dhcp_pool`, `ap_dhcp_leases` and the **actual** band/channel, plus the AA
+verdict ("Android Auto needs 5 GHz …") when `ap_purpose=aa` and the AP is not
+on 5 GHz.
+
 ## Wireless CarPlay
 
 CarPlay mode does:

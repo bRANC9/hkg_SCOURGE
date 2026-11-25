@@ -150,6 +150,24 @@ Item {
     property string ssid: ""
     property int signalLevel: 0
     property bool apActive: false
+    // How the AP is created and what it really is.  The daemon's vendor tether
+    // path is refused on this unit (rc=0 rejected=1), so the method and the
+    // actual band have to be visible instead of implied by the button state.
+    property string apMethod: "static"
+    property string apPurpose: "ssh"
+    property string apDhcpPool: "10.42.0.1 .10-.200"
+    property int apDhcpLeases: 0
+    readonly property bool aaBandMismatch: apPurpose === "aa" && carplayBand !== 2
+    function apMethodText() {
+        return (apMethod === "tether" ? "ConnMan tether" : "static") +
+               "   \u00b7   DHCP " + apDhcpPool +
+               (apActive ? "   \u00b7   " + apDhcpLeases + " lease(s)" : "")
+    }
+    function apVerdictText() {
+        if (apPurpose !== "aa") return ""
+        if (aaBandMismatch) return "Android Auto needs 5 GHz - the phone will not join this AP"
+        return apActive ? "Android Auto AP on 5 GHz" : "Android Auto AP is not running"
+    }
     property string apSsid: ""
     property int apClients: 0
     property bool carplayReady: false
@@ -253,6 +271,10 @@ Item {
         carplayPskSet = d.carplay_psk_set
         carplayBand = d.carplay_band
         carplayChannel = d.carplay_channel
+        if (d.ap_method !== undefined) apMethod = "" + d.ap_method
+        if (d.ap_purpose !== undefined) apPurpose = "" + d.ap_purpose
+        if (d.ap_dhcp_pool !== undefined) apDhcpPool = "" + d.ap_dhcp_pool
+        if (d.ap_dhcp_leases !== undefined) apDhcpLeases = d.ap_dhcp_leases
         carplayBtaddr = d.carplay_btaddr
         carplayId = d.carplay_id
         daemonMessage = d.message
@@ -1417,11 +1439,26 @@ Item {
                 }
                 QText {
                     x: 24
-                    y: 176
+                    y: 172
+                    text: root.apMethodText()
+                    font.pixelSize: 19
+                    color: "#7A7A7A"
+                }
+                QText {
+                    x: 24
+                    y: 198
                     text: root.apActive ? "AP running" : "AP stopped"
                     font.pixelSize: 24
                     textBold: true
                     color: root.apActive ? "#4CAF50" : "#FFB300"
+                }
+                QText {
+                    x: 24
+                    y: 226
+                    visible: root.apPurpose === "aa"
+                    text: root.apVerdictText()
+                    font.pixelSize: 19
+                    color: root.aaBandMismatch ? "#FF7043" : "#7A7A7A"
                 }
             }
 

@@ -135,7 +135,16 @@ typedef struct {
      * the car announces CarPlay while the user asked for Android Auto
      * (2026-11-24: "a carplay módot indítja az Android autó is"). */
     bool aa_ap;
+    /* How the AP is created.  "tether" asks ConnMan, which the vendor refuses
+     * on this unit (rc=0, rejected=1, measured 2026-11-25 for hours), so the
+     * default is our own static wpa_supplicant AP with our own DHCP server
+     * (packages/common/ap_dhcpd.inc). */
+    int ap_method;   /* AP_METHOD_STATIC | AP_METHOD_TETHER */
+    int ap_purpose;  /* AP_PURPOSE_SSH | AP_PURPOSE_AA */
 } config_t;
+
+typedef enum { AP_METHOD_STATIC = 0, AP_METHOD_TETHER = 1 } ap_method_t;
+typedef enum { AP_PURPOSE_SSH = 0, AP_PURPOSE_AA = 1 } ap_purpose_t;
 
 static config_t g_cfg;
 static volatile sig_atomic_t g_stop;
@@ -197,6 +206,9 @@ static int g_ap_unready_gen = -1;
  * permission denied).  See tether_rejected_active(). */
 static bool g_tether_rejected;
 static int64_t g_tether_rejected_ms;
+/* The static AP owns WPA_CONF while it runs: ensure_wpa_conf() must not
+ * overwrite the mode=2 config with the client network list. */
+static bool g_ap_conf_active;
 #define TETHER_REJECT_COOLDOWN_MS 600000
 
 typedef enum { AP_UNKNOWN, AP_ABSENT, AP_INTERFACE_UP, AP_READY } ap_state_t;
@@ -384,6 +396,11 @@ static void set_msg(const char *fmt, ...)
 static int (*test_command)(char *, size_t, const char *);
 static bool (*test_work)(work_t, bool);
 static int test_iface = -1, test_owned_wpa = -1;
+/* Static-AP hooks: the real sequence forks a supplicant, a DHCP server and
+ * changes the host's addressing, none of which a unit test may do. */
+static bool test_supplicant_ok;
+static int test_dhcpd_ok = -1;
+static int test_static_ip_ok = -1;
 #endif
 static int run_command(char *out, size_t outsz, const char *cmd, int timeout_ms)
 {
@@ -1002,6 +1019,8 @@ static void config_defaults(void)
     g_cfg.cp_channel = 36;
     g_cfg.cp_hidden = false;
     g_cfg.cp_max_sta = 2;
+    g_cfg.ap_method = AP_METHOD_STATIC;
+    g_cfg.ap_purpose = AP_PURPOSE_SSH;
     str_copy(g_cfg.cp_manufacturer, sizeof(g_cfg.cp_manufacturer), "Hyundai");
     str_copy(g_cfg.cp_model, sizeof(g_cfg.cp_model), "Ioniq 5");
     str_copy(g_cfg.cp_name, sizeof(g_cfg.cp_name), "Ioniq 5");
@@ -1081,6 +1100,10 @@ static void config_load(void)
             str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), v);
         } else if (!strcmp(k, "carplay_btaddr")) {
             str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), v);
+        } else if (!strcmp(k, "ap_method")) {
+            g_cfg.ap_method = !strcmp(v, "tether") ? AP_METHOD_TETHER : AP_METHOD_STATIC;
+        } else if (!strcmp(k, "ap_purpose")) {
+            g_cfg.ap_purpose = !strcmp(v, "aa") ? AP_PURPOSE_AA : AP_PURPOSE_SSH;
         } else if (!strcmp(k, "ssh")) {
             g_cfg.ssh_enabled = atoi(v) != 0;
         } else if (!strcmp(k, "ssh_port")) {
@@ -1152,7 +1175,9 @@ static bool config_save(void)
              "ssh_port=%d\n"
              "aa_ap=%d\n"
              "imported=%d\n"
-             "imported_from=%s\n",
+             "imported_from=%s\n"
+             "ap_method=%s\n"
+             "ap_purpose=%s\n",
              g_cfg.mode == MODE_CLIENT ? "client" :
              g_cfg.mode == MODE_CARPLAY ? "carplay" : "off",
              g_cfg.wlan_on ? 1 : 0,
@@ -1168,7 +1193,9 @@ static bool config_save(void)
              g_cfg.cp_id, g_cfg.cp_btaddr,
              g_cfg.ssh_enabled ? 1 : 0, g_cfg.ssh_port,
              g_cfg.aa_ap ? 1 : 0,
-             g_cfg.imported ? 1 : 0, g_cfg.imported_from);
+             g_cfg.imported ? 1 : 0, g_cfg.imported_from,
+             g_cfg.ap_method == AP_METHOD_TETHER ? "tether" : "static",
+             g_cfg.ap_purpose == AP_PURPOSE_AA ? "aa" : "ssh");
 
     mkdir(APP_DIR, 0755);
     return write_file_atomic(CONFIG_PATH, buf, 0600) == 0;
@@ -1608,7 +1635,8 @@ static void ensure_wpa_conf(void)
 
 static bool supplicant_try(const char *driver)
 {
-    ensure_wpa_conf();
+    /* The static AP writes a mode=2 config; the client list must not replace it. */
+    if (!g_ap_conf_active) ensure_wpa_conf();
     sh("mkdir -p /var/run/wpa_supplicant /run/wpa_supplicant 2>/dev/null");
     sh("chmod 755 /var/run/wpa_supplicant 2>/dev/null");
     /* This build has no CONFIG_DEBUG_FILE: -f is rejected.  Do not use -B:
@@ -2170,8 +2198,210 @@ static bool tether_rejected_active(void)
            now_ms() - g_tether_rejected_ms < TETHER_REJECT_COOLDOWN_MS;
 }
 
+/* ------------------------------------------------------------------ */
+/* Static access point: our own DHCP server                            */
+/*                                                                     */
+/* ConnMan's tether - the only AP route this daemon had - is refused by */
+/* the vendor on this unit (rc=0, rejected=1, measured for hours on     */
+/* 2026-11-25), so an AP has to be a static wpa_supplicant AP. That     */
+/* needs a DHCP server, which packages/common/ap_dhcpd.inc is: the      */
+/* behaviour-identical extraction of Wifi1b's proven w2_dhcpd_run().    */
+/* ------------------------------------------------------------------ */
+#define AP_DHCP_IP            "10.42.0.1"
+#define AP_DHCP_CIDR          "10.42.0.1/24"
+#define AP_DHCP_NETMASK       "255.255.255.0"
+#define AP_DHCP_BROADCAST     "10.42.0.255"
+#define AP_DHCP_POOL_FIRST    10
+#define AP_DHCP_POOL_LAST     200
+#define AP_DHCP_LEASE_FILE    APP_DIR "/dhcp.leases"
+#define AP_DHCP_PID_FILE      APP_DIR "/dhcpd.pid"
+#define AP_DHCP_LOG_FILE      APP_DIR "/dhcpd.log"
+#define AP_DHCP_PROC_NAME     "wifi_dhcpd"
+#include "../../common/ap_dhcpd.inc"
+
+static void apd_ops_log(const char *line) { log_msg("%s", line); }
+static int apd_ops_run(const char *cmd) { return sh("%s", cmd); }
+static bool apd_ops_stop(void) { return g_stop != 0; }
+static const ap_dhcp_ops_t g_apd_ops = { apd_ops_log, apd_ops_run, apd_ops_stop };
+
+static bool ssid_same(const char *a, const char *b);
+static bool carplay_fw_open(void);
+static void carplay_fw_close(void);
+
+/* Static AP config for the vendor wpa_supplicant: the same shape Wifi1b uses,
+ * because that is the proven AP route on this unit.  The extra carplay_* fields
+ * are what the patched supplicant advertises; in Android Auto mode the AP is not
+ * advertised as CarPlay, so they only carry identity. */
+static void conf_quote(char *dst, size_t n, const char *src)
+{
+    size_t j = 0;
+    if (!n) return;
+    for (const char *p = src ? src : ""; *p && j + 3 < n; p++) {
+        if (*p == '\\' || *p == '"') dst[j++] = '\\';
+        dst[j++] = *p;
+    }
+    dst[j] = 0;
+}
+
+static bool write_ap_conf(void)
+{
+    char ssid[512], psk[512], name[512];
+    conf_quote(ssid, sizeof(ssid), g_cfg.cp_ssid);
+    conf_quote(psk, sizeof(psk), g_cfg.cp_psk);
+    conf_quote(name, sizeof(name), g_cfg.cp_name[0] ? g_cfg.cp_name : g_cfg.cp_ssid);
+    int freq = channel_to_freq();
+    char buf[8192];
+    snprintf(buf, sizeof(buf),
+             "# wifi_daemon static AP (vendor wpa_supplicant AP mode)\n"
+             "ctrl_interface=" WPA_CTRL_DIR "\n"
+             "ctrl_interface_group=0\n"
+             "update_config=0\n"
+             "ap_scan=2\n"
+             "beacon_int=100\n"
+             "max_num_sta=%d\n"
+             "app_info=1\n"
+             "carplay_name=\"%s\"\n"
+             "carplay_id=%s\n"
+             "manufacturer=\"%s\"\n"
+             "model_name=\"%s\"\n"
+             "model_number=\"260128\"\n"
+             "device_name=\"%s\"\n"
+             "network={\n"
+             "    ssid=\"%s\"\n"
+             "    mode=2\n"
+             "    frequency=%d\n"
+             "    key_mgmt=WPA-PSK\n"
+             "    proto=RSN\n"
+             "    pairwise=CCMP\n"
+             "    group=CCMP\n"
+             "    psk=\"%s\"\n"
+             "    auth_alg=OPEN\n"
+             "    ignore_broadcast_ssid=%d\n"
+             "}\n",
+             g_cfg.cp_max_sta, name, g_cfg.cp_id, g_cfg.cp_manufacturer,
+             g_cfg.cp_model, name, ssid, freq, psk, g_cfg.cp_hidden ? 1 : 0);
+    mkdir(APP_DIR, 0755);
+    if (write_file_atomic(WPA_CONF, buf, 0600) != 0) {
+        set_msg("Static AP: cannot write the supplicant config");
+        return false;
+    }
+    return true;
+}
+
+/* Static AP: our own wpa_supplicant AP plus our own DHCP server.  The sequence
+ * is Wifi1b's, step for step, so the two AP routes cannot drift apart:
+ *   validate -> 5 GHz regulatory domain -> AP config -> iface up -> supplicant
+ *   -> static address -> readiness -> DHCP -> owned firewall rules.
+ * Band policy follows the purpose: an Android Auto bootstrap must be 5 GHz (the
+ * phone only joins a 5 GHz AP), SSH does not care and benefits from the 2.4 GHz
+ * channel-6 retry. */
+static bool ap_dhcpd_ensure(void)
+{
+#ifdef WIFI_TEST
+    if (test_dhcpd_ok >= 0) return test_dhcpd_ok != 0;
+#endif
+    return apd_dhcpd_start(&g_apd_ops);
+}
+
+static bool ap_start_static(void)
+{
+    if (!g_cfg.cp_ssid[0] || strlen(g_cfg.cp_ssid) > 32 ||
+        strlen(g_cfg.cp_psk) < 8 || strlen(g_cfg.cp_psk) > 63) {
+        set_msg("Static AP requires a 1-32 byte SSID and an 8-63 character key");
+        return false;
+    }
+    bool aa = g_cfg.aa_ap || g_cfg.ap_purpose == AP_PURPOSE_AA;
+    ap_probe_t p;
+    ap_probe(&p);
+    if (p.state == AP_READY && ssid_same(p.ssid, g_cfg.cp_ssid) && wpa_process_alive()) {
+        if (!ap_dhcpd_ensure()) {
+            set_msg("Static AP: DHCP server did not start");
+            return false;
+        }
+        if (!carplay_fw_open())
+            log_msg("static AP: owned firewall rules could not be installed");
+        set_msg("AP running (static, SSID=%s, %d MHz, DHCP %s .%d-.%d)",
+                p.ssid, channel_to_freq(), AP_DHCP_IP, AP_DHCP_POOL_FIRST, AP_DHCP_POOL_LAST);
+        return true;
+    }
+    if (!ensure_wifi_ready()) {
+        set_msg("Static AP: WiFi stack not ready");
+        return false;
+    }
+    /* 5 GHz needs a regulatory domain: the vendor supplicant config has no
+     * country= field, and "country 00" (world) forbids beaconing there. */
+    if (sh("iw reg set GB 2>/dev/null") == 0) log_msg("static AP: regulatory domain GB");
+    else log_msg("static AP: iw reg set GB failed; 5 GHz may be rejected");
+    apd_dhcpd_stop();
+    apd_iface_flush(&g_apd_ops);
+
+    for (int attempt = 0; attempt < (aa ? 1 : 2) && !g_stop; attempt++) {
+        if (attempt) {
+            g_cfg.cp_band = 1;
+            g_cfg.cp_channel = 6;
+            config_save();
+            log_msg("static AP: retrying on 2.4 GHz channel 6 (SSH purpose)");
+        }
+        if (!write_ap_conf()) return false;
+        g_ap_conf_active = true;
+#ifdef WIFI_TEST
+        bool started = test_supplicant_ok ? true : supplicant_try("nl80211,wext");
+#else
+        bool started = supplicant_try("nl80211,wext");
+#endif
+        if (!started) {
+            g_ap_conf_active = false;
+            stop_wpa_supplicant();
+            set_msg("Static AP: wpa_supplicant failed to start");
+            return false;
+        }
+#ifdef WIFI_TEST
+        bool ip_ok = test_static_ip_ok >= 0 ? test_static_ip_ok != 0
+                                           : apd_iface_set_static(&g_apd_ops);
+#else
+        bool ip_ok = apd_iface_set_static(&g_apd_ops);
+#endif
+        if (!ip_ok) {
+            g_ap_conf_active = false;
+            stop_wpa_supplicant();
+            set_msg("Static AP: cannot assign " AP_DHCP_IP);
+            return false;
+        }
+        ap_wait_t w = ap_wait_ready(false, &p);
+        if (w == AP_WAIT_READY) {
+            if (!ap_dhcpd_ensure()) {
+                stop_wpa_supplicant();
+                apd_iface_flush(&g_apd_ops);
+                g_ap_conf_active = false;
+                set_msg("Static AP: DHCP server did not start; AP not reported ready");
+                return false;
+            }
+            if (!carplay_fw_open())
+                log_msg("static AP: owned firewall rules could not be installed");
+            log_msg("static AP: up ssid=%s freq=%d ip=%s leases=%d",
+                    p.ssid, channel_to_freq(), p.ip, apd_leases_count());
+            set_msg("AP running (static, SSID=%s, %d MHz, DHCP %s .%d-.%d)",
+                    p.ssid, channel_to_freq(), AP_DHCP_IP, AP_DHCP_POOL_FIRST, AP_DHCP_POOL_LAST);
+            return true;
+        }
+        ap_evidence("static-start-attempt", &p);
+        log_msg("static AP: attempt %d not ready (state=%d ssid='%s' ip='%s')",
+                attempt, (int)p.state, p.ssid, p.ip);
+        stop_wpa_supplicant();
+        apd_iface_flush(&g_apd_ops);
+        g_ap_conf_active = false;
+    }
+    if (aa)
+        set_msg("Android Auto AP needs 5 GHz and did not come up (SSID=%s); "
+                "no silent band change - the phone only joins a 5 GHz AP", g_cfg.cp_ssid);
+    else
+        set_msg("AP failed to start (static, SSID=%s)", g_cfg.cp_ssid);
+    return false;
+}
+
 static bool ap_start(void)
 {
+    if (g_cfg.ap_method == AP_METHOD_STATIC) return ap_start_static();
     if (!g_cfg.cp_ssid[0] || strlen(g_cfg.cp_ssid) > 32 ||
         strlen(g_cfg.cp_psk) < 8 || strlen(g_cfg.cp_psk) > 63) {
         set_msg("CarPlay AP requires a 1-32 byte SSID and an 8-63 character key");
@@ -2292,8 +2522,11 @@ static bool ap_start(void)
         }
         ap_evidence(result == AP_WAIT_LOST ? "enabled_then_lost" : result == AP_WAIT_NEVER ? "never_enabled" : "pending_or_unknown", &p);
         /* A refused tether request is not a band problem: retrying on 2.4 GHz
-         * would only repeat the refusal. */
-        if (result != AP_WAIT_NEVER || attempt || freq < 5000 || rejected) {
+         * would only repeat the refusal.  Neither is an Android Auto bootstrap:
+         * the phone only joins a 5 GHz AP, so a silent band change would look
+         * like success and connect nothing. */
+        bool aa_target = g_cfg.aa_ap || g_cfg.ap_purpose == AP_PURPOSE_AA;
+        if (result != AP_WAIT_NEVER || attempt || freq < 5000 || rejected || aa_target) {
             set_msg("CarPlay AP %s%s (rc=%d)",
                     result == AP_WAIT_LOST ? "enabled_then_lost" :
                     result == AP_WAIT_PENDING ? "interface up; SSID/address not ready" :
@@ -2330,6 +2563,13 @@ static bool ap_stop(void)
     g_carplay_ie = false;
     carplay_fw_close();
     sh("connmanctl tether_carplay_ie wifi off 2>/dev/null");
+    /* Static AP teardown: our DHCP server and the address we put on wlan0.  Both
+     * are idempotent, so this is safe on the tether path too. */
+    apd_dhcpd_stop();
+    if (g_ap_conf_active || g_cfg.ap_method == AP_METHOD_STATIC) {
+        g_ap_conf_active = false;
+        apd_iface_flush(&g_apd_ops);
+    }
     return ap_disable(true);
 }
 
@@ -4171,10 +4411,11 @@ static bool apply_mode_work(bool pair)
             return false;
         }
     }
-    if (tether_rejected_active()) {
+    if (g_cfg.ap_method == AP_METHOD_TETHER && tether_rejected_active()) {
         /* Do not tear a working station down for an AP the vendor has already
          * refused.  The cooldown ends the 60 s re-apply loop and keeps the box
-         * reachable; wlan0 keeps whatever address it holds. */
+         * reachable; wlan0 keeps whatever address it holds.  The static method
+         * never asks the vendor, so this whole path is tether-only. */
         ap_probe_t refused;
         ap_probe(&refused);
         ap_evidence("tether-rejected", &refused);
@@ -4801,6 +5042,13 @@ static void build_status(char *out, size_t n)
              "\"ap_tether_field\":%d,"
              "\"ap_ssid\":\"%s\","
              "\"ap_clients\":%d,"
+             /* How the AP is asked to come up, and what it really is: the UI must
+              * never claim an AP that the chosen method cannot create. */
+             "\"ap_method\":\"%s\","
+             "\"ap_purpose\":\"%s\","
+             "\"ap_dhcp_pool\":\"%s .%d-.%d\","
+             "\"ap_dhcp_leases\":%d,"
+             "\"ap_dhcp_running\":%s,"
              "\"carplay_ready\":%s,"
              "\"carplay_ie\":%s,"
              "\"carplay_iap2\":%s,"
@@ -4839,6 +5087,11 @@ static void build_status(char *out, size_t n)
              ip_e, ssid_e, o->signal, g_cfg.aa_ap ? "true" : "false",
              o->ap_on ? "true" : "false", o->ap.role == 1 ? "true" : "false",
              o->ap.state, fresh ? o->ap.tether : -1, ap_e, o->clients,
+             g_cfg.ap_method == AP_METHOD_TETHER ? "tether" : "static",
+             (g_cfg.aa_ap || g_cfg.ap_purpose == AP_PURPOSE_AA) ? "aa" : "ssh",
+             AP_DHCP_IP, AP_DHCP_POOL_FIRST, AP_DHCP_POOL_LAST,
+             apd_leases_count(),
+             apd_dhcpd_running() ? "true" : "false",
              /* "ready" requires every wireless-CarPlay component, not just
               * one of the two services. */
              (g_cfg.mode == MODE_CARPLAY && g_cfg.wlan_on && !g_network_failed && o->ap_on &&
@@ -5738,6 +5991,17 @@ static void http_handle(int fd)
             char aa[8] = "";
             g_cfg.aa_ap = query_get(query, "aa", aa, sizeof(aa)) && atoi(aa) != 0;
         }
+        /* method=static|tether, purpose=ssh|aa.  The purpose fixes the band
+         * policy: an AA bootstrap must be 5 GHz. */
+        {
+            char method_buf[16] = "", purpose[8] = "";
+            if (query_get(query, "method", method_buf, sizeof(method_buf)))
+                g_cfg.ap_method = !strcmp(method_buf, "tether") ? AP_METHOD_TETHER : AP_METHOD_STATIC;
+            if (query_get(query, "purpose", purpose, sizeof(purpose)))
+                g_cfg.ap_purpose = !strcmp(purpose, "aa") ? AP_PURPOSE_AA : AP_PURPOSE_SSH;
+            else if (g_cfg.aa_ap)
+                g_cfg.ap_purpose = AP_PURPOSE_AA;
+        }
         if (!config_save()) {
             code = 500;
             snprintf(body, sizeof(body), "{\"ok\":false,\"error\":\"cannot persist AP profile\"}\n");
@@ -5750,11 +6014,16 @@ static void http_handle(int fd)
             char ssid_e[256];
             json_escape(ssid_e, sizeof(ssid_e), g_cfg.cp_ssid);
             snprintf(body, sizeof(body),
-                     "{\"ok\":true,\"ssid\":\"%s\",\"band\":%d,\"channel\":%d,\"key_set\":%s}\n",
-                     ssid_e, g_cfg.cp_band, g_cfg.cp_channel, g_cfg.cp_psk[0] ? "true" : "false");
+                     "{\"ok\":true,\"ssid\":\"%s\",\"band\":%d,\"channel\":%d,\"key_set\":%s,"
+                     "\"method\":\"%s\",\"purpose\":\"%s\"}\n",
+                     ssid_e, g_cfg.cp_band, g_cfg.cp_channel, g_cfg.cp_psk[0] ? "true" : "false",
+                     g_cfg.ap_method == AP_METHOD_TETHER ? "tether" : "static",
+                     g_cfg.ap_purpose == AP_PURPOSE_AA ? "aa" : "ssh");
         }
-        log_msg("access point requested: ssid=%s band=%d channel=%d",
-                g_cfg.cp_ssid, g_cfg.cp_band, g_cfg.cp_channel);
+        log_msg("access point requested: ssid=%s band=%d channel=%d method=%s purpose=%s",
+                g_cfg.cp_ssid, g_cfg.cp_band, g_cfg.cp_channel,
+                g_cfg.ap_method == AP_METHOD_TETHER ? "tether" : "static",
+                g_cfg.ap_purpose == AP_PURPOSE_AA ? "aa" : "ssh");
       ap_start_done2: ;
     } else if (!strcmp(method, "POST") && !strcmp(path, "/client/connect")) {
         g_cfg.mode = MODE_CLIENT;
@@ -5844,8 +6113,9 @@ static void usage(const char *argv0)
             "usage: %s [--port 8090] [--status-file PATH]\n"
             "       %s --status|--mode off|client|carplay|--import|--ssh on|off\n"
             "       %s --ensure-user|--choose-port PORT\n"
-            "       %s --dump-logs\n",
-            argv0, argv0, argv0, argv0);
+            "       %s --dump-logs\n"
+            "       %s --dhcpd   (the AP's DHCP server; the daemon forks it)\n",
+            argv0, argv0, argv0, argv0, argv0);
 }
 
 int main(int argc, char **argv)
@@ -5857,9 +6127,11 @@ int main(int argc, char **argv)
     const char *one_ssh = NULL;
     const char *one_file = NULL;
     const char *one_port = NULL;
+    bool dhcpd_mode = false;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
+        if (!strcmp(argv[i], "--dhcpd")) dhcpd_mode = true;
+        else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--status-file") && i + 1 < argc) g_status_path = argv[++i];
         else if (!strcmp(argv[i], "--status")) one_shot = "status";
         else if (!strcmp(argv[i], "--mode") && i + 1 < argc) { one_shot = "mode"; one_mode = argv[++i]; }
@@ -5870,6 +6142,13 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--choose-port") && i + 1 < argc) { one_shot = "choose-port"; one_port = argv[++i]; }
         else if (!strcmp(argv[i], "--dump-logs")) one_shot = "dump-logs";
         else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(argv[0]); return 0; }
+    }
+
+    /* DHCP-server mode, same argv/exit contract as Wifi1b's --dhcpd: the AP's
+     * server is a forked child of this binary, not a second program. */
+    if (dhcpd_mode) {
+        mkdir(APP_DIR, 0755);
+        return apd_dhcpd_run(&g_apd_ops) ? 0 : 1;
     }
 
     /* One-shot CLI mode: no side effects, no daemon state, stderr logging.

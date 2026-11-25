@@ -17,6 +17,9 @@ static bool powered;
 static bool fail_ap_power;
 static int ap_requests;
 static bool ap_active, stuck_off, unknown_role, no_actual_ssid, deny_tether, refuse_tether;
+/* The static AP has no tether request to flip the fixture to "AP up"; the
+ * regulatory-domain command is the first thing it runs, so that is the hook. */
+static bool static_ap_fixture;
 static int success_request, tether_field = -1, active_probes, delay_ip, lose_after, off_requests, disconnects;
 static int power_enables;
 static bool transient_ip;
@@ -49,6 +52,7 @@ static int mock_command(char *out, size_t n, const char *cmd)
         disconnects++;
         station_status = NULL;
     }
+    if (static_ap_fixture && strstr(cmd, "iw reg set GB")) ap_active = true;
     if (strstr(cmd, "iw dev wlan0 info") && ap_active) {
         active_probes++;
         if (lose_after && active_probes >= lose_after) ap_active = false;
@@ -126,6 +130,9 @@ static int fake_connmanctl(void)
 static void reset_ap_fixture(void)
 {
     ap_active = stuck_off = unknown_role = no_actual_ssid = deny_tether = refuse_tether = false;
+    static_ap_fixture = false;
+    g_cfg.ap_method = AP_METHOD_TETHER;   /* the legacy cases below are tether */
+    g_cfg.ap_purpose = AP_PURPOSE_SSH;
     g_tether_rejected = false;
     g_tether_rejected_ms = 0;
     transient_ip = ap_after_off = station_intrusion = false;
@@ -210,6 +217,49 @@ static void test_ap_states(void)
     assert(tether_rejected_active());
     reset_ap_fixture(); success_request = 1; refuse_tether = true; tether_field = 0;
     assert(ap_start() && ap_requests == 1 && !tether_rejected_active()); /* a real AP clears it */
+
+    /* Static AP: our own wpa_supplicant AP plus our own DHCP server, exactly the
+     * Wifi1b sequence.  Proven here on the mocked command interface: the
+     * regulatory domain is set (5 GHz needs it), the vendor tether is NOT asked,
+     * the supplicant config is a mode=2 AP, and the status names the method. */
+    reset_ap_fixture();
+    g_cfg.ap_method = AP_METHOD_STATIC;
+    static_ap_fixture = true;
+    test_supplicant_ok = true;
+    test_dhcpd_ok = 1;
+    test_static_ip_ok = 1;
+    g_cfg.cp_band = 2; g_cfg.cp_channel = 36;
+    {
+        int tether_before = ap_requests;
+        bool static_ok = ap_start();
+        assert(static_ok);
+        assert(ap_requests == tether_before);      /* no connmanctl tether at all */
+        char conf[8192] = "";
+        assert(read_file(WPA_CONF, conf, sizeof(conf)) > 0);
+        assert(strstr(conf, "mode=2") && strstr(conf, "ap_scan=2"));
+        assert(strstr(conf, "frequency=5180"));
+        assert(strstr(conf, "ssid=\"IONIQ5-CarPlay\""));
+        char st[8192] = "";
+        build_status(st, sizeof(st));
+        assert(strstr(st, "\"ap_method\":\"static\""));
+        assert(strstr(st, "\"ap_purpose\":\"ssh\""));
+        assert(strstr(st, "\"ap_dhcp_pool\":\"10.42.0.1 .10-.200\""));
+        assert(strstr(st, "\"ap_dhcp_running\":"));  /* the field exists; no real server here */
+    }
+    /* Android Auto purpose: 5 GHz only.  A silent 2.4 GHz retry would look like
+     * success and connect nothing, because the phone only joins a 5 GHz AP. */
+    reset_ap_fixture();
+    g_cfg.ap_method = AP_METHOD_TETHER;
+    g_cfg.aa_ap = true;
+    success_request = 0;                    /* the AP never appears */
+    assert(!ap_start());
+    assert(ap_requests == 1);               /* no band fallback request */
+    assert(strstr(g_last_msg, "permission") || strstr(g_last_msg, "never enabled") ||
+           strstr(g_last_msg, "5 GHz"));
+    g_cfg.aa_ap = false;
+    test_supplicant_ok = false;
+    test_dhcpd_ok = -1;
+    test_static_ip_ok = -1;
 
     reset_ap_fixture(); success_request = 1; station_intrusion = true;
     services_reply = "*AR Other wifi_b_4f74686572_managed_psk\n*AR DATA cellular_123_context1\n";
@@ -359,6 +409,10 @@ int main(int argc, char **argv)
     service_reply = "State = configuration\nIPv4 = [ Address=192.0.2.10 ]\n";
     assert(!client_service_ready("wifi_fixture", "192.0.2.10"));
     station_status = NULL;
+    /* The vendor-tether cases below predate ap_method: a config without the key
+     * now defaults to the static AP (the only route that can work on this unit),
+     * so pin the method here instead of depending on what a previous test left. */
+    g_cfg.ap_method = AP_METHOD_TETHER;
     fail_ap_power = true; ap_requests = 0;
     str_copy(g_cfg.cp_psk, sizeof(g_cfg.cp_psk), "fixture-ap-key");
     assert(!ap_start() && ap_requests == 1); /* no fallback while radio remains unpowered */
