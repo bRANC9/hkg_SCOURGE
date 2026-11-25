@@ -1021,7 +1021,11 @@ static void config_defaults(void)
     g_cfg.mode = MODE_OFF;
     g_cfg.wlan_on = false;
     g_cfg.cp_band = 2;
-    g_cfg.cp_channel = 36;
+    /* ch149, not ch36: this unit's FullMAC firmware only knows
+     * 1-13 + 149,153,157,161,165 (measured 2026-11-25), so a 5 GHz AP on ch36 can
+     * never beacon here - "wl: Bad Channel".  ch149 is the first channel of the
+     * 5725-5875 MHz band the HU rules allow at 25 mW with no NO-IR. */
+    g_cfg.cp_channel = 149;
     g_cfg.cp_hidden = false;
     g_cfg.cp_max_sta = 2;
     g_cfg.ap_method = AP_METHOD_STATIC;
@@ -1367,7 +1371,7 @@ static bool parse_wifi_txt(const char *path)
     if (!g_cfg.cp_psk[0]) random_psk(g_cfg.cp_psk, sizeof(g_cfg.cp_psk));
     if (g_cfg.cp_max_sta < 1) g_cfg.cp_max_sta = 2;
     if (g_cfg.cp_channel <= 0)
-        g_cfg.cp_channel = g_cfg.cp_band == 1 ? 6 : 36;
+        g_cfg.cp_channel = g_cfg.cp_band == 1 ? 6 : 149;
 
     str_copy(g_cfg.imported_from, sizeof(g_cfg.imported_from), path);
     g_cfg.imported = true;
