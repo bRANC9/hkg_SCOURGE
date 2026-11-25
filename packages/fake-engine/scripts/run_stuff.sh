@@ -59,6 +59,12 @@ if [ -d "$QML_DIR" ]; then
     if [ -f "$_cur" ] && [ -f "$PAYLOAD/lib/qml_inject.sh" ]; then
         if grep -q "FAKE_ENGINE_TILE_V2" "$_cur" 2>/dev/null; then
             echo "qml: already injected" >> "$LOG"
+            # The floating corner instance is gone from this payload; strip it from
+            # units that were installed before 2026-11-25 so its top-right icon
+            # disappears without a full restore.
+            sh "$PAYLOAD/lib/qml_inject.sh" --file "$_cur" \
+                --remove-marker FAKE_ENGINE_TILE_V2_FALLBACK >> "$LOG" 2>&1 \
+                && echo "qml: corner icon removed" >> "$LOG" || true
         else
             # The tile has to behave like the battery/wifi/tweaks tiles: one
             # instance per grid page, placed by the SCOURGE allocator
@@ -91,18 +97,12 @@ if [ -d "$QML_DIR" ]; then
                 done
             fi
             echo "qml: tile injected on $fe_pages page(s)" >> "$LOG"
-            # Corner fallback: when every free cell is taken (this unit has five,
-            # all used by the SCOURGE tiles) the grid instance never shows, so the
-            # app would be unreachable.  One extra instance on the widget page keeps
-            # it reachable and hides itself as soon as a grid cell frees up.
-            if [ -f "$PAYLOAD/qml/FakeEngineTile.fallback.qml" ]; then
-                sed -e "s/@ORD@/$fe_slot/g" "$PAYLOAD/qml/FakeEngineTile.fallback.qml" \
-                    > "$RW_DIR/tile.fallback.qml" 2>/dev/null \
-                    && sh "$PAYLOAD/lib/qml_inject.sh" --file "$_cur" --append \
-                        --block "$RW_DIR/tile.fallback.qml" >> "$LOG" 2>&1 \
-                    && echo "qml: corner fallback injected" >> "$LOG" \
-                    || echo "qml: corner fallback failed" >> "$LOG"
-            fi
+            # No floating corner instance any more: it drew a permanent icon in the
+            # top-right of every page ("a fake engine lebegő jobb felső ikon", 2026-11-25)
+            # and duplicated the grid tile.  The grid tile is the only entry point;
+            # an already injected corner block is removed below.
+            sh "$PAYLOAD/lib/qml_inject.sh" --file "$_cur" \
+                --remove-marker FAKE_ENGINE_TILE_V2_FALLBACK >> "$LOG" 2>&1 || true
             sh "$PAYLOAD/lib/qml_inject.sh" --file "$_cur" --append \
                 --block "$PAYLOAD/qml/FakeEnginePage.instance.qml" >> "$LOG" 2>&1 \
                 && echo "qml: page injected" >> "$LOG" || echo "qml: page injection failed" >> "$LOG"

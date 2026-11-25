@@ -1162,6 +1162,27 @@ if [ -f "$COMBO/boot_profile.sh" ]; then
     fi
 fi
 
+# ---- background api walk ------------------------------------------------------
+# The wifi stage starts its opt-in API walk (api_walk file on the stick root) in the
+# background so it overlaps tweaks/ambient/fake-engine instead of extending the flash
+# by ~100 s.  Wait for it here - bounded - then copy the trace, so the answer is on
+# the stick and the done beeps mean "everything finished", not "stages finished".
+if [ -f "$RW_DIR/api_walk.done" ] || [ -f "$STICK_DIR/api_walk" ]; then
+    _aw=0
+    while [ ! -f "$RW_DIR/api_walk.done" ] && [ "$_aw" -lt 180 ]; do
+        sleep 2 2>/dev/null || sleep 1
+        _aw=$((_aw + 2))
+    done
+    if [ -f "$RW_DIR/api_walk.done" ]; then
+        _aw_s=$(cat "$RW_DIR/api_walk.done" 2>/dev/null || echo "?")
+        [ -f "$RW_DIR/api_walk.txt" ] && cp -f "$RW_DIR/api_walk.txt" "$USB_DIR/api_walk.txt" 2>/dev/null || true
+        log "api walk finished: ${_aw_s}s of deliberate waits (overlapped with the other stages)"
+    else
+        [ -f "$RW_DIR/api_walk.txt" ] && cp -f "$RW_DIR/api_walk.txt" "$USB_DIR/api_walk.txt" 2>/dev/null || true
+        log "api walk did not finish within ${_aw}s; partial trace copied"
+    fi
+fi
+
 # ---- perf snapshot ----------------------------------------------------------
 # "What is eating the CPU right now", taken when the install is done: the unit
 # ships htop/top but nobody can watch a screen in the car.  The report has a

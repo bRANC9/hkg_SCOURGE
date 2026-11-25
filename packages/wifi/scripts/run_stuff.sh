@@ -1724,6 +1724,12 @@ if [ -f "$STICK_ROOT/api_walk" ]; then
     # deliberate sleeps.  The total lands in the stage result (api_walk_s=) so the
     # next run's budget is not a guess.
     _walk_t0=$(date +%s 2>/dev/null || echo 0)
+    # Started in the background on purpose: the walk is ~100 s of deliberate sleeps
+    # against the daemon's HTTP API and it does not touch the files the other stages
+    # install, so it can overlap tweaks/ambient/fake-engine instead of extending the
+    # flash.  The marker file tells the master when the answer is on the stick.
+    rm -f "$RW_DIR/api_walk.done" 2>/dev/null || true
+    (
     { echo "=== api walk $(date -u 2>/dev/null)"
       echo "--- step 1: mode=client"; _api "/mode?value=client" | head -c 200; echo
       sleep 20; _apistatus | head -c 1200; echo
@@ -1747,8 +1753,9 @@ if [ -f "$STICK_ROOT/api_walk" ]; then
       echo "--- aa/check"; _apistatus >/dev/null 2>&1; _api "/aa/check" | head -c 400; echo
     } > "$_walk" 2>&1
     _walk_t1=$(date +%s 2>/dev/null || echo 0)
-    API_WALK_S=$((_walk_t1 - _walk_t0))
-    log "api walk written: $_walk (${API_WALK_S}s of deliberate waits)"
+    printf '%s\n' "$((_walk_t1 - _walk_t0))" > "$RW_DIR/api_walk.done" 2>/dev/null || true
+    ) &
+    log "api walk started in the background; the remaining stages run meanwhile"
 fi
 
 # ---- vendor BT API measurement (AA package prober) ------------------------

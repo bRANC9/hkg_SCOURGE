@@ -7,6 +7,7 @@
 #                    --anchor menuPage --block /path/to/AmbientTile.instance.qml
 #   sh qml_inject.sh --file ... --block /path/to/AmbientPage.instance.qml --append
 #   sh qml_inject.sh --file ... --revert
+#   sh qml_inject.sh --file ... --remove-marker FAKE_ENGINE_TILE_V2_FALLBACK
 #
 # Safety: brace-matched insertion, a backup next to the file, a balance check
 # before and after, SMACK64 preserved, an explicit --revert.
@@ -22,6 +23,7 @@ ANCHOR="menuPage"
 BLOCK=""
 REVERT=0
 DRY=0
+REMOVE_MARKER=""
 APPEND=0
 BACKUP_DIR="${QML_INJECT_BACKUP:-/rw_data/ambient/qml-backup}"
 
@@ -31,6 +33,7 @@ while [ $# -gt 0 ]; do
         --anchor) ANCHOR=$2; shift 2 ;;
         --block) BLOCK=$2; shift 2 ;;
         --revert) REVERT=1; shift ;;
+        --remove-marker) REMOVE_MARKER=$2; shift 2 ;;
         --dry-run) DRY=1; shift ;;
         --append) APPEND=1; shift ;;
         --backup-dir) BACKUP_DIR=$2; shift 2 ;;
@@ -53,8 +56,9 @@ if [ "$REVERT" = 1 ]; then
     exit 0
 fi
 
-[ -n "$BLOCK" ] || { echo "--block is required (or --revert)" >&2; exit 2; }
-[ -f "$BLOCK" ] || { echo "no such block: $BLOCK" >&2; exit 2; }
+[ -n "$BLOCK" ] || [ -n "$REMOVE_MARKER" ] || { echo "--block is required (or --revert/--remove-marker)" >&2; exit 2; }
+# --remove-marker needs no block; everything else does.
+[ -n "$REMOVE_MARKER" ] || [ -f "$BLOCK" ] || { echo "no such block: $BLOCK" >&2; exit 2; }
 
 braces() {
     _stripped=${TMPDIR:-/tmp}/qmlbraces.$$
@@ -81,6 +85,66 @@ line_delta() {
     _c=${_l//[^\}]/}
     echo $(( ${#_o} - ${#_c} ))
 }
+
+# ---- --remove-marker: take ONE injected block back out ----------------------
+# --revert restores the whole file from the backup, which would also drop the
+# battery/wifi/tweaks injections.  This removes a single block, found by a marker
+# comment, brace-matched from its opening line, and refuses to write if the file
+# stops balancing.
+if [ -n "$REMOVE_MARKER" ]; then
+    start_line=$(grep -n -F "$REMOVE_MARKER" "$FILE" 2>/dev/null | head -n 1 | cut -d: -f1)
+    if [ -z "$start_line" ]; then
+        echo "marker not present: $REMOVE_MARKER (nothing to remove)"
+        exit 0
+    fi
+    prev=$((start_line - 1))
+    [ "$prev" -ge 1 ] || prev=0
+    if [ "$prev" -gt 0 ]; then
+        _prev_text=$(sed -n "${prev}p" "$FILE")
+        case "$_prev_text" in
+            *PAYLOAD_*) start_line=$prev ;;
+        esac
+    fi
+    end_line=0
+    depth=0
+    seen=0
+    n=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        [ "$n" -ge "$start_line" ] || continue
+        depth=$((depth + $(line_delta "$line")))
+        [ "$depth" -gt 0 ] && seen=1
+        if [ "$seen" = 1 ] && [ "$depth" -le 0 ]; then
+            end_line=$n
+            break
+        fi
+    done < "$FILE"
+    if [ "$end_line" = 0 ]; then
+        echo "block for $REMOVE_MARKER never closes (line $start_line)" >&2
+        exit 3
+    fi
+    TMP=$(mktemp "${TMPDIR:-/tmp}/qmlremove.XXXXXX")
+    head -n $((start_line - 1)) "$FILE" > "$TMP" || { rm -f "$TMP"; exit 3; }
+    tail -n +$((end_line + 1)) "$FILE" >> "$TMP"
+    after=$(braces "$TMP")
+    if [ "$after" -ne "$(braces "$FILE")" ]; then
+        rm -f "$TMP"
+        echo "brace balance changed while removing $REMOVE_MARKER - refusing to write" >&2
+        exit 4
+    fi
+    if [ "$DRY" = 1 ]; then
+        echo "would remove lines $start_line..$end_line ($REMOVE_MARKER) from $FILE"
+        rm -f "$TMP"
+        exit 0
+    fi
+    label=$(getfattr -n security.SMACK64 --only-values "$FILE" 2>/dev/null || true)
+    [ -f "$BACKUP" ] || cp -f "$FILE" "$BACKUP"
+    cat "$TMP" > "$FILE"
+    rm -f "$TMP"
+    [ -n "$label" ] && setfattr -n security.SMACK64 -v "$label" "$FILE" 2>/dev/null || true
+    echo "removed lines $start_line..$end_line ($REMOVE_MARKER) from $FILE"
+    exit 0
+fi
 
 BLOCK_CLEAN=$(mktemp "${TMPDIR:-/tmp}/qmlblock.XXXXXX")
 grep -v '^[[:space:]]*import[[:space:]]' "$BLOCK" > "$BLOCK_CLEAN" || true

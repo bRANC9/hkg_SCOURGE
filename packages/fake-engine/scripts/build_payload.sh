@@ -30,7 +30,8 @@ cp -f "$HERE/artifacts/qml/AppHomeScreen/qml_eco3.0/HomeScreen/FakeEnginePage.qm
 cp -f "$HERE/artifacts/qml/AppHomeScreen/qml_eco3.0/component/FakeEngineTile.qml" \
     "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component/"
 cp -f "$HERE/scripts/tile.instance.qml" "$OUT/payload/qml/FakeEngineTile.instance.qml"
-cp -f "$HERE/scripts/tile.fallback.qml" "$OUT/payload/qml/FakeEngineTile.fallback.qml"
+# tile.fallback.qml is no longer shipped: it was the floating top-right icon
+# (removed 2026-11-25).  The stage strips an existing one with --remove-marker.
 cp -f "$HERE/scripts/page.instance.qml" "$OUT/payload/qml/FakeEnginePage.instance.qml"
 # The injection helper is the ambient one: brace-matched insertion with backup
 # and --revert.  Copied (not linked) so this package stands alone.
