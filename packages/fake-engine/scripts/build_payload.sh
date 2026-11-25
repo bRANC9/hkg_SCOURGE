@@ -9,9 +9,28 @@ mkdir -p "$OUT/payload/bin" "$OUT/payload/systemd" "$OUT/payload/audio" "$OUT/do
          "$OUT/payload/lib" "$OUT/payload/qml" \
          "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/HomeScreen" \
          "$OUT/payload/qml/AppHomeScreen/qml_eco3.0/component"
-export PATH="$HERE/../../../work/x86_64-linux-musl-cross/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-CC=$(command -v musl-gcc || echo cc)
+# The cross toolchain lives at <repo>/work/, i.e. TWO levels up from here - the
+# old path had three and silently found nothing, so the build fell back to the
+# host cc.  That links a static glibc built for x86-64-v3: the head unit's
+# Atom-class CPU has SSE4.2 but no AVX, and the binary died with
+# "trap invalid opcode ip:44f5c5 ... vpxor" (SIGILL) at every start - the fake
+# engine never ran in the car (2026-11-25, found over ssh).
+export PATH="$HERE/../../work/x86_64-linux-musl-cross/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+CC=$(command -v musl-gcc || true)
+if [ -z "$CC" ]; then
+    echo "no musl-gcc: a host -static build is AVX-tainted and SIGILLs on the unit." >&2
+    echo "fetch the cross toolchain (scripts/00_toctou.sh / work/x86_64-linux-musl-cross)." >&2
+    exit 1
+fi
 "$CC" -O2 -Wall -Wextra -Werror -march=x86-64 -mtune=generic -static -o "$OUT/payload/bin/fake_engine_daemon" "$HERE/src/fake_engine_daemon.c"
+# The unit's CPU has no AVX.  Anything VEX-encoded in the binary (VEX prefix in
+# objdump's text: vpxor/vmovdqa/vzeroupper...) means the wrong libc was linked and
+# the daemon will SIGILL, so fail the build instead of shipping it.
+if objdump -d "$OUT/payload/bin/fake_engine_daemon" 2>/dev/null | grep -qE '\bv(pxor|movdq|zero|movdqu)'; then
+    echo "AVX instructions in fake_engine_daemon: the unit has none (SSE4.2 max);" >&2
+    echo "build it with the musl cross toolchain, not the host cc." >&2
+    exit 1
+fi
 cp -f "$HERE/artifacts/systemd/fake-engine.service" "$OUT/payload/systemd/"
 python3 "$HERE/scripts/make_engine.py" "$OUT/payload/audio/engine_idle.wav" 4 600 >/dev/null
 python3 "$HERE/scripts/make_icons.py" >/dev/null 2>&1 || echo "warning: icons not regenerated" >&2
