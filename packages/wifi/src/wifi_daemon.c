@@ -5656,6 +5656,14 @@ static bool dump_logs_to_usb(bool verbose)
         snap_cmd(f,
                  "journalctl -b --no-pager 2>/dev/null | "
                  "grep -iE 'WifiPage|qml' | tail -n 200");
+        /* Radio capability, which nothing else in the bundle records: does the
+         * FullMAC driver advertise AP mode, and are 5 GHz channels available?
+         * The vendor bcmdhd driver is out-of-tree and NOT part of LG's OSS drop
+         * (their defconfig has CONFIG_BRCMFMAC unset, CONFIG_CFG80211=m,
+         * CONFIG_MAC80211 unset), so the unit itself has to answer this. */
+        snap_cmd(f, "iw list 2>&1 | sed -n '1,140p'");
+        snap_cmd(f, "iw reg get");
+        snap_cmd(f, "grep -i dhd /proc/modules");
         snap_cmd(f, "iw dev wlan0 link");
         snap_cmd(f, "ifconfig wlan0");
         /* "Is anything listening on 2222?" was the question every bundle left

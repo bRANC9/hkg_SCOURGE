@@ -37,6 +37,16 @@ there is **no BSD/Apache/ISC material**, so the vendor `wpa_supplicant`
 requests, because the link runs at ~135 KB/s and the listing (central directory,
 at the end of the file) is a few requests:
 
+**What the kernel member does and does not answer.** It is the APL (x86_64)
+kernel with LG's own defconfigs (`arch/x86/configs/apl_x86_64_lge_*_defconfig`):
+`CONFIG_CFG80211=m`, `CONFIG_CFG80211_WEXT` unset, `CONFIG_MAC80211` unset,
+`CONFIG_BRCMFMAC` unset, `CONFIG_HOSTAP` unset, `CONFIG_RFKILL=m`, `CONFIG_IPV6=y`.
+That fits what the unit reports (`dhd_bus_download_firmware` in dmesg): the Wi-Fi
+driver is the **out-of-tree FullMAC bcmdhd**, whose source is **not** in the drop.
+So AP capability and 5 GHz availability are decided by that driver + firmware +
+NVRAM and can only be read on the unit — which is why the WiFi log dump now
+records `iw list`, `iw reg get` and the dhd module line.
+
 ```sh
 # presigned URL: POST /download/releaseFileDownloadUrl
 #   osSeq=511246&fileType=Op&fileIdx=1&modelName=IWK2G3FQLWG   (Op = source, Li = notice)
