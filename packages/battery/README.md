@@ -144,7 +144,10 @@ Gear/Park is not a gate at the moment because `0x036` is unreliable; only an
 observed charging cable vetoes the command.
 
 The daemon also writes `/rw_data/battery/status.json` once per second; the QML
-page falls back to that file if HTTP is unavailable. `/status` includes
+page falls back to that file if HTTP is unavailable. `serviceOk` (preheat
+switch, door control, Save logs) means "a valid status arrived in the last 8 s",
+not "the last read succeeded", so an unreadable `file://` mirror does not disable
+the controls and a dead daemon does not leave them enabled. `/status` includes
 `smack`, `smack_expected`, `smack_ok`, `smack_send`, `smack_monitor`,
 `micom_name`, `micom_path`, `batt_b2`, `batt_b4`, `batt_age_ms` and
 `temp_byte` so the privileged daemon, its helpers and the temperature source

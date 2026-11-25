@@ -105,6 +105,7 @@ Item {
 
     // ---- daemon state (I-CAN) ----------------------------------------
     property bool serviceOk: false
+    property double serviceOkAt: 0
     property string heaterState: "idle"
     property int precondRaw: 0
     property int battMin: 0
@@ -374,19 +375,37 @@ Item {
         homeMonitor = d.home_monitor === true
     }
 
+    /* serviceOk drives the preheat switch, the Save logs button and the door
+       control, so it must not be a transport verdict. A file:// read can answer
+       status=0 with an empty body while the daemon is fine (the WiFi page falls
+       back to HTTP for the same reason), and a dead daemon must not stay green
+       forever either. It now means "a valid status was applied less than 8 s
+       ago" - the same window WifiPage uses for updated_ms. */
+    function serviceFresh() {
+        return serviceOkAt > 0 && (Date.now() - serviceOkAt) < 8000
+    }
+
+    function markServiceOk() {
+        serviceOkAt = Date.now()
+        serviceOk = true
+    }
+
     function refreshFromFile() {
         var xhr = new XMLHttpRequest()
         xhr.onreadystatechange = function() {
             if (xhr.readyState === XMLHttpRequest.DONE) {
-                if (xhr.status === 200 || xhr.status === 0) {
-                    try {
-                        applyStatus(JSON.parse(xhr.responseText))
-                        serviceOk = true
-                    } catch (e) {
-                        serviceOk = false
-                    }
-                } else {
-                    serviceOk = false
+                // status 0 with an empty body means "could not read it", not
+                // "the daemon is down": keep the last known values and let the
+                // next poll retry HTTP.
+                if (xhr.status !== 200 && xhr.status !== 0)
+                    return
+                if (!xhr.responseText || !xhr.responseText.length)
+                    return
+                try {
+                    applyStatus(JSON.parse(xhr.responseText))
+                    markServiceOk()
+                } catch (e) {
+                    // keep the last known values; serviceOk decays on its own
                 }
             }
         }
@@ -395,13 +414,14 @@ Item {
     }
 
     function refresh() {
+        serviceOk = serviceFresh()
         var xhr = new XMLHttpRequest()
         xhr.onreadystatechange = function() {
             if (xhr.readyState === XMLHttpRequest.DONE) {
-                if (xhr.status === 200) {
+                if (xhr.status === 200 && xhr.responseText && xhr.responseText.length) {
                     try {
                         applyStatus(JSON.parse(xhr.responseText))
-                        serviceOk = true
+                        markServiceOk()
                         return
                     } catch (e) {
                         // fall through to the file mirror

@@ -260,6 +260,13 @@ POST /logs/dump
 
 The daemon also mirrors the JSON to `/rw_data/battery/status.json` every second.
 
+The QML page reads HTTP first and falls back to that file. `serviceOk` - which
+gates the preheat switch, the door control and Save logs - is not a transport
+verdict: it means "a valid status was applied less than 8 s ago" (the same window
+WifiPage uses for `updated_ms`). A `file://` read that answers `status=0` with an
+empty body, or a stale copy, therefore neither disables the controls nor keeps
+them enabled over a dead daemon.
+
 ### 5.6 Send-health semantics (VM-validated on the firmware's dbus 1.8.20)
 
 `send_ok`/`send_fail` count the exit status of each `dbus-send` child. The
