@@ -4304,6 +4304,13 @@ static bool accept_apply_result(char *buf)
         else if (!strcmp(line, "bt_address")) str_copy(g_cfg.cp_btaddr, sizeof(g_cfg.cp_btaddr), eq);
         else if (!strcmp(line, "cp_id")) str_copy(g_cfg.cp_id, sizeof(g_cfg.cp_id), eq);
         else if (!strcmp(line, "pair_message")) str_copy(g_pair_msg, sizeof(g_pair_msg), eq);
+        else if (!strcmp(line, "tether_rejected")) {
+            g_tether_rejected = v == 1;
+            if (!g_tether_rejected) g_tether_rejected_ms = 0;
+        } else if (!strcmp(line, "tether_rejected_ms")) {
+            long long ms = strtoll(eq, NULL, 10);
+            if (ms > 0) g_tether_rejected_ms = (int64_t)ms;
+        }
     }
     g_apply_failed = !ok;
     if (g_work_kind == WORK_MODE) g_network_failed = !ok;
@@ -4393,14 +4400,21 @@ static void start_pending_work(void)
             if (!g_stop) write_file_atomic(SCAN_RESULT, scan, 0600);
         }
         char buf[2048];
+        /* tether_rejected* travel to the parent: the decision to stop retrying an
+         * AP the vendor refuses lives in the watchdog, which runs in the parent.
+         * Recording it only here made the cooldown die with the worker, so the
+         * 60 s re-apply loop continued exactly as before (2026-11-25 on-car:
+         * "AP tether request ... rejected=1" every minute, SSH never started). */
         snprintf(buf, sizeof(buf), "%d %d\n%s\ncp_band=%d\ncp_channel=%d\n"
                  "ssh_port=%d\ncarplay_ie=%d\nssh_active_port=%d\nssh_fallback=%d\n"
-                 "bt_discoverable=%d\nbt_pairable=%d\npair_stop_ok=%d\nbt_address=%s\ncp_id=%s\npair_message=%s\n",
+                 "bt_discoverable=%d\nbt_pairable=%d\npair_stop_ok=%d\nbt_address=%s\ncp_id=%s\npair_message=%s\n"
+                 "tether_rejected=%d\ntether_rejected_ms=%lld\n",
                  g_apply_gen, ok ? 1 : 0, g_last_msg,
                  g_cfg.cp_band, g_cfg.cp_channel, g_cfg.ssh_port,
                  g_carplay_ie, g_ssh_active_port, g_ssh_port_fallback,
                  g_bt_discoverable, g_bt_pairable, g_pair_stop_confirmed,
-                 g_cfg.cp_btaddr, g_cfg.cp_id, g_pair_msg);
+                 g_cfg.cp_btaddr, g_cfg.cp_id, g_pair_msg,
+                 g_tether_rejected ? 1 : 0, (long long)g_tether_rejected_ms);
         if (!g_stop) write_file_atomic(APPLY_RESULT, buf, 0600);
         _exit(0);
     }
@@ -5125,7 +5139,13 @@ static void copy_event_log(const char *dst_dir, const char *src)
                      strstr(line, " wifi_daemon started:") ||
                      strstr(line, " watchdog:") || strstr(line, " apply ") ||
                      strstr(line, " worker ") || strstr(line, " started wpa_supplicant") ||
-                     strstr(line, " control socket ") || strstr(line, " msg:");
+                     strstr(line, " control socket ") || strstr(line, " msg:") ||
+                     /* The apply phase and the tether/ssh decisions are the whole
+                      * point of a dump: without them the bundle could not say where
+                      * the worker stalled or why the AP never came up (2026-11-25). */
+                     strstr(line, " apply: phase=") ||
+                     strstr(line, "AP tether refused by the vendor") ||
+                     strstr(line, " ssh:") || strstr(line, " ssh deferred:");
         if (!event) continue;
         redact_secret(line, g_cfg.cp_psk); redact_secret(line, g_cfg.psk);
         fputs(line, out);

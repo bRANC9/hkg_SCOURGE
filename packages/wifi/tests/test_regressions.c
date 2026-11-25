@@ -202,7 +202,9 @@ static void test_ap_states(void)
     /* A refusal that is not a permission problem ("Error: ...") must stop the
      * band fallback and be remembered: re-applying it from the watchdog every
      * 60 s produced an apply loop that never let SSH start (on-car 2026-11-24:
-     * applying=true, aa_ap=true, ap_active=false, ssh_active=false). */
+     * applying=true, aa_ap=true, ap_active=false, ssh_active=false, and again on
+     * 2026-11-25 after the first fix, because the flag was only set in the apply
+     * CHILD and died with it). */
     reset_ap_fixture(); refuse_tether = true;
     assert(!ap_start() && ap_requests == 1 && off_requests == 0);
     assert(tether_rejected_active());
@@ -396,9 +398,17 @@ int main(int argc, char **argv)
     assert(g_apply_failed && !g_carplay_ie && !strcmp(g_last_msg, "current intent"));
     char malformed[] = "10\ninvalid\ncarplay_ie=1\n";
     assert(!accept_apply_result(malformed));
-    char fresh[] = "10 1\nready\ncarplay_ie=1\ncp_id=fixture-id\nssh_fallback=1\nssh_active_port=2224\n";
+    char fresh[] = "10 1\nready\ncarplay_ie=1\ncp_id=fixture-id\nssh_fallback=1\nssh_active_port=2224\n"
+                   "tether_rejected=1\ntether_rejected_ms=1795590122000\n";
     assert(accept_apply_result(fresh));
     assert(g_carplay_ie && g_ssh_port_fallback && g_ssh_active_port == 2224);
+    /* The AP refusal must reach the PARENT: the watchdog that decides whether to
+     * re-apply the AP runs there, and a flag set in the child alone leaves the
+     * 60 s loop running (2026-11-25 on-car bundle wifi_logs_20261125070202). */
+    assert(g_tether_rejected && g_tether_rejected_ms == 1795590122000LL);
+    char cleared[] = "10 1\nready\ntether_rejected=0\n";
+    assert(accept_apply_result(cleared));
+    assert(!g_tether_rejected && g_tether_rejected_ms == 0);
     assert(!strcmp(g_cfg.cp_id, "fixture-id"));
     g_cfg.mode = MODE_CARPLAY; g_cfg.wlan_on = true;
     g_observed.gen = g_apply_gen; g_observed_ms = now_ms();
@@ -473,6 +483,21 @@ int main(int argc, char **argv)
     char exported[8192], logpath[600]; snprintf(logpath, sizeof(logpath), "%s/daemon.log", usb);
     assert(read_file(logpath, exported, sizeof(exported)) > 0);
     assert(strstr(exported, "harmless event") && strstr(exported, "AP stage=enabled_then_lost") && !strstr(exported, "secret"));
+    /* The apply phase and the tether decision are the two lines a bundle needs to
+     * explain a stalled apply; the export must not drop them (they were missing
+     * from wifi_logs_20261125070202 even though the daemon wrote them). */
+    write_file_atomic(LOG_PATH,
+        "2026 apply: phase=ap_start aa_ap=1 freq=5180 channel=36\n"
+        "2026 AP tether refused by the vendor (rc=0); no AP retry for 600 s\n"
+        "2026 ssh: AP refused by the vendor; listening on station address 192.0.2.60\n"
+        "2026 ssh deferred: mode=carplay wlan_on=1 ap_state=1 applying=1 worker_pid=7313\n"
+        "2026 connmanctl> add_network\n", 0600);
+    copy_event_log(usb, LOG_PATH);
+    assert(read_file(logpath, exported, sizeof(exported)) > 0);
+    assert(strstr(exported, "apply: phase=ap_start"));
+    assert(strstr(exported, "AP tether refused by the vendor"));
+    assert(strstr(exported, "ssh deferred: mode=carplay"));
+    assert(!strstr(exported, "connmanctl>"));
     log_msg("fixture credential must be masked: %s", g_cfg.psk);
     assert(read_file(LOG_PATH, exported, sizeof(exported)) > 0 && !strstr(exported, g_cfg.psk));
     str_copy(g_cfg.net2_psk, sizeof(g_cfg.net2_psk), "backup-fixture-password");
