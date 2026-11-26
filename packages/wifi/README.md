@@ -382,9 +382,15 @@ It speaks the same wire format as our own AP server (`packages/common/ap_dhcpd.i
 applies the result with `packages/common/net_iface.inc` ioctls (never by shelling
 out to a tool the image does not have), and writes
 `/rw_data/wifi/dhcp.lease` as `key=value` (`ip`, `mask`, `prefix`, `router`,
-`dns`, `server`, `lease`, `iface`, `acquired_unix`) so the daemon can read it
-back without a parser.  Exit: 0 lease (applied), 1 usage, 2 no answer, 3 apply
-failed.  It never flushes an address it did not set.
+`dns`, `server`, `route`, `lease`, `iface`, `acquired_unix`) so the daemon can
+read it back without a parser.  Exit: 0 lease (applied), 1 usage, 2 no answer,
+3 apply failed.  It never flushes an address it did not set, and it does **not**
+take the default route away from the modem by default: the leased router is only
+installed when no default route exists at all (`--default-route` forces it,
+`--no-default-route` never touches it, and the `route=` field says which happened,
+`installed`/`kept-existing`/`skipped`/`failed`).  AA and AP modes depend on the
+modem route staying; a test asserting the wrong order here would surface as
+"everything but the car network is unreachable".
 
 ### Name resolution: `mdns_adv`
 

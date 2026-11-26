@@ -381,7 +381,7 @@ static void test_lease_file(void)
 	struct dcli_lease lease;
 	char line[256];
 	FILE *f;
-	int seen_ip = 0, seen_prefix = 0, seen_gw = 0, seen_dns = 0;
+	int seen_ip = 0, seen_prefix = 0, seen_gw = 0, seen_dns = 0, seen_route = 0;
 	const char *path = "dhcp_client_test.lease";
 
 	memset(&lease, 0, sizeof lease);
@@ -394,7 +394,7 @@ static void test_lease_file(void)
 	lease.lease_seconds = 43200;
 	assert(prefix_len(0xffffff00u) == 24);
 	assert(prefix_len(0xffff0000u) == 16);
-	assert(lease_write(path, "wlan0", &lease) == 0);
+	assert(lease_write(path, "wlan0", &lease, "installed") == 0);
 	f = fopen(path, "r");
 	assert(f);
 	while (fgets(line, sizeof line, f)) {
@@ -402,11 +402,27 @@ static void test_lease_file(void)
 		if (!strncmp(line, "prefix=24", 9)) seen_prefix = 1;
 		if (!strncmp(line, "router=10.99.0.1", 16)) seen_gw = 1;
 		if (!strncmp(line, "dns=8.8.8.8", 11)) seen_dns = 1;
+		if (!strncmp(line, "route=installed", 15)) seen_route = 1;
 	}
 	fclose(f);
 	unlink(path);
-	assert(seen_ip && seen_prefix && seen_gw && seen_dns);
-	printf("PASS: the lease file carries ip/mask/prefix/gw/dns for the daemon\n");
+	assert(seen_ip && seen_prefix && seen_gw && seen_dns && seen_route);
+	printf("PASS: the lease file carries ip/mask/prefix/gw/dns/route for the daemon\n");
+}
+
+/* The leased router must never quietly take the modem's default route: that is
+ * what carries everything outside the car's network, and AA/AP need it to stay. */
+static void test_route_policy(void)
+{
+	int present = default_route_present();
+
+	assert(present == 0 || present == 1);		/* parsed, or -1 if unreadable */
+	assert(!strcmp(dcli_route_state(DCLI_ROUTE_AUTO, 1, 0), "installed"));
+	assert(!strcmp(dcli_route_state(DCLI_ROUTE_AUTO, 1, 1), "kept-existing"));
+	assert(!strcmp(dcli_route_state(DCLI_ROUTE_FORCE, 1, 1), "installed"));
+	assert(!strcmp(dcli_route_state(DCLI_ROUTE_NEVER, 1, 1), "skipped"));
+	assert(!strcmp(dcli_route_state(DCLI_ROUTE_AUTO, 0, 0), "none"));
+	printf("PASS: default route policy (auto keeps an existing one, --default-route forces)\n");
 }
 
 int main(void)
@@ -417,6 +433,7 @@ int main(void)
 	test_exchange(1);
 	test_timeout();
 	test_lease_file();
+	test_route_policy();
 	printf("PASS: dhcp_client exchange, NAK, timeout and lease file\n");
 	return 0;
 }

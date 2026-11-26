@@ -623,11 +623,60 @@ static int prefix_len(uint32_t mask)
 	return bits;
 }
 
+/* ------------------------------------------------------- default route -- */
+
+/* The leased router must not silently take the default route away from the modem:
+ * on this unit the modem's route is what carries anything outside the car's own
+ * network, and AA/AP modes depend on it staying.  So the default is "install it
+ * only when no default route exists at all" - the caller can ask for more. */
+enum dcli_route_mode {
+	DCLI_ROUTE_AUTO = 0,
+	DCLI_ROUTE_FORCE = 1,
+	DCLI_ROUTE_NEVER = 2,
+};
+
+/* 1 = a default route exists, 0 = none, -1 = cannot tell. */
+static int default_route_present(void)
+{
+	FILE *f = fopen("/proc/net/route", "r");
+	char line[256];
+	int present = 0;
+
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof line, f)) {
+		char iface[32];
+		unsigned dest = 0, gw = 0, flags = 0;
+
+		if (!strncmp(line, "Iface", 5))
+			continue;
+		if (sscanf(line, "%31s %x %x %x", iface, &dest, &gw, &flags) != 4)
+			continue;
+		if (dest == 0 && (flags & 1u)) {	/* 0.0.0.0 + RTF_UP */
+			present = 1;
+			break;
+		}
+	}
+	fclose(f);
+	return present;
+}
+
+static const char *dcli_route_state(int mode, int have_router, int present)
+{
+	if (!have_router)
+		return "none";
+	if (mode == DCLI_ROUTE_NEVER)
+		return "skipped";
+	if (mode == DCLI_ROUTE_FORCE)
+		return "installed";
+	return present == 0 ? "installed" : "kept-existing";
+}
+
 /* key=value lines, so the daemon (or a human over ssh) can read the lease back
  * without a parser.  Written atomically: a half written lease is worse than a
  * stale one. */
 static int lease_write(const char *path, const char *ifname,
-		       const struct dcli_lease *l)
+		       const struct dcli_lease *l, const char *route_state)
 {
 	char tmp[256];
 	char ip[32], mask[32], gw[32], dns[32], srv[32];
@@ -651,6 +700,7 @@ static int lease_write(const char *path, const char *ifname,
 	fprintf(f, "router=%s\n", l->have_router ? gw : "");
 	fprintf(f, "dns=%s\n", l->have_dns ? dns : "");
 	fprintf(f, "server=%s\n", srv);
+	fprintf(f, "route=%s\n", route_state ? route_state : "none");
 	fprintf(f, "lease=%u\n", l->lease_seconds);
 	fprintf(f, "t1=%u\nt2=%u\n", l->t1, l->t2);
 	fprintf(f, "acquired_unix=%lld\n", (long long)time(NULL));
@@ -675,6 +725,9 @@ static void usage(void)
 		"  -t SECONDS      per-attempt wait for OFFER/ACK, default 4 (x3 tries)\n"
 		"  --lease-file    where to record the lease, default %s\n"
 		"  --no-config     ask for a lease but do not touch the interface\n"
+		"  --default-route install the leased router as the default route even if\n"
+		"                  one already exists (default: only when there is none)\n"
+		"  --no-default-route  never touch the default route\n"
 		"  --release       release the current lease (needs the lease file)\n"
 		"Exit: 0 lease (applied), 1 usage, 2 no answer, 3 apply failed.\n",
 		"/rw_data/wifi/dhcp.lease");
@@ -690,6 +743,8 @@ int main(int argc, char **argv)
 	int do_config = 1;
 	int release = 0;
 	int quiet = 0;
+	int route_mode = DCLI_ROUTE_AUTO;
+	const char *route_state = "none";
 	struct dcli_pkt pkt = { .fd = -1 };
 	struct dcli_state st;
 	struct dcli_io io;
@@ -710,6 +765,10 @@ int main(int argc, char **argv)
 			hostname = argv[++i];
 		} else if (!strcmp(a, "--no-config")) {
 			do_config = 0;
+		} else if (!strcmp(a, "--default-route")) {
+			route_mode = DCLI_ROUTE_FORCE;
+		} else if (!strcmp(a, "--no-default-route")) {
+			route_mode = DCLI_ROUTE_NEVER;
 		} else if (!strcmp(a, "--release")) {
 			release = 1;
 		} else if (!strcmp(a, "--quiet")) {
@@ -788,19 +847,28 @@ int main(int argc, char **argv)
 			return 3;
 		}
 		neti_up(ifname);
-		if (lease.have_router &&
-		    neti_default_route(ifname, lease.router) < 0)
+		route_state = dcli_route_state(route_mode, lease.have_router,
+					       default_route_present());
+		if (!strcmp(route_state, "installed") &&
+		    neti_default_route(ifname, lease.router) < 0) {
+			route_state = "failed";
 			fprintf(stderr, "dhcp_client: default route via %s failed: %s\n",
 				gw, strerror(errno));
+		} else if (!strcmp(route_state, "kept-existing")) {
+			fprintf(stderr, "dhcp_client: kept the existing default route "
+				"(lease router %s; pass --default-route to replace it)\n",
+				gw);
+		}
 	}
-	if (lease_write(lease_file, ifname, &lease) < 0)
+	if (lease_write(lease_file, ifname, &lease, route_state) < 0)
 		fprintf(stderr, "dhcp_client: cannot write %s: %s\n", lease_file,
 			strerror(errno));
 
-	printf("dhcp: lease %s/%d gw=%s dns=%s from %s ttl=%us iface=%s%s\n",
+	printf("dhcp: lease %s/%d gw=%s dns=%s from %s ttl=%us iface=%s "
+	       "route=%s%s\n",
 	       ip, prefix_len(lease.mask), lease.have_router ? gw : "none",
 	       lease.have_dns ? dns : "none", srv, lease.lease_seconds, ifname,
-	       do_config ? "" : " (not applied)");
+	       route_state, do_config ? "" : " (not applied)");
 	return 0;
 }
 #endif /* DHCP_CLIENT_NO_MAIN */
