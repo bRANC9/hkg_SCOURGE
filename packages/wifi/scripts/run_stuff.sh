@@ -394,7 +394,9 @@ run_bounded(){
         done
         echo "--- connmand version"; connmand --version 2>&1 | head -n 2
         echo "--- wpa_supplicant D-Bus owner"; dbus-send --system --print-reply --reply-timeout=2000 --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetNameOwner string:fi.w1.wpa_supplicant1 2>&1 | head -n 4
-        echo "--- connman scan wifi + services (10 s)"; connmanctl scan wifi 2>&1 | head -n 3; sleep 10; connmanctl services 2>&1 | head -n 20
+        # 10 s of nothing when the radio is fine: the scan result is only interesting when
+# something is wrong, and probe_radio's full mode covers that case.
+echo "--- connman services"; connmanctl services 2>&1 | head -n 20
         echo "--- our daemon pid"; pidof wifi_daemon 2>&1
         systemctl show -p MainPID -p ExecMainStatus wifi-daemon.service 2>&1
         echo "--- status.json"; head -c 400 "$RW_DIR/status.json" 2>&1; echo
@@ -1735,16 +1737,23 @@ wifi_net_report() {
     # Shorter than the old 45x2 s: either the association comes up quickly or it
     # does not, and every extra second here is a second per iteration.
     [ "${_have_dhcp:-1}" = 0 ] && [ -z "${_static_ip:-}" ] && _i=45
+    # connmanctl costs ~2 s per call and this unit's ConnMan has no wifi technology
+    # at all, so asking it inside the loop doubled the wait for nothing (measured
+    # 2026-11-26: the whole wifi stage took 4 min 23 s).  One check before the loop.
+    if connmanctl technologies 2>/dev/null | grep -A2 'technology/wifi' | grep -q 'Powered = False'; then
+        log "client: ConnMan reports the wifi technology Powered=False; waiting anyway (supplicant owns the link)"
+    fi
     while [ "$_i" -lt 30 ]; do
-        # No point waiting for an address while ConnMan's wifi technology is off.
-        if connmanctl technologies 2>/dev/null | grep -A2 'technology/wifi' | grep -q 'Powered = False'; then
-            _off=$((_off + 2))
-            [ "$_off" -lt 16 ] || break
-        else
-            _off=0
-        fi
         _ip=$(_field ip); [ -n "$_ip" ] || _ip=$(ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' | head -n1)
         [ -n "$_ip" ] && break
+        # A rejected key never recovers by waiting: the supplicant disables the
+        # network for 120 s after the handshake failures and the stage burned the
+        # whole window (2026-11-26).  Stop early and say why.
+        if [ $((_i % 5)) -eq 0 ] && grep -q 'reason=WRONG_KEY' "$RW_DIR/wpa_supplicant.log" 2>/dev/null; then
+            log "client: supplicant reports WRONG_KEY; stopping the address wait early"
+            wlan_wrong_key=1
+            break
+        fi
         sleep 1; _i=$((_i + 1))
     done
     # The daemon reports only what it can see itself, and on this unit it saw
@@ -1951,7 +1960,9 @@ bt_api_probe() {
 bt_api_probe || true
 
 log "step: end-of-install probe"
-probe_radio "end of install (daemon_verify=${daemon_verify:-unknown})"
+# fast: the two 20-25 s scans of the full probe tripled the stage's runtime and
+# nobody reads them on a good run; the AA/diag paths still ask for the full one.
+probe_radio "end of install (daemon_verify=${daemon_verify:-unknown})" fast
 log "step: probe done"
 probe_aa
 
