@@ -481,10 +481,12 @@ static int mdns_open(struct mdns_sock *s, const char *ifname)
 	fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
 		return -1;
+	/* SO_REUSEADDR only, on purpose: this socket has to coexist with
+	 * carplay_mdnsd, which also answers mDNS on 5353.  Both then receive the
+	 * multicast questions (we answer only our own names), but we stay out of
+	 * SO_REUSEPORT's unicast load balancing - a unicast CarPlay question must
+	 * never be hashed onto this socket and dropped here. */
 	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-#ifdef SO_REUSEPORT
-	setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
-#endif
 	memset(&addr, 0, sizeof addr);
 	addr.sin_family = AF_INET;
 	s->port = mdns_port();
