@@ -422,7 +422,13 @@ static void test_route_policy(void)
 	assert(!strcmp(dcli_route_state(DCLI_ROUTE_FORCE, 1, 1), "installed"));
 	assert(!strcmp(dcli_route_state(DCLI_ROUTE_NEVER, 1, 1), "skipped"));
 	assert(!strcmp(dcli_route_state(DCLI_ROUTE_AUTO, 0, 0), "none"));
-	printf("PASS: default route policy (auto keeps an existing one, --default-route forces)\n");
+	/* SIOCADDRT without a metric cannot replace a metric-less default route: the
+	 * kernel answers EEXIST, and that outcome is "kept-existing", not a failure. */
+	assert(!strcmp(dcli_route_after_error(DCLI_ROUTE_FORCE, EEXIST), "kept-existing"));
+	assert(!strcmp(dcli_route_after_error(DCLI_ROUTE_AUTO, EEXIST), "kept-existing"));
+	assert(!strcmp(dcli_route_after_error(DCLI_ROUTE_FORCE, EPERM), "failed"));
+	assert(!strcmp(dcli_route_after_error(DCLI_ROUTE_FORCE, ENETUNREACH), "failed"));
+	printf("PASS: default route policy (auto keeps an existing one, EEXIST reported as kept)\n");
 }
 
 int main(void)

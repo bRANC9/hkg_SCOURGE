@@ -388,7 +388,11 @@ read it back without a parser.  Exit: 0 lease (applied), 1 usage, 2 no answer,
 take the default route away from the modem by default: the leased router is only
 installed when no default route exists at all (`--default-route` forces it,
 `--no-default-route` never touches it, and the `route=` field says which happened,
-`installed`/`kept-existing`/`skipped`/`failed`).  AA and AP modes depend on the
+`installed`/`kept-existing`/`skipped`/`failed`).  Note what `--default-route` can and
+cannot do: `SIOCADDRT` here carries no metric, so the kernel refuses a second
+metric-less default route with `EEXIST` — that is reported as `kept-existing`, not as
+a failure, because an existing default route won and the operator needs to know
+which one routes.  AA and AP modes depend on the
 modem route staying; a test asserting the wrong order here would surface as
 "everything but the car network is unreachable".
 

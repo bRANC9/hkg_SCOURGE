@@ -661,6 +661,18 @@ static int default_route_present(void)
 	return present;
 }
 
+/* SIOCADDRT carries no metric here, so the kernel refuses a second metric-less
+ * default route with EEXIST.  That is not a failure of intent: an existing
+ * default route simply won, which is exactly what "kept-existing" means. */
+static const char *dcli_route_after_error(int mode, int err)
+{
+	if (mode == DCLI_ROUTE_FORCE && err == EEXIST)
+		return "kept-existing";
+	if (err == EEXIST)
+		return "kept-existing";
+	return "failed";
+}
+
 static const char *dcli_route_state(int mode, int have_router, int present)
 {
 	if (!have_router)
@@ -851,9 +863,16 @@ int main(int argc, char **argv)
 					       default_route_present());
 		if (!strcmp(route_state, "installed") &&
 		    neti_default_route(ifname, lease.router) < 0) {
-			route_state = "failed";
-			fprintf(stderr, "dhcp_client: default route via %s failed: %s\n",
-				gw, strerror(errno));
+			int err = errno;
+
+			route_state = dcli_route_after_error(route_mode, err);
+			if (!strcmp(route_state, "failed"))
+				fprintf(stderr, "dhcp_client: default route via %s "
+					"failed: %s\n", gw, strerror(err));
+			else
+				fprintf(stderr, "dhcp_client: another default route "
+					"already exists (EEXIST); kept it instead of "
+					"%s\n", gw);
 		} else if (!strcmp(route_state, "kept-existing")) {
 			fprintf(stderr, "dhcp_client: kept the existing default route "
 				"(lease router %s; pass --default-route to replace it)\n",
