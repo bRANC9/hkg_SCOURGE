@@ -1288,6 +1288,11 @@ static bool parse_wifi_txt(const char *path)
     char cp_manufacturer[64] = {0}, cp_model[64] = {0};
     char cp_name[64] = {0}, cp_id[64] = {0}, cp_btaddr[32] = {0};
     int plain_lines = 0;
+    /* The client's own address can come with the credentials: a static address wins
+     * over DHCP, so an owner can provision one for a network without a DHCP server.
+     * dhcp_probe=1 keeps one informational DHCP query in the log. */
+    char static_ip_v[64] = {0}, static_gw_v[64] = {0};
+    int dhcp_probe_v = -1;
 
     char *save = NULL;
     for (char *line = strtok_r(buf, "\n", &save); line;
@@ -1335,6 +1340,9 @@ static bool parse_wifi_txt(const char *path)
          * stores credentials/AP settings.  Activation (WLAN mode, SSH) is
          * always an explicit user action in the UI, never an import side
          * effect.  ssh_port is accepted as a stored preference only. */
+        else if (!strcmp(k, "static_ip")) str_copy(static_ip_v, sizeof(static_ip_v), v);
+        else if (!strcmp(k, "static_gw")) str_copy(static_gw_v, sizeof(static_gw_v), v);
+        else if (!strcmp(k, "dhcp_probe")) dhcp_probe_v = atoi(v) != 0;
         else if (!strcmp(k, "ssh_port")) ssh_port = atoi(v);
     }
 
@@ -1383,6 +1391,19 @@ static bool parse_wifi_txt(const char *path)
         set_msg("WiFi import failed: could not persist credentials");
         return false;
     }
+
+    /* The client's fixed address travels with the credentials: written as plain
+     * files, because config_save() rewrites config.conf from the struct and would
+     * drop them (the same trap that made static_ip ineffective before).  dhcp_probe
+     * is a marker file: present = one informational DHCP query per apply. */
+    if (static_ip_v[0]) {
+        write_file_atomic(APP_DIR "/static_ip", static_ip_v, 0600);
+        log_msg("import: static address %s%s%s", static_ip_v,
+                static_gw_v[0] ? " gw " : "", static_gw_v[0] ? static_gw_v : "");
+    }
+    if (static_gw_v[0]) write_file_atomic(APP_DIR "/static_gw", static_gw_v, 0600);
+    if (dhcp_probe_v == 1) write_file_atomic(APP_DIR "/dhcp_probe", "1\n", 0600);
+    else if (dhcp_probe_v == 0) unlink(APP_DIR "/dhcp_probe");
 
     /* Keep a private copy for the UI / later use. */
     char copy[8192];
@@ -3688,10 +3709,63 @@ static bool default_route_iface(char *out, size_t n)
     return false;
 }
 
+/* The configured static address, if any (plain files: the daemon rewrites
+ * config.conf from its own struct, which dropped these keys before). */
+static bool static_ip_configured(char *cidr, size_t n, char *gw, size_t gn)
+{
+    if (cidr && n) cidr[0] = 0;
+    if (gw && gn) gw[0] = 0;
+    char ipcfg[64] = "", gwv[64] = "";
+    read_file(APP_DIR "/static_ip", ipcfg, sizeof(ipcfg));
+    read_file(APP_DIR "/static_gw", gwv, sizeof(gwv));
+    char *tp;
+    for (tp = ipcfg; *tp && *tp != ' ' && *tp != '\n' && *tp != '\r'; tp++) ;
+    *tp = 0;
+    for (tp = gwv; *tp && *tp != ' ' && *tp != '\n' && *tp != '\r'; tp++) ;
+    *tp = 0;
+    if (!ipcfg[0] || !strchr(ipcfg, '/')) return false;
+    if (cidr && n) snprintf(cidr, n, "%s", ipcfg);
+    if (gw && gn) snprintf(gw, gn, "%s", gwv);
+    return true;
+}
+
+static bool static_ip_apply(const char *cidr, const char *gw, char *ip, size_t n)
+{
+    sh("ip addr flush dev wlan0 2>/dev/null");
+    int rc = sh("ip addr add %s dev wlan0", cidr);
+    if (rc == 0 && gw && gw[0]) sh("ip route replace default via %s dev wlan0", gw);
+    if (wlan_ip(ip, n)) {
+        log_msg("dhcp: static wlan0 address %s (gw=%s)", cidr, gw && gw[0] ? gw : "none");
+        return true;
+    }
+    log_msg("dhcp: static %s failed rc=%d", cidr, rc);
+    return false;
+}
+
 static bool dhcp_acquire(void)
 {
     char ip[64];
     if (wlan_ip(ip, sizeof(ip))) return true;
+    /* A configured static address WINS over DHCP: the owner told us what the unit's
+     * address is, and this image has no DHCP client at all unless we ship ours.
+     * The DHCP query stays available as a pure INFOrmational probe
+     * (APP_DIR "/dhcp_probe") so the bundle can still say what a lease would have
+     * been - it never configures the interface. */
+    {
+        char cidr[64] = "", gw[64] = "";
+        if (static_ip_configured(cidr, sizeof(cidr), gw, sizeof(gw))) {
+            if (file_exists(APP_DIR "/dhcp_probe") && file_exists(DHCP_CLIENT_BIN)) {
+                char probe[512] = "";
+                if (sh_out(probe, sizeof(probe),
+                           DHCP_CLIENT_BIN " -i wlan0 -t 2 --no-config --quiet 2>&1") == 0)
+                    log_msg("dhcp: probe (informational only, static %s kept): %s", cidr, trim(probe));
+                else
+                    log_msg("dhcp: probe found no lease (static %s kept)", cidr);
+            }
+            if (static_ip_apply(cidr, gw, ip, sizeof(ip))) return true;
+            log_msg("dhcp: configured static %s did not apply; falling back to DHCP", cidr);
+        }
+    }
     /* /tmp, not /rw_data: a script in /rw_data needs the right SMACK exec label
      * and busybox udhcpc refuses to run it otherwise (silent, exit 1). */
     write_file_atomic("/tmp/scourge-udhcpc.sh",
@@ -3752,23 +3826,9 @@ static bool dhcp_acquire(void)
      * struct on every save, which silently dropped static_ip/static_gw before
      * they could ever be applied. */
     char ipcfg[64] = "", gw[64] = "";
-    read_file(APP_DIR "/static_ip", ipcfg, sizeof(ipcfg));
-    read_file(APP_DIR "/static_gw", gw, sizeof(gw));
-    char *tp;
-    for (tp = ipcfg; *tp && *tp != ' ' && *tp != '\n' && *tp != '\r'; tp++) ;
-    *tp = 0;
-    for (tp = gw; *tp && *tp != ' ' && *tp != '\n' && *tp != '\r'; tp++) ;
-    *tp = 0;
-    if (ipcfg[0] && strchr(ipcfg, '/')) {
-        sh("ip addr flush dev wlan0 2>/dev/null");
-        int rc2 = sh("ip addr add %s dev wlan0", ipcfg);
-        if (rc2 == 0 && gw[0]) sh("ip route replace default via %s dev wlan0", gw);
-        if (wlan_ip(ip, sizeof(ip))) {
-            log_msg("dhcp: static wlan0 address %s (gw=%s)", ipcfg, gw[0] ? gw : "none");
-            return true;
-        }
-        log_msg("dhcp: static %s failed rc=%d", ipcfg, rc2);
-    }
+    if (static_ip_configured(ipcfg, sizeof(ipcfg), gw, sizeof(gw)) &&
+        static_ip_apply(ipcfg, gw, ip, sizeof(ip)))
+        return true;
     log_msg("dhcp: no lease on wlan0 (tools present: see daemon.log)");
     return false;
 }

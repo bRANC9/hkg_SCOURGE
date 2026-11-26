@@ -369,6 +369,29 @@ busybox has no `udhcpc` applet, and ConnMan refuses the wifi technology
 succeed and still be unreachable; the fallback was the static address from
 `/rw_data/wifi/static_ip`.
 
+**A configured static address wins over DHCP.**  It can be set three ways, and all of
+them end up in the same two plain files (`/rw_data/wifi/static_ip`, `static_gw`) —
+plain files because the daemon rewrites `config.conf` from its own struct and used to
+drop these keys:
+
+```sh
+# 1) inside wifi.txt, so the UI's "Import USB" provisions it together with the key
+ssid=SCOURGE-HUB
+psk=…
+static_ip=10.99.0.50/24
+static_gw=10.99.0.1
+dhcp_probe=1        # optional: keep ONE informational DHCP query in the log
+
+# 2) the stage: static_ip / static_gw files at the stick root
+# 3) by hand over SSH: printf '10.99.0.50/24' > /rw_data/wifi/static_ip
+```
+
+`dhcp_probe=1` never configures the interface: it asks once
+(`dhcp_client --no-config`) and logs what a lease *would* have been
+(`dhcp: probe (informational only, static … kept): …`), so a bundle still answers
+"what if there had been a DHCP server?".  Without it, no DHCP traffic happens at all
+while a static address is configured.
+
 `src/dhcp_client.c` is the first element of that chain now (payload
 `bin/dhcp_client`, ~930 kB static, no libnl, no shell-outs):
 
