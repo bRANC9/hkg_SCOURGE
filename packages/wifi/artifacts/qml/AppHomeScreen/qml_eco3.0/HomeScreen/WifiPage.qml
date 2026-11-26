@@ -142,6 +142,9 @@ Item {
 
     // ---- daemon state -------------------------------------------------
     property bool serviceOk: false
+    // Last POST sent, shown while the daemon has not answered yet: a tap must be
+    // visible even before the next status poll lands.
+    property string pendingPost: ""
     property bool observationsFresh: false
     property string mode: "off"
     property bool wlanOn: false
@@ -358,6 +361,26 @@ Item {
         var xhr = new XMLHttpRequest()
         xhr.onreadystatechange = function() {
             if (xhr.readyState === XMLHttpRequest.DONE) {
+                // Surface the daemon's answer.  A rejected request used to look like a
+                // dead button: "/ap/start?channel=36" fails on this radio ("Bad
+                // Channel"), the POST still returns, and nothing on screen changed
+                // (measured 2026-11-26 - "the AA buttons do nothing").
+                if (xhr.status !== 200 && xhr.status !== 0) {
+                    daemonMessage = path + " failed: HTTP " + xhr.status
+                    pendingPost = ""
+                } else {
+                    try {
+                        var d = JSON.parse(xhr.responseText)
+                        if (d && d.ok === false) {
+                            daemonMessage = path + " failed: " + (d.error || "rejected")
+                            pendingPost = ""
+                        } else {
+                            pendingPost = path
+                        }
+                    } catch (e) {
+                        pendingPost = path
+                    }
+                }
                 if (done) done()
                 refresh()
             }
@@ -1230,7 +1253,8 @@ Item {
                   if (xhr.status !== 200) return
                   try {
                       var d = JSON.parse(xhr.responseText)
-                      if (d.ap) {
+                      if (d.message) daemonMessage = d.message
+                    if (d.ap) {
                           aaApReady = d.ap.ready === true
                           aaApSsid = d.ap.ssid || ""
                           aaApIp = d.ap.ip || ""
@@ -2088,7 +2112,9 @@ Item {
                 x: 0
                 y: 308
                 width: 1180
-                text: root.daemonMessage !== "" ? root.daemonMessage : "no daemon message"
+                text: root.pendingPost !== ""
+                      ? "sent: " + root.pendingPost + " (waiting for the daemon)"
+                      : (root.daemonMessage !== "" ? root.daemonMessage : "no daemon message")
                 font.pixelSize: 18
                 color: root.daemonMessage !== "" ? "#FFB300" : "#7A7A7A"
                 elide: Text.ElideRight
