@@ -1197,6 +1197,33 @@ if [ -n "$_wifi_src" ]; then
     fi
 fi
 
+# The import must actually LAND.  A stale key in config.conf makes the supplicant
+# report "CTRL-EVENT-SSID-TEMP-DISABLED ... reason=WRONG_KEY" and the unit never
+# associates, while the stage still reports OK - measured 2026-11-26 on the car: the
+# stored key was 10 characters long while wifi.txt carried the right 11, and the
+# bundle's wpa_supplicant.log showed auth_failures=2 WRONG_KEY for the laptop's AP.
+# So compare the two and force the file values into the config when they differ.
+if [ -f "$RW_DIR/wifi.txt" ] && [ -f "$RW_DIR/config.conf" ]; then
+    _w_ssid=$(sed -n 's/^ssid=//p' "$RW_DIR/wifi.txt" | head -n 1)
+    _w_psk=$(sed -n 's/^psk=//p' "$RW_DIR/wifi.txt" | head -n 1)
+    _c_ssid=$(sed -n 's/^ssid=//p' "$RW_DIR/config.conf" | head -n 1)
+    _c_psk=$(sed -n 's/^psk=//p' "$RW_DIR/config.conf" | head -n 1)
+    _w_psk=$(printf '%s' "$_w_psk" | tr -d '\r\n')
+    _c_psk=$(printf '%s' "$_c_psk" | tr -d '\r\n')
+    if [ -n "$_w_ssid" ] && [ -n "$_w_psk" ] &&
+       { [ "$_w_ssid" != "$_c_ssid" ] || [ "$_w_psk" != "$_c_psk" ]; }; then
+        log "wifi_import_fix: config.conf differs from wifi.txt (ssid=${_c_ssid:-none}, key_len=${#_c_psk}); forcing the file values"
+        _tmp="$RW_DIR/config.conf.new"
+        awk -v s="$_w_ssid" -v p="$_w_psk" '
+            /^ssid=/ { print "ssid=" s; next }
+            /^psk=/  { print "psk=" p;  next }
+            { print }
+        ' "$RW_DIR/config.conf" > "$_tmp" 2>/dev/null &&
+            mv -f "$_tmp" "$RW_DIR/config.conf" && chmod 600 "$RW_DIR/config.conf" 2>/dev/null || true
+        wifi_import_fix=forced
+    fi
+fi
+
 # wifi.txt only carries credentials: the client mode and the radio switch are
 # config keys, and the shipped default is mode=off / wlan_on=0. Importing a
 # network without flipping them leaves wlan0 DOWN with a perfectly healthy daemon
@@ -1953,7 +1980,7 @@ result "status=$final_status" "variant=$adv_variant/$wide_variant/$all_variant/$
     "tile_skipped=${variant_missing:+1}${variant_missing:-0}" "nets_trimmed=${wifi_nets_trimmed:-0}" \
        "backup=$BACKUP_HU" "daemon=$daemon_status" "daemon_verify=$daemon_verify" \
        "oem_mask=$oem_mask" "regd=$regd_status" \
-       "wifi_import=$wifi_import" "restart=$restart" "build_id=$BUILD_ID" \
+       "wifi_import=$wifi_import" "wifi_import_fix=${wifi_import_fix:-none}" "restart=$restart" "build_id=$BUILD_ID" \
        \
        "mdnsd_patch=$mdnsd_patch" "asset_warnings=$ASSET_WARNINGS" "log=$LOG"
 log "=== wifi payload done ==="
