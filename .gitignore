@@ -78,6 +78,8 @@ packages/java/out/
 packages/battery/src/battery_daemon
 packages/wifi/src/wifi_daemon
 packages/wifi/src/regd
+packages/wifi/src/dhcp_client
+packages/wifi/src/mdns_adv
 packages/wifi1b/src/wifi1b_daemon
 packages/wifi1b/src/wifi1b_qmlpatch
 packages/wifi1b/artifacts/assets/wifi1b/

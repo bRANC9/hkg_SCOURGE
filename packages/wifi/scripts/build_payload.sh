@@ -75,6 +75,12 @@ cp src/wifi_daemon "$OUT/payload/bin/wifi_daemon"
 # CRDA stand-in: 4.1 asks userspace for the regdomain and this image has no
 # CRDA, so nothing ever moves cfg80211 off country 00 (world).
 cp src/regd "$OUT/payload/bin/regd"
+# Client mode has no DHCP client on this image (no udhcpc/dhcpcd/dhclient and no
+# busybox applet), and the unit is unreachable without one.
+cp src/dhcp_client "$OUT/payload/bin/dhcp_client"
+# The image has no avahi; carplay_mdnsd only advertises CarPlay.  This one
+# advertises <host>.local and _ssh._tcp so the box is reachable by name.
+cp src/mdns_adv "$OUT/payload/bin/mdns_adv"
 cp artifacts/assets/wifi/*.png "$OUT/payload/assets/wifi/"
 # The battery/hello assets are NOT installed by this stage (the battery stage
 # owns them), so shipping stale blue copies here only confused the audit.  Drop
@@ -102,7 +108,9 @@ cp "$DROPBEAR" "$OUT/payload/bin/dropbearmulti"
 # scripts/run_stuff.sh "mdnsd continue as root" section).  Applied on the
 # car only when the MDNSD_ROOT_ARM marker is present.
 python3 scripts/patch_mdnsd.py "$SCOURGE_ROOTFS/app/bin/mdnsd" "$OUT/payload/bin/mdnsd.rooted"
-chmod 755 "$OUT/payload/bin/wifi_daemon" "$OUT/payload/bin/regd" "$OUT/payload/bin/dropbearmulti" "$OUT/payload/bin/mdnsd.rooted"
+chmod 755 "$OUT/payload/bin/wifi_daemon" "$OUT/payload/bin/regd" \
+    "$OUT/payload/bin/dhcp_client" "$OUT/payload/bin/mdns_adv" \
+    "$OUT/payload/bin/dropbearmulti" "$OUT/payload/bin/mdnsd.rooted"
 
 cp wifi.txt.sample "$OUT/payload/wifi.txt.sample"
 cp wifi.txt.sample "$OUT/README-wifi.txt"

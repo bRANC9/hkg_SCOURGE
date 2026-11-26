@@ -24,6 +24,7 @@ test: payload
 	python3 tests/test_tiles.py
 	python3 tests/test_ap_dhcpd_tu.py
 	python3 tests/test_regd.py
+	python3 tests/test_net_tools.py
 	sh tests/test_daemon.sh
 	sh tests/test_ports.sh
 	sh tests/test_wifi_stack.sh

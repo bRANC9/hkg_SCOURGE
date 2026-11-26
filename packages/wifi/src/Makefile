@@ -14,7 +14,7 @@ CFLAGS := -O2 -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -march=
 LDFLAGS ?= -static
 BUILD_ID = $(shell python3 ../scripts/build_id.py)
 
-all: wifi_daemon regd
+all: wifi_daemon regd dhcp_client mdns_adv
 
 wifi_daemon: wifi_daemon.c FORCE
 	$(MUSL_CC) $(CFLAGS) -DWIFI_BUILD_ID='"$(BUILD_ID)"' $(LDFLAGS) -o $@ $<
@@ -25,8 +25,18 @@ wifi_daemon: wifi_daemon.c FORCE
 regd: regd.c FORCE
 	$(MUSL_CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
 
+# dhcp_client: the unit ships no DHCP client at all (no udhcpc/dhcpcd/dhclient,
+# no busybox applet), so client mode could associate and stay unreachable.
+dhcp_client: dhcp_client.c ../../common/net_iface.inc FORCE
+	$(MUSL_CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
+# mdns_adv: <host>.local + _ssh._tcp, because the image has no avahi and
+# carplay_mdnsd only advertises CarPlay.
+mdns_adv: mdns_adv.c ../../common/net_iface.inc FORCE
+	$(MUSL_CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
+
 clean:
-	rm -f wifi_daemon regd
+	rm -f wifi_daemon regd dhcp_client mdns_adv
 
 FORCE:
 .PHONY: all clean FORCE

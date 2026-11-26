@@ -552,3 +552,38 @@ and read the regdomain back. Notes worth keeping:
 - `regd --once` exit codes are the diagnostic: 0 applied, 2 no usable database,
   3 country not in the database, 4 netlink, 5 SET_REG rejected, 6 cfg80211 kept
   another country (a driver-managed regdomain — then only `wl country` is left).
+
+## 10. Client mode without a DHCP client, and a name without avahi
+
+Measured on the car, 2026-11-25:
+
+| probe | answer |
+| --- | --- |
+| `command -v udhcpc dhcpcd dhclient dhcp6c pump netctl` | nothing |
+| `busybox --list \| grep -i dhcp` | no `udhcpc` applet |
+| `/var/run/wpa_supplicant/` | only the `wlan0` socket |
+| ConnMan | `Method SetProperty … doesn't exist` — it cannot manage the wifi technology |
+| `carplay_mdnsd` | advertises CarPlay (`_airplay`/`_raop`), not a resolver |
+| avahi | not installed |
+
+Consequences and the two tools that answer them:
+
+- **Address**: client mode could associate and stay unreachable, so the daemon
+  tried four shell clients that cannot exist and then fell back to
+  `/rw_data/wifi/static_ip`.  `src/dhcp_client.c` is the missing first element:
+  DISCOVER/OFFER/REQUEST/ACK on `AF_PACKET`+UDP 68, the same option set our AP
+  server (`packages/common/ap_dhcpd.inc`) speaks, applied with the ioctls in
+  `packages/common/net_iface.inc` (no `ip`/`ifconfig`/busybox dependency), and
+  recorded as `key=value` in `/rw_data/wifi/dhcp.lease`.  It does not touch an
+  interface that already has an address, so the static fallback keeps working.
+- **Name**: `src/mdns_adv.c` advertises `<host>.local` (A) plus `_ssh._tcp` (and
+  `_http._tcp` with `--http-port`) on 224.0.0.251:5353, host name
+  `scourge-<last two MAC bytes>`.  Limits worth stating up front: AP mode with
+  client isolation, or a router that drops multicast, makes the name useless, and
+  there is no conflict probing (the two MAC bytes make a collision unlikely).
+
+Both are static x86-64 baseline binaries built by `src/Makefile`, shipped in
+`payload/bin/`, and tested without root or a network
+(`tests/test_net_tools.py`: a scripted DHCP server through injected I/O, the
+responder's records decoded from its own bytes, and one live unicast query on
+`lo`).

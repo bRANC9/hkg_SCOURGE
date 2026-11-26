@@ -360,6 +360,59 @@ ssh car@<head-unit-ip> -p 2222
 The daemon adds a firewall rule for `wlan0` and the selected port and removes
 it when SSH stops.
 
+### Client-mode addressing: `dhcp_client`
+
+Measured on the car (2026-11-25): **there is no DHCP client at all** —
+`udhcpc`, `dhcpcd`, `dhclient`, `dhcp6c`, `pump` and `netctl` are absent,
+busybox has no `udhcpc` applet, and ConnMan refuses the wifi technology
+(`Method SetProperty … doesn't exist`).  A client association could therefore
+succeed and still be unreachable; the fallback was the static address from
+`/rw_data/wifi/static_ip`.
+
+`src/dhcp_client.c` is the first element of that chain now (payload
+`bin/dhcp_client`, ~930 kB static, no libnl, no shell-outs):
+
+```sh
+/rw_data/bin/dhcp_client -i wlan0 -t 4            # ask, then apply + record
+/rw_data/bin/dhcp_client -i wlan0 --no-config     # ask only, print the lease
+/rw_data/bin/dhcp_client --release                # drop the lease
+```
+
+It speaks the same wire format as our own AP server (`packages/common/ap_dhcpd.inc`),
+applies the result with `packages/common/net_iface.inc` ioctls (never by shelling
+out to a tool the image does not have), and writes
+`/rw_data/wifi/dhcp.lease` as `key=value` (`ip`, `mask`, `prefix`, `router`,
+`dns`, `server`, `lease`, `iface`, `acquired_unix`) so the daemon can read it
+back without a parser.  Exit: 0 lease (applied), 1 usage, 2 no answer, 3 apply
+failed.  It never flushes an address it did not set.
+
+### Name resolution: `mdns_adv`
+
+The image has no avahi, and `carplay_mdnsd` is not a general resolver (it
+advertises CarPlay's `_airplay`/`_raop`), so the unit had no name.  `src/mdns_adv.c`
+(payload `bin/mdns_adv`) advertises
+
+```text
+<host>.local            A     the wlan0 address
+_ssh._tcp.local         PTR   <host>._ssh._tcp.local (+ SRV, TXT)
+_http._tcp.local        PTR   … with --http-port 8090
+```
+
+with `<host>` defaulting to `scourge-<last two MAC bytes>` (stable across reboots,
+and it does not change when a DHCP lease does).  It is a **convenience layer
+only**: in AP mode with client isolation, or behind a router that drops
+multicast, the name will not resolve — the address (static or leased) stays the
+primary way in.
+
+```sh
+/rw_data/bin/mdns_adv -i wlan0 --ssh-port 2222 --http-port 8090 -v
+```
+
+Both tools are covered by `tests/test_net_tools.py`: the DHCP exchange runs
+against a scripted server through an injected I/O object, the responder's records
+are decoded from its own wire bytes, and one live unicast query on `lo` proves
+the socket path (multicast is not usable in every sandbox).
+
 ---
 
 ## Access point: method and purpose
