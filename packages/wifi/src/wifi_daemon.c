@@ -2011,6 +2011,14 @@ static void aa_bt_api(bool *sdp, bool *rfcomm, bool *measured)
  * vendor's own ccode=GB and the unit's MICOM country (EU). */
 #define WIFI_COUNTRY          "HU"
 
+/* Our own DHCP client (packages/wifi/src/dhcp_client.c, installed by the stage):
+ * this image has no udhcpc/dhcpcd/dhclient at all and the busybox has no udhcpc
+ * applet, so client mode could only ever use the static fallback. */
+#define DHCP_CLIENT_BIN       APP_DIR "/bin/dhcp_client"
+/* mDNS advert for _ssh._tcp + <host>.local, so the unit is reachable by name. */
+#define MDNS_ADV_BIN          APP_DIR "/bin/mdns_adv"
+#define MDNS_ADV_PID          APP_DIR "/mdns_adv.pid"
+
 #define AP_DHCP_IP            "10.42.0.1"
 
 static void ap_probe(ap_probe_t *p)
@@ -2572,6 +2580,20 @@ static bool ap_start_static(void)
             g_ap_conf_active = false;
             set_msg("Static AP: cannot assign " AP_DHCP_IP);
             return false;
+        }
+        /* Log and, if needed, re-assert the type immediately before the exec: the
+         * prime reports "type AP" and the attempt still ends with role=0, so the
+         * question is whether the role survives write_ap_conf + the address add.
+         * 2026-11-26 07:07: "iface after prime: type AP" then ap_state=1 (absent). */
+        {
+            char t[64] = "";
+            if (!iface_type_is_ap(t, sizeof(t))) {
+                log_msg("static AP: type before exec was '%s'; setting __ap again", t[0] ? t : "?");
+                sh("iw dev wlan0 set type __ap 2>/dev/null");
+                sh("ip link set wlan0 up 2>/dev/null");
+            } else {
+                log_msg("static AP: type before exec: %s", t);
+            }
         }
 #ifdef WIFI_TEST
         bool started = test_supplicant_ok ? true : supplicant_try(is5 ? "nl80211" : "nl80211,wext");
@@ -3623,6 +3645,8 @@ static bool client_disconnect(void)
 }
 
 static void write_status(void);
+static void mdns_adv_ensure(int ssh_port);
+static void mdns_adv_stop(void);
 
 /* In client mode an address alone is not proof of connection: a leftover AP
  * address (10.42.0.1) or another interface's address must not count.  Require
@@ -3646,7 +3670,12 @@ static bool dhcp_acquire(void)
                       "    ;;\n"
                       "esac\n", 0755);
     chmod("/tmp/scourge-udhcpc.sh", 0755);
+    /* Our own client first: this image ships none of the others (measured
+     * 2026-11-26: no udhcpc/dhcpcd/dhclient, and the busybox has no udhcpc applet),
+     * so the chain below is only ever the fallback for a future image.
+     * Exit codes: 0 lease applied, 2 no answer, 3 apply error. */
     static const char *tools[] = {
+        DHCP_CLIENT_BIN " -i wlan0 -t 4",
         "udhcpc -i wlan0 -s /tmp/scourge-udhcpc.sh -q -n -t 5 -T 3",
         "busybox udhcpc -i wlan0 -s /tmp/scourge-udhcpc.sh -q -n -t 5 -T 3",
         "dhcpcd -4 -t 10 -1 wlan0",
@@ -4574,6 +4603,7 @@ static bool ssh_start(void)
         str_copy(g_ssh_bound_ip, sizeof(g_ssh_bound_ip), ip);
         write_file_atomic(SSH_BOUND, ip, 0600);
         set_msg("SSH started on port %d (user car)", g_cfg.ssh_port);
+        mdns_adv_ensure(g_cfg.ssh_port);
         return true;
     }
     fw_close(g_ssh_active_port);
@@ -4586,9 +4616,37 @@ static bool ssh_start(void)
 /* mode application                                                    */
 /* ------------------------------------------------------------------ */
 
+/* mDNS advert: "ssh car@scourge-xxxx.local -p 2222" instead of an IP.  Purely a
+ * convenience layer - AP mode, client isolation or a router that drops multicast
+ * all defeat it - so the address stays authoritative.  The binary re-reads the
+ * interface address before every announcement, so a lease change needs no restart;
+ * --ssh-port must be the port actually bound (the fallback can move it). */
+static void mdns_adv_stop(void)
+{
+    char pid[32] = "";
+    if (read_file(MDNS_ADV_PID, pid, sizeof(pid)) <= 0) return;
+    int p = atoi(pid);
+    if (p > 1) kill(p, SIGTERM);
+    unlink(MDNS_ADV_PID);
+}
+
+static void mdns_adv_ensure(int ssh_port)
+{
+    if (!file_exists(MDNS_ADV_BIN) || ssh_port <= 0) return;
+    char pid[32] = "";
+    if (read_file(MDNS_ADV_PID, pid, sizeof(pid)) > 0) {
+        int p = atoi(pid);
+        if (p > 1 && proc_alive(p)) return;      /* already advertising */
+    }
+    sh("setsid %s -i wlan0 --ssh-port %d --http-port 8090 --interval 60"
+       " >> " APP_DIR "/mdns.log 2>&1 & echo $! > " MDNS_ADV_PID, MDNS_ADV_BIN, ssh_port);
+    log_msg("mdns: advertising _ssh._tcp on port %d (hostname scourge-<mac>.local)", ssh_port);
+}
+
 static void stop_all(void)
 {
     g_carplay_ie = false;
+    mdns_adv_stop();
     ssh_stop();
     ap_stop();
     client_disconnect();

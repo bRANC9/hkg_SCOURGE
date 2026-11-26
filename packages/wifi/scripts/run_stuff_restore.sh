@@ -296,6 +296,8 @@ fi
 
 # Keep backups; remove runtime pieces and secrets.
 rm -f "$RW_DIR/wifi_daemon" "$RW_DIR/regd" "$RW_DIR/regd.json" "$RW_DIR/regd.log" \
+      "$RW_DIR/bin/dhcp_client" "$RW_DIR/bin/mdns_adv" "$RW_DIR/dhcp.lease" \
+      "$RW_DIR/mdns_adv.pid" "$RW_DIR/mdns.log" \
       "$RW_DIR/regulatory.db" "$RW_DIR/status.json" "$RW_DIR/daemon.log" \
       "$RW_DIR/config.conf" "$RW_DIR/wifi.txt" "$RW_DIR/home.json" \
        "$RW_DIR/apply.result" "$RW_DIR/bt.state" "$RW_DIR/ssh.bound" \

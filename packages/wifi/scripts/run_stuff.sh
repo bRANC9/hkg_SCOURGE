@@ -1004,6 +1004,27 @@ else
 fi
 log "regdomain after regd: $(iw reg get 2>/dev/null | sed -n 's/^country \([^:]*\).*/\1/p' | head -n 1) ($regd_status)"
 
+# ---- client-mode network tools: our own DHCP client and the mDNS advert ----
+# This image has no DHCP client at all (measured 2026-11-26: no udhcpc/dhcpcd/
+# dhclient, and the busybox has no udhcpc applet), so client mode was stuck on the
+# static address.  dhcp_client is the first entry of dhcp_acquire()'s chain; the
+# daemon starts mdns_adv itself once the SSH port is really bound.
+NET_TOOLS_INSTALLED=""
+for _t in dhcp_client mdns_adv; do
+    if [ -f "$PAYLOAD/bin/$_t" ]; then
+        io_copy "$PAYLOAD/bin/$_t" "$RW_DIR/bin/$_t" || fail "$_t copy failed"
+        chmod 755 "$RW_DIR/bin/$_t" 2>/dev/null || true
+        chown 0:0 "$RW_DIR/bin/$_t" 2>/dev/null || true
+        set_exec_label "$RW_DIR/bin/$_t"
+        NET_TOOLS_INSTALLED="$NET_TOOLS_INSTALLED $_t"
+    else
+        log "WARNING: payload carries no $_t"
+    fi
+done
+[ -n "$NET_TOOLS_INSTALLED" ] && log "network tools installed:$NET_TOOLS_INSTALLED"
+# A stale lease or advertiser from the previous payload must not survive.
+rm -f "$RW_DIR/dhcp.lease" "$RW_DIR/mdns_adv.pid" 2>/dev/null || true
+
 # ---- optional mdnsd "continue as root" patch ----------------------------
 # Experimental, disarmed by default: multicast EPERM was observed but its
 # cause is not established. NOPing setuid retains root; it does not take
