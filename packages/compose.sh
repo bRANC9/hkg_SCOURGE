@@ -476,6 +476,17 @@ audio_wake(){
         pactl set-sink-mute @DEFAULT_SINK@ 0 >/dev/null 2>&1 || true
         pactl set-sink-volume @DEFAULT_SINK@ 70% >/dev/null 2>&1 || true
     fi
+    # Unmuting is not enough on this unit: the amp/DSP route powers down while
+    # nothing plays, and then a tone is silently dropped even though aplay exits 0
+    # ("no beep unless something is already playing", measured 2026-11-26).  A short
+    # silent stream wakes the route; the tone right after it is audible.  Raw PCM on
+    # purpose: no WAV header to seek, and /dev/zero cannot be missing).
+    _z=/tmp/scourge-silence.raw
+    [ -s "\$_z" ] || head -c 26460 /dev/zero > "\$_z" 2>/dev/null || true
+    if [ -s "\$_z" ]; then
+        aplay -q -f S16_LE -r 44100 -c 1 "\$_z" >/dev/null 2>&1 || \
+            aplay -q -D plughw:0,0 -f S16_LE -r 44100 -c 1 "\$_z" >/dev/null 2>&1 || true
+    fi
 }
 play_tone(){   # play_tone <file> <count>: logs which device actually played it
     _wav="\$1"; _n="\$2"; _k=0
