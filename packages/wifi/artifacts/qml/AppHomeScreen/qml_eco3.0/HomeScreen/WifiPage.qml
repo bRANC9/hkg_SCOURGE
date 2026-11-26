@@ -194,7 +194,8 @@ Item {
     property string carplayPsk: ""
     property bool carplayPskSet: false
     property int carplayBand: 2
-    property int carplayChannel: 36
+    // 149, not 36: this firmware has no ch36..48 (its table is 1-13 + 149..165).
+    property int carplayChannel: 149
     property string carplayBtaddr: ""
     property string carplayId: ""
     property string daemonMessage: ""
@@ -857,7 +858,7 @@ Item {
                     onClicked: {
                         // aa=1: serve Android Auto, not CarPlay, so the car does not
                         // announce CarPlay when the driver pressed Android Auto.
-                        root.post("/ap/start?ssid=SCOURGE-AA&channel=36&aa=1")
+                        root.post("/ap/start?ssid=" + encodeURIComponent(root.carplaySsid) + "&channel=149&aa=1")
                         root.aaCheck()
                     }
                 }
@@ -1970,8 +1971,12 @@ Item {
                 QText {
                     x: 24
                     y: 176
+                    // "undefined" leaked into this line on the car (screenshot
+                    // 2026-11-26): the status field can be absent, and a missing
+                    // JSON member renders as that word, so test the value.
                     text: (root.apActive ? "AP running" : "AP stopped")
-                          + (root.aaApIp !== "" ? "   \u00b7   " + root.aaApIp : "")
+                          + (root.aaApIp && root.aaApIp !== "undefined"
+                             ? "   \u00b7   " + root.aaApIp : "")
                     font.pixelSize: 24
                     textBold: true
                     color: root.apActive ? "#4CAF50" : "#FFB300"
@@ -2056,7 +2061,7 @@ Item {
                     // the daemon message line below.
                     buttonEnabled: true
                     onClicked: {
-                        root.post("/ap/start?ssid=SCOURGE-AA&channel=36&aa=1")
+                        root.post("/ap/start?ssid=" + encodeURIComponent(root.carplaySsid) + "&channel=149&aa=1")
                         root.aaCheck()
                     }
                 }

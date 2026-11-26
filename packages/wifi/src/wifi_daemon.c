@@ -1873,22 +1873,21 @@ static bool ensure_station_ready(void)
     }
     sh("rfkill unblock all 2>/dev/null");
     if (g_cfg.mode == MODE_CLIENT) {
-        /* Client mode belongs to the vendor pair: ConnMan powers the wifi
-         * technology, associates through the supplicant supplicantmanager gives
-         * it, and runs its own DHCP.  Never stop that manager here - doing so
-         * removed ConnMan's supplicant and the radio never associated at all. */
-        if (!ensure_connman())
-            log_msg("connman not active; continuing");
-        /* Unmask as well as start: the installer may have masked the pair before
-         * the mode was known, and a masked unit cannot be started. */
-        sh("systemctl unmask supplicantmanager.path supplicantmanager.service 2>/dev/null");
+        /* OURS owns the interface in client mode.  The vendor pair cannot: this
+         * unit's ConnMan has no wifi technology at all ("Method SetProperty ...
+         * doesn't exist"), so supplicantmanager's instance associates nothing -
+         * but it does take /var/run/wpa_supplicant/wlan0 and kills our supplicant,
+         * which the UI log showed as an endless "watchdog: supplicant process gone;
+         * re-applying (backoff=15s)" (2026-11-26), with the link never settling.
+         * Mask the manager before our supplicant starts, so the fight cannot
+         * happen; the PSK comes from wifi.txt and the address from our own
+         * dhcp_client / static_ip, so nothing here needs ConnMan. */
+        sh("systemctl stop supplicantmanager.path supplicantmanager.service 2>/dev/null");
+        sh("systemctl mask supplicantmanager.path supplicantmanager.service 2>/dev/null");
         sh("systemctl daemon-reload 2>/dev/null");
-        /* Bring up OUR supplicant with -u so ConnMan can adopt it: with the OEM
-         * manager masked even after unmask attempts, this is the only supplicant
-         * ConnMan will ever see. */
+        stop_oem_wifi();
         iface_up();
-        start_wpa_supplicant_args("nl80211,wext");
-        sh("connmanctl enable wifi 2>/dev/null");
+        log_msg("client: vendor supplicantmanager masked; our supplicant owns wlan0");
         return true;
     }
     stop_oem_wifi();
