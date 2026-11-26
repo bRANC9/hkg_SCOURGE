@@ -2064,7 +2064,12 @@ Item {
                     width: 170
                     label: "Stop AP"
                     buttonEnabled: true
-                    onClicked: { root.post("/carplay/stop"); root.aaCheck() }
+                    // /ap/stop, not /carplay/stop: the latter switches the radio OFF
+                    // (mode=off + wlan_on=0) and left the unit unreachable after an AA
+                    // test (measured 2026-11-26: mode=carplay, wlan_on=0, no address,
+                    // and the whole box looked dead).  Stopping the AP means "be a
+                    // station again".
+                    onClicked: { root.post("/ap/stop"); root.aaCheck() }
                 }
                 WifiButton {
                     width: 150

@@ -1410,6 +1410,20 @@ static bool parse_wifi_txt(const char *path)
     if (read_file(path, copy, sizeof(copy)) > 0)
         write_file_atomic(WIFI_TXT_COPY, copy, 0600);
 
+    /* Read the persisted key back.  A silent mismatch here is exactly what cost a
+     * day on the car: the supplicant kept answering "SCOURGE-HUB ... reason=WRONG_KEY"
+     * while every import reported success (2026-11-26; the stored key was a stale
+     * 10-character one, the file carried the right 11).  The stage's wifi_import_fix
+     * repairs config.conf, this line makes the bundle prove the result. */
+    {
+        char saved[8192] = "";
+        char want[200] = "";
+        snprintf(want, sizeof(want), "psk=%s", g_cfg.psk);
+        if (read_file(CONFIG_PATH, saved, sizeof(saved)) > 0 && want[0])
+            log_msg("import: key persisted %s (ssid=%s, %d byte key)", strstr(saved, want) ? "ok" : "MISMATCH",
+                    g_cfg.ssid, (int)strlen(g_cfg.psk));
+    }
+
     set_msg("imported WiFi config from %s (ssid=%s, %d network%s)",
             path, g_cfg.ssid, g_cfg.net_count,
             g_cfg.net_count == 1 ? "" : "s");
