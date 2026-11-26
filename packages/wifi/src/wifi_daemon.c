@@ -242,6 +242,9 @@ static bool dhcp_acquire(void);
  * "dbus: Could not request service name: already registered / Failed to
  * initialize wpa_supplicant" and the control socket never appears. */
 static bool g_supp_no_dbus;
+/* The wireless-CarPlay flag in VBTConfig.json changed and only a reboot applies it;
+ * surfaced in the status JSON so the page can say so instead of guessing. */
+static bool g_vbt_needs_reboot;
 
 static void home_monitor_tick(void);
 static void apply_reap(void);
@@ -3553,11 +3556,19 @@ static bool vbt_set_wireless_carplay(bool value, bool *changed)
     return ok;
 }
 
-static void restart_vbtd_if_needed(bool changed)
+/* A changed ENABLE_WIRELESS_CARPLAY only takes effect when vbtd next starts, and
+ * the value is persistent, so a reboot applies it.  Restarting the running stack is
+ * NOT an option: it destroys the BluetoothHMI/controller state and, after repeated
+ * attempts, exhausts the stack's connection blocks - "SDP - no spare CCB for orig"
+ * plus HFP/A2DP failures (measured by an independent project on the same build,
+ * reported 2026-11-26; a vendor unit restarted this way also deadlocked shutdown).
+ * So the daemon never restarts vbtd; it only records that a reboot is needed. */
+static void vbt_flag_needs_reboot(bool changed)
 {
     if (!changed) return;
-    sh("systemctl restart vbtd.service 2>/dev/null");
-    set_msg("restarted vbtd for wireless CarPlay flag");
+    g_vbt_needs_reboot = true;
+    log_msg("vbt: ENABLE_WIRELESS_CARPLAY changed; a reboot applies it (Bluetooth stack left alone)");
+    set_msg("VBT flag changed; reboot the head unit to apply (Bluetooth stack not restarted)");
 }
 
 static bool bt_pair_start(void)
@@ -3565,9 +3576,8 @@ static bool bt_pair_start(void)
     bool changed = false;
     g_bt_fail_ms = 0;
     vbt_set_wireless_carplay(true, &changed);
-    restart_vbtd_if_needed(changed);
-    /* vbtd re-registers its CommonAPI adapter after a restart. */
-    if (changed) sleep(2); else usleep(500000);
+    vbt_flag_needs_reboot(changed);
+    usleep(500000);
 
     bool ok = bt_set_pairing(true);
     for (int i = 0; i < 6 && !g_cfg.cp_btaddr[0]; i++) {
@@ -3654,6 +3664,30 @@ static void mdns_adv_stop(void);
 /* Nobody hands us a lease: ConnMan has no wifi technology here.  busybox
  * udhcpc needs a script to apply the result, so generate one next to the
  * config and try the other clients before giving up. */
+/* Which interface currently owns the metric-less default route ("" = none). */
+static bool default_route_iface(char *out, size_t n)
+{
+    if (out && n) out[0] = 0;
+    char text[4096];
+    if (read_file("/proc/net/route", text, sizeof(text)) <= 0) return false;
+    char *save = NULL;
+    for (char *line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        /* "iface destination ..." - the destination is column 2, hex, host order. */
+        char *sp = strchr(line, ' ');
+        while (sp && *sp == ' ') sp++;
+        if (!sp) continue;
+        char *end = sp;
+        while (*end && *end != ' ' && *end != '\t') end++;
+        size_t dl = (size_t)(end - sp);
+        if (dl != 8 || strncmp(sp, "00000000", 8)) continue;
+        size_t il = (size_t)(strcspn(line, " \t"));
+        if (il >= n) il = n ? n - 1 : 0;
+        if (out && n) { memcpy(out, line, il); out[il] = 0; }
+        return true;
+    }
+    return false;
+}
+
 static bool dhcp_acquire(void)
 {
     char ip[64];
@@ -3691,6 +3725,19 @@ static bool dhcp_acquire(void)
     for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
         int rc = sh("%s >/tmp/dhcp.log 2>&1", tools[i]);
         if (wlan_ip(ip, sizeof(ip))) {
+            /* AA/AP mode keeps cellular as the internet path, so a default route
+             * through wlan0 must never replace the modem's.  SIOCADDRT (what our
+             * client uses) cannot add a second metric-less default, so the kernel
+             * refuses it with EEXIST when the modem already has one - verify that
+             * instead of assuming it, and say so in the log the bundle carries. */
+            {
+                char dev[32] = "";
+                if (default_route_iface(dev, sizeof(dev)) && strcmp(dev, "wlan0")) {
+                    log_msg("dhcp: lease %s, default route stays on %s (modem path intact)", ip, dev);
+                } else if (!dev[0]) {
+                    log_msg("dhcp: lease %s, no default route at all (cellular down?)", ip);
+                }
+            }
             log_msg("dhcp: wlan0 lease %s via %s", ip, tools[i]);
             return true;
         }
@@ -4845,7 +4892,7 @@ static bool apply_mode_work(bool pair)
         ensure_carplay_services();
         bool vbt_changed = false;
         vbt_ok = vbt_set_wireless_carplay(true, &vbt_changed);
-        restart_vbtd_if_needed(vbt_changed);
+        vbt_flag_needs_reboot(vbt_changed);
     }
 
     log_msg("apply: phase=ssh_service ssh=%d", g_cfg.ssh_enabled);
@@ -5446,6 +5493,9 @@ static void build_status(char *out, size_t n)
              "\"ap_dhcp_pool\":\"%s .%d-.%d\","
              "\"ap_dhcp_leases\":%d,"
              "\"ap_dhcp_running\":%s,"
+             /* A changed wireless-CarPlay flag only applies after a reboot: the
+               * daemon never restarts the running Bluetooth stack for it. */
+             "\"vbt_needs_reboot\":%s,"
              "\"carplay_ready\":%s,"
              "\"carplay_ie\":%s,"
              "\"carplay_iap2\":%s,"
@@ -5490,8 +5540,9 @@ static void build_status(char *out, size_t n)
              AP_DHCP_IP, AP_DHCP_POOL_FIRST, AP_DHCP_POOL_LAST,
              apd_leases_count(),
              apd_dhcpd_running() ? "true" : "false",
-             /* "ready" requires every wireless-CarPlay component, not just
-              * one of the two services. */
+             g_vbt_needs_reboot ? "true" : "false",
+              /* "ready" requires every wireless-CarPlay component, not just
+               * one of the two services. */
              (g_cfg.mode == MODE_CARPLAY && g_cfg.wlan_on && !g_network_failed && o->ap_on &&
               g_carplay_ie && o->carplay_svc && o->mdns_svc) ? "true" : "false",
              g_carplay_ie ? "true" : "false",

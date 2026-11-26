@@ -171,6 +171,10 @@ Item {
     property string apSsid: ""
     property int apClients: 0
     property bool carplayReady: false
+    // The wireless-CarPlay flag in VBTConfig.json changed and only a reboot applies
+    // it: the daemon deliberately never restarts the running Bluetooth stack (that
+    // destroys BluetoothHMI/controller state and exhausts the stack's CCBs).
+    property bool vbtNeedsReboot: false
     property bool carplayIe: false
     property bool carplayIap2: false
     property bool carplayMdns: false
@@ -251,6 +255,7 @@ Item {
         statusAaAp = d.aa_ap === true
         apClients = d.ap_clients
         carplayReady = d.carplay_ready
+        if (d.vbt_needs_reboot !== undefined) vbtNeedsReboot = d.vbt_needs_reboot === true
         carplayIe = d.carplay_ie === true
         carplayIap2 = d.carplay_iap2
         carplayMdns = d.carplay_mdns
@@ -1515,9 +1520,11 @@ Item {
                 QText {
                     x: 24
                     y: 114
-                    text: "Ready: " + (!root.observationsFresh ? "checking" : (root.carplayReady ? "yes" : "no"))
+                    text: root.vbtNeedsReboot
+                          ? "Reboot needed to apply the wireless CarPlay setting"
+                          : "Ready: " + (!root.observationsFresh ? "checking" : (root.carplayReady ? "yes" : "no"))
                     font.pixelSize: 24
-                    color: root.carplayReady ? "#4CAF50" : "#FFB300"
+                    color: root.vbtNeedsReboot ? "#FFB300" : (root.carplayReady ? "#4CAF50" : "#FFB300")
                 }
                 QText {
                     x: 24
