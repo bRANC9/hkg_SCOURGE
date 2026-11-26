@@ -1100,6 +1100,13 @@ fi
   # QML, so a full combo flickered the home screen 4-5 times.  The stages now
   # skip their own restart (SCOURGE_DEFER_UI_RESTART=1) and this single restart
   # picks up ALL the injected pages/tiles at once (2026-11-24).
+  # Runs at the end of EVERY run (all / wifi / tweaks / restore alike): the stages
+  # only defer their own restart, so without this a single-package run left the old
+  # QML in memory - the new page/tile was on disk and the running app kept the old one
+  # (measured 2026-11-26: "wifi_result restart=deferred" and the car still showed the
+  # pre-fix WifiPage).  The outcome is recorded in the result line so the bundle proves
+  # whether the UI really restarted.
+  ui_restart="not-attempted"
   restart_ui_once() {
       _launcher_pid=""
       for _p in /proc/[0-9]*; do
@@ -1114,6 +1121,7 @@ fi
               [ -n "$_val" ] && export "$_v=$_val"
           done
       fi
+      _old_pid=$(pidof AppHomeScreen 2>/dev/null | awk '{print $1}')
       if command -v dbus-send >/dev/null 2>&1; then
           dbus-send --session --type=method_call --dest=com.lge.avn.applauncher /Request \
               com.lge.avn.applauncher.request.terminate int32:11 >> "$LOG" 2>&1 || true
@@ -1121,16 +1129,50 @@ fi
           for _i in 1 2 3; do
               dbus-send --session --type=method_call --dest=com.lge.avn.applauncher /Request \
                   com.lge.avn.applauncher.request.launch int32:11 \
-                  string:AppHomeScreen string:/app/bin/AppHomeScreen >> "$LOG" 2>&1 && { log "restart_ui_once: dbus-ok"; return 0; }
+                  string:AppHomeScreen string:/app/bin/AppHomeScreen >> "$LOG" 2>&1 && {
+                  _new_pid=$(pidof AppHomeScreen 2>/dev/null | awk '{print $1}')
+                  if [ -n "$_new_pid" ] && [ "$_new_pid" != "$_old_pid" ]; then
+                      log "restart_ui_once: dbus-ok pid ${_old_pid:-none} -> $_new_pid"
+                      ui_restart="dbus-ok"
+                      return 0
+                  fi
+                  log "restart_ui_once: launch accepted (pid ${_old_pid:-none} -> ${_new_pid:-none})"
+                  break
+              }
               sleep 2
           done
       fi
-      log "restart_ui_once: dbus-send failed; AppHomeScreen may return on its own"
+      # Fallback: terminate the app and let the vendor launcher bring it back.  The
+      # refresh must not depend on one D-Bus call succeeding.
+      if [ -n "$_old_pid" ]; then
+          log "restart_ui_once: dbus path did not restart AppHomeScreen; terminating pid $_old_pid"
+          kill -TERM "$_old_pid" 2>/dev/null || true
+          _i=0
+          while [ "$_i" -lt 10 ]; do
+              sleep 1; _i=$((_i + 1))
+              _new_pid=$(pidof AppHomeScreen 2>/dev/null | awk '{print $1}')
+              [ -n "$_new_pid" ] && [ "$_new_pid" != "$_old_pid" ] && {
+                  log "restart_ui_once: relaunched by the launcher (pid $_new_pid)"
+                  ui_restart="kill-relaunched"
+                  return 0
+              }
+          done
+          log "restart_ui_once: AppHomeScreen did not return; a reboot is needed"
+          ui_restart="killed-no-return"
+          return 1
+      fi
+      log "restart_ui_once: AppHomeScreen not running and no launcher answer"
+      ui_restart="no-app"
       return 1
   }
-  restart_ui_once || true
+  if [ -f "$STICK_DIR/no_ui_restart" ]; then
+      ui_restart="skipped-flag"
+      log "restart_ui_once: skipped (no_ui_restart on the stick)"
+  else
+      restart_ui_once || true
+  fi
 
-result "OK"
+result "OK ui_restart=${ui_restart:-not-attempted}"
 # Five beeps: all requested stages completed successfully.  A short pause
 # separates this from the last stage's two-beep signal.
 sleep 0.8 2>/dev/null || sleep 1
