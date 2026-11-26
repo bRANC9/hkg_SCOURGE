@@ -2556,6 +2556,23 @@ static bool ap_start_static(void)
         }
         if (!write_ap_conf()) return false;
         g_ap_conf_active = true;
+        /* The address goes on BEFORE the supplicant starts.  The manual sequence that
+         * provably beacons did it in this order (prime -> ip addr -> supplicant), while
+         * the daemon added it afterwards, and its "ip link set wlan0 up" then hit an
+         * interface whose type the driver was still switching - the supplicant ended
+         * up as a station and the attempt failed with role=0 even though the prime had
+         * just reported "type AP" (2026-11-26 06:18 log). */
+#ifdef WIFI_TEST
+        bool pre_ip_ok = test_static_ip_ok >= 0 ? test_static_ip_ok != 0
+                                                : apd_iface_set_static(&g_apd_ops);
+#else
+        bool pre_ip_ok = apd_iface_set_static(&g_apd_ops);
+#endif
+        if (!pre_ip_ok) {
+            g_ap_conf_active = false;
+            set_msg("Static AP: cannot assign " AP_DHCP_IP);
+            return false;
+        }
 #ifdef WIFI_TEST
         bool started = test_supplicant_ok ? true : supplicant_try(is5 ? "nl80211" : "nl80211,wext");
 #else
@@ -2567,17 +2584,16 @@ static bool ap_start_static(void)
             set_msg("Static AP: wpa_supplicant failed to start");
             return false;
         }
-#ifdef WIFI_TEST
-        bool ip_ok = test_static_ip_ok >= 0 ? test_static_ip_ok != 0
-                                           : apd_iface_set_static(&g_apd_ops);
-#else
-        bool ip_ok = apd_iface_set_static(&g_apd_ops);
-#endif
-        if (!ip_ok) {
-            g_ap_conf_active = false;
-            stop_wpa_supplicant();
-            set_msg("Static AP: cannot assign " AP_DHCP_IP);
-            return false;
+        /* The address was already assigned before the supplicant start (see above);
+         * re-adding it here is a no-op that keeps the "wlan0 is up" invariant. */
+        {
+            char ipnow[64] = "";
+            if (!wlan_ip(ipnow, sizeof(ipnow)) && !apd_iface_set_static(&g_apd_ops)) {
+                g_ap_conf_active = false;
+                stop_wpa_supplicant();
+                set_msg("Static AP: cannot assign " AP_DHCP_IP);
+                return false;
+            }
         }
         ap_wait_t w = ap_wait_ready(false, &p);
         if (w == AP_WAIT_READY) {
