@@ -4647,6 +4647,19 @@ static bool apply_mode_work(bool pair)
     if (g_cfg.mode == MODE_CLIENT) {
         bt_pair_stop();
         log_msg("apply: phase=supplicant_start (client)");
+        /* Our own 5 GHz AP prime takes the interface with "iw set type __ap", and
+         * the driver does not fall back to station on its own: after /ap/stop the
+         * unit stayed without any association (measured 2026-11-26, three times in
+         * a row) even though the supplicant was running and had the credentials.
+         * Put the station type back before the client stack starts; both commands
+         * are idempotent in station mode. */
+        {
+            char t[64] = "";
+            bool was_ap = iface_type_is_ap(t, sizeof(t));
+            if (was_ap) sh("iw dev wlan0 set type managed 2>/dev/null");
+            sh("ip link set wlan0 up 2>/dev/null");
+            if (was_ap) log_msg("client: interface was in AP type (%s); reset to managed", t);
+        }
         /* The AP's own address must not survive into client mode: "there is an
          * IPv4" then looks like a working station link and the static lease never
          * runs (2026-11-25: the test AP left 10.42.0.1/24 behind). */
