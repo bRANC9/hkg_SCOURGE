@@ -690,6 +690,7 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
     property int autoConfirmTimeout: 2000
     property int autoConfirmRetries: 0
     property bool manualConfirmPending: false
+    property int confirmSends: 0
 
     function autoAppRoot() {
         var p = root.parent
@@ -847,6 +848,12 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
         if (typeof root.isPressedConfirm !== "undefined")
             root.isPressedConfirm = true
         QML_Handler.qmlSendEvtKey(HMIEVENTS.KEY_EVT_CONFIRMSCREEN_BUTTON_CONFIRM_CLICKED)
+        // Re-check once if the screen is still there (see confirmAutoAccept).
+        if (root.confirmSends < 4) {
+            root.confirmSends++
+            autoConfirmTimer.interval = 1500
+            autoConfirmTimer.start()
+        }
     }
 
     function requestConfirmClick() {
@@ -870,8 +877,27 @@ STANDBY_CONFIRM_CODE = r"""    property bool autoConfirmCancelled: false
             root.sendConfirm()
             return
         }
-        if (!root.autoConfirmAllowed())
+        if (root.confirmSends > 0) {
+            // A confirm was already sent and this screen still exists: the engine
+            // dropped the key (FINDINGS 6 - the C++ handler is the authority).
+            // This object dies with the screen, so a live re-send only ever means
+            // "the disclaimer is still up". Bounded, then it stops.
+            root.sendConfirm()
             return
+        }
+        if (!root.autoConfirmAllowed()) {
+            // At 0 ms (a legal "immediate" config) or right at draw the model can
+            // still read driving/calling or not be ready, and the old code gave up
+            // silently. Retry on the documented 250 ms cadence instead.
+            if (root.autoConfirmRetries < 40) {
+                root.autoConfirmRetries++
+                autoConfirmTimer.interval = 250
+                autoConfirmTimer.start()
+                return
+            }
+            console.log("[tweaks] disclaimer: auto-accept abandoned (state gate never opened)")
+            return
+        }
         if (!root.confirmInputReady()) {
             if (root.autoConfirmRetries < 40) {
                 root.autoConfirmRetries++

@@ -129,6 +129,16 @@ valid cluster diagnostic and has been removed.
   `status=0` with an empty body - the WiFi page falls back to HTTP for the same
   reason. Before this chain a failed read logged `auto-accept off` and the
   disclaimer stayed manual, which is the symptom to look for in a boot log.
+- A `disclaimer_timeout_ms` of `0` is legal and means "fire now"
+  (`clamp_disclaimer_ms` rounds to 250 ms steps but keeps 0), and it is what the
+  owner's unit carried on 2026-11-26 (`/rw_data/tweaks/disclaimer_auto` = `1`,
+  `disclaimer_timeout_ms` = `0`). A single immediate attempt was therefore the
+  whole feature: if the state gate (`drivingRestriction`/`isCalling`) or
+  `enableBtn` was still closed at that instant, the old code returned without a
+  word and the disclaimer stayed up. The timer now retries every 250 ms for up to
+  10 s and logs `auto-accept abandoned (state gate never opened)` when it stops,
+  and a key the engine drops is re-sent up to 4 times, 1.5 s apart, while the
+  confirm screen is still alive.
 - `inter_show_window_fg()` also arms a 10 s watchdog
   (`QTimer::start(10000)` → `slotTimeoutDisableConfirmBtn()`); that slot only
   clears internal engine state, it does not touch the model flag.

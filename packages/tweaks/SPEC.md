@@ -183,6 +183,15 @@ Brightness is kept at `128:128:128`.
 - `main.qml` holds per-boot `disclaimerAutoCancelled`/`disclaimerAutoDone`
   state and a pass-through touch guard.
 - The confirm screen starts a 0–10 second timer (0.25 s steps, 0 = immediate).
+  `0` is a real value (`clamp_disclaimer_ms` keeps it and
+  `POST /set?disclaimer_timeout_ms=0` means "fire now"), so the patch cannot
+  assume the engine is ready at that instant: while the state gate
+  (`drivingRestriction`/`isCalling`) or `enableBtn` is still closed it retries
+  every 250 ms for up to 10 s and then logs
+  `auto-accept abandoned (state gate never opened)`. If the screen is still up
+  after a send, the key is re-sent at most 4 more times, 1.5 s apart - the QML
+  object is destroyed with the screen, so a live re-send only ever means the
+  disclaimer is still displayed.
   Its config is read in three steps: the daemon's
   `http://127.0.0.1:8091/status` (`disclaimer_auto`,
   `disclaimer_timeout_ms`), then `/rw_data/tweaks/disclaimer_auto` +
