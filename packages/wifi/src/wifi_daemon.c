@@ -208,6 +208,8 @@ static int g_ap_unready_gen = -1;
  * permission denied).  See tether_rejected_active(). */
 static bool g_tether_rejected;
 static int64_t g_tether_rejected_ms;
+static void ensure_wpa_conf(void);
+
 /* The static AP owns WPA_CONF while it runs: ensure_wpa_conf() must not
  * overwrite the mode=2 config with the client network list. */
 static bool g_ap_conf_active;
@@ -1392,6 +1394,11 @@ static bool parse_wifi_txt(const char *path)
         return false;
     }
 
+    /* Regenerate the supplicant's own config NOW: it is the file the association
+     * actually uses, and an import that only updates config.conf leaves the old key
+     * in there - the silent half of the 2026-11-26 WRONG_KEY loop. */
+    if (!g_ap_conf_active) ensure_wpa_conf();
+
     /* The client's fixed address travels with the credentials: written as plain
      * files, because config_save() rewrites config.conf from the struct and would
      * drop them (the same trap that made static_ip ineffective before).  dhcp_probe
@@ -1422,6 +1429,16 @@ static bool parse_wifi_txt(const char *path)
         if (read_file(CONFIG_PATH, saved, sizeof(saved)) > 0 && want[0])
             log_msg("import: key persisted %s (ssid=%s, %d byte key)", strstr(saved, want) ? "ok" : "MISMATCH",
                     g_cfg.ssid, (int)strlen(g_cfg.psk));
+        /* The supplicant's file is the one that decides the handshake: say whether it
+         * carries the same key (lengths only - never the secret). */
+        char conf[8192] = "";
+        if (read_file(WPA_CONF, conf, sizeof(conf)) > 0) {
+            bool same = strstr(conf, g_cfg.psk) != NULL;
+            log_msg("import: supplicant conf key %s (conf %d byte file, key %d bytes)",
+                    same ? "matches" : "DIFFERS", (int)strlen(conf), (int)strlen(g_cfg.psk));
+        } else {
+            log_msg("import: supplicant conf unreadable");
+        }
     }
 
     set_msg("imported WiFi config from %s (ssid=%s, %d network%s)",
